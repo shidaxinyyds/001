@@ -10,6 +10,26 @@ Pre-release work staged for the next tag.
 
 ---
 
+## [0.3.0-beta.6] - 2026-08-09
+
+修复 beta.5 中会导致「开箱即用」后端完全无法工作的若干缺陷。beta.5 的无障碍后端实际上无法注入任何触摸，本版修复。
+
+### Fixed
+- **无障碍手势 100% 失败**：`StrokeDescription` 会拒绝零长度路径（`Path has zero length`），而瞄准目标静止时起点与终点相同，导致每一次注入都抛异常。现在对退化路径做 1 像素补偿。
+- **手势相互抢占**：同一时刻只允许一个手势在飞行中，逐帧派发会让除首个之外的全部 `dispatchGesture` 返回 false。改为自时钟「手势泵」：在上一段的 `onCompleted` 回调中派发下一段，保证任意时刻只有一个手势。
+- **拖动被打断**：独立手势会在每帧之间抬起指针，游戏侧表现为连续点击而非按住拖动。改用 `continueStroke`（`willContinue = true`）保持指针按下，`releaseAim` 时才以非连续段收尾抬起。
+- **无障碍配置会破坏正常触摸**：`accessibility_service_config.xml` 误设了 `flagRequestTouchExplorationMode`，该标志会开启 TalkBack 式触摸浏览，使单击失效、整个屏幕无法正常操作。已移除该标志及无用的 `flagRetrieveInteractiveWindows` / `typeAllMask` 事件订阅。
+- **桥接标志时序丢失**：`nativeSetAccessibilityBridgeAvailable` 在 `TouchHelper` 尚未创建时被静默丢弃（`refreshAccessibilityState` 在 `onCreate` 即调用，而 `TouchHelper` 在 `nativeInit`/`nativeInitAimbot` 才创建），导致 `TouchHelper::init()` 必然失败。现在标志缓存在原生全局变量中，并在 `TouchHelper` 创建后统一下发。
+- **旧配置锁死后端**：`settings.bin` 位于 `/data/local/tmp/`，卸载重装仍保留，升级用户会继续使用 `touchBackend=1`（Shizuku）而进不到开箱即用路径。配置 magic 升级为 `0xE5BA1007` 使旧配置失效并回落到新默认值。
+- 手势注入不再经由 `MainActivity` 弱引用转发，改为直接调用服务实例，避免用户切入游戏后 Activity 被回收导致注入失效。
+- `setJniBridge` 现在会一并重置无障碍方法 ID 缓存。
+
+### Changed
+- 开箱即用路径不再回退到 Shizuku：偏好为无障碍且服务未开启时，直接引导开启无障碍（若设备恰好有 Root 则优先使用 Root 以降低延迟），不会把用户导向安装 Shizuku。
+- 无障碍服务描述与摘要改为中文。
+
+---
+
 ## [0.3.0-beta.5] - 2026-08-09
 
 方案 A：开箱即用的无障碍（AccessibilityService）输入后端。

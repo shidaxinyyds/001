@@ -401,8 +401,12 @@ void TouchHelper::setJniBridge(JavaVM* vm, JNIEnv* env, jobject activityInstance
     activityClassGlobal_ = static_cast<jclass>(env->NewGlobalRef(localClass));
     env->DeleteLocalRef(localClass);
 
+    // Cached method IDs belong to the previous class ref; drop them so they are
+    // resolved again against the new global ref.
     shizukuMoveMethod_ = nullptr;
     shizukuUpMethod_ = nullptr;
+    accessibilityMoveMethod_ = nullptr;
+    accessibilityUpMethod_ = nullptr;
 }
 
 void TouchHelper::setShizukuBridgeAvailable(bool available) {

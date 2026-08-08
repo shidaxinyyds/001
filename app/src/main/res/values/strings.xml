@@ -1,4 +1,5 @@
 <resources>
     <string name="app_name">AimBuddy</string>
-    <string name="accessibility_service_description">High-performance touch injection for AimBuddy.</string>
+    <string name="accessibility_service_description">开启后即可免 Root 使用瞄准辅助输入。AimBuddy 不会读取屏幕内容，仅用于发送触摸手势。</string>
+    <string name="accessibility_service_summary">免 Root 瞄准辅助输入</string>
 </resources>

@@ -1,13 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Gesture-injection-only accessibility service.
+
+    Deliberately minimal:
+      * No accessibilityEventTypes  -  the service never observes UI, so it must
+        not be woken for every event on the device (battery + latency).
+      * No flagRequestTouchExplorationMode  -  that flag turns on TalkBack-style
+        touch exploration, which makes single taps stop working and would break
+        normal screen interaction for the user.
+      * canRetrieveWindowContent=false  -  we never read screen content.
+      * canPerformGestures=true  -  this is the only capability we actually need
+        (AccessibilityService.dispatchGesture).
+-->
 <accessibility-service
     xmlns:android="http://schemas.android.com/apk/res/android"
     android:description="@string/accessibility_service_description"
-    android:accessibilityEventTypes="typeAllMask"
-    android:accessibilityFlags="flagRequestTouchExplorationMode|flagRetrieveInteractiveWindows"
+    android:summary="@string/accessibility_service_summary"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:notificationTimeout="0"
     android:canRetrieveWindowContent="false"
     android:canRequestTouchExplorationMode="false"
-    android:canPerformGestures="true"
-    android:settingsActivityName="com.aimbuddy.MainActivity"
-    android:summary="AimBuddy 瞄准辅助输入服务" />
+    android:canPerformGestures="true" />

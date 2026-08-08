@@ -68,7 +68,22 @@ namespace {
     std::unique_ptr<ESP::FrameBuffer> g_frameBuffer;
     std::unique_ptr<AimbotController> g_aimbot;
     std::unique_ptr<TouchHelper> g_touchHelper;
-    
+
+    // Bridge availability must outlive TouchHelper instances. Kotlin can report
+    // availability BEFORE g_touchHelper exists (refreshAccessibilityState runs
+    // in onCreate, TouchHelper is created in nativeInit/nativeInitAimbot).
+    // Without caching, the flag was silently dropped and TouchHelper::init()
+    // then failed for every non-root backend.
+    bool g_shizukuBridgeAvailable = false;
+    bool g_accessibilityBridgeAvailable = false;
+
+    // Push cached bridge flags into a freshly created TouchHelper.
+    void applyBridgeAvailability() {
+        if (!g_touchHelper) return;
+        g_touchHelper->setShizukuBridgeAvailable(g_shizukuBridgeAvailable);
+        g_touchHelper->setAccessibilityBridgeAvailable(g_accessibilityBridgeAvailable);
+    }
+
     // Threading
     std::unique_ptr<ESP::Thread> g_inferenceThread;
     std::atomic<bool> g_running{false};
@@ -436,6 +451,7 @@ Java_com_aimbuddy_MainActivity_nativeInit(JNIEnv* env, jobject thiz,
     g_touchHelper->setJniBridge(g_jvm, env, thiz);
     g_touchHelper->setBackend(g_settings.touchBackend == 2 ? TouchBackend::ACCESSIBILITY :
                               g_settings.touchBackend == 1 ? TouchBackend::SHIZUKU : TouchBackend::UINPUT);
+    applyBridgeAvailability();
     g_touchHelper->setScreenSize(screenWidth, screenHeight);
     
     // Create aimbot controller with touch helper
@@ -643,6 +659,7 @@ Java_com_aimbuddy_MainActivity_nativeInitAimbot(JNIEnv* env, jobject thiz) {
     g_touchHelper->setJniBridge(g_jvm, env, thiz);
     g_touchHelper->setBackend(g_settings.touchBackend == 2 ? TouchBackend::ACCESSIBILITY :
                               g_settings.touchBackend == 1 ? TouchBackend::SHIZUKU : TouchBackend::UINPUT);
+    applyBridgeAvailability();
     g_touchHelper->setScreenSize(g_screenWidth, g_screenHeight);
     
     // THIS is where we actually init the touch device (needs root)
@@ -713,15 +730,17 @@ void NotifyStreamerModeChanged(bool enabled) {
 
 JNIEXPORT void JNICALL
 Java_com_aimbuddy_MainActivity_nativeSetShizukuBridgeAvailable(JNIEnv* /* env */, jobject /* thiz */, jboolean available) {
+    g_shizukuBridgeAvailable = (available == JNI_TRUE);
     if (g_touchHelper) {
-        g_touchHelper->setShizukuBridgeAvailable(available == JNI_TRUE);
+        g_touchHelper->setShizukuBridgeAvailable(g_shizukuBridgeAvailable);
     }
 }
 
 JNIEXPORT void JNICALL
 Java_com_aimbuddy_MainActivity_nativeSetAccessibilityBridgeAvailable(JNIEnv* /* env */, jobject /* thiz */, jboolean available) {
+    g_accessibilityBridgeAvailable = (available == JNI_TRUE);
     if (g_touchHelper) {
-        g_touchHelper->setAccessibilityBridgeAvailable(available == JNI_TRUE);
+        g_touchHelper->setAccessibilityBridgeAvailable(g_accessibilityBridgeAvailable);
     }
 }
 

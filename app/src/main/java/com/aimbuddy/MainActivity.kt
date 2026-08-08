@@ -188,16 +188,17 @@ class MainActivity : AppCompatActivity() {
             return activity.injectShizukuAimUp()
         }
 
+        // Accessibility injection goes straight to the service, NOT through the
+        // Activity. The user will be inside a game when aiming, so the Activity
+        // may be stopped or collected; the service is what stays alive.
         @JvmStatic
         fun nativeInjectAccessibilityAimMove(screenX: Float, screenY: Float, isFirst: Boolean): Boolean {
-            val activity = activityRef?.get() ?: return false
-            return activity.injectAccessibilityAimMove(screenX, screenY, isFirst)
+            return AimAccessibilityService.aimMove(screenX, screenY, isFirst)
         }
 
         @JvmStatic
         fun nativeInjectAccessibilityAimUp(): Boolean {
-            val activity = activityRef?.get() ?: return false
-            return activity.injectAccessibilityAimUp()
+            return AimAccessibilityService.aimUp()
         }
 
         /**
@@ -1213,7 +1214,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshAccessibilityState() {
-        val available = isAccessibilityServiceEnabled()
+        // Settings.Secure is the source of truth, but a live bound service also
+        // counts (covers OEMs that report the enabled list differently).
+        val available = isAccessibilityServiceEnabled() || AimAccessibilityService.isReady()
         accessibilityAvailable.set(available)
         nativeSetAccessibilityBridgeAvailable(available)
         ImGuiGLSurface.nativeSetAccessibilityAvailable(available)
@@ -1229,10 +1232,13 @@ class MainActivity : AppCompatActivity() {
         val a11yReady = accessibilityAvailable.get()
 
         return when (preferredBackend) {
-            0 -> if (rootReady) 0 else if (shizukuReady) 1 else if (a11yReady) 2 else 0
-            1 -> if (shizukuReady) 1 else if (rootReady) 0 else if (a11yReady) 2 else 1
-            2 -> if (a11yReady) 2 else if (rootReady) 0 else if (shizukuReady) 1 else 2
-            else -> 0
+            0 -> if (rootReady) 0 else if (a11yReady) 2 else if (shizukuReady) 1 else 0
+            1 -> if (shizukuReady) 1 else if (a11yReady) 2 else if (rootReady) 0 else 1
+            // Out-of-box path: never silently divert the user into installing
+            // Shizuku. Root is fine if it happens to be there (lower latency),
+            // otherwise stay on accessibility and let the enable-dialog guide.
+            2 -> if (a11yReady) 2 else if (rootReady) 0 else 2
+            else -> 2
         }
     }
 
@@ -1284,16 +1290,6 @@ class MainActivity : AppCompatActivity() {
     private fun injectShizukuAimUp(): Boolean {
         val injector = shizukuInjector ?: return false
         return injector.releaseAim()
-    }
-
-    private fun injectAccessibilityAimMove(screenX: Float, screenY: Float, isFirst: Boolean): Boolean {
-        val svc = AimAccessibilityService.instance ?: return false
-        return svc.dispatchAim(screenX, screenY, isFirst)
-    }
-
-    private fun injectAccessibilityAimUp(): Boolean {
-        val svc = AimAccessibilityService.instance ?: return false
-        return svc.releaseAim()
     }
 
     private fun setupOverlay() {
