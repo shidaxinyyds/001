@@ -434,7 +434,8 @@ Java_com_aimbuddy_MainActivity_nativeInit(JNIEnv* env, jobject thiz,
     // Touch init happens in nativeInitAimbot() AFTER root permissions are set
     g_touchHelper = std::make_unique<TouchHelper>();
     g_touchHelper->setJniBridge(g_jvm, env, thiz);
-    g_touchHelper->setBackend(g_settings.touchBackend == 1 ? TouchBackend::SHIZUKU : TouchBackend::UINPUT);
+    g_touchHelper->setBackend(g_settings.touchBackend == 2 ? TouchBackend::ACCESSIBILITY :
+                              g_settings.touchBackend == 1 ? TouchBackend::SHIZUKU : TouchBackend::UINPUT);
     g_touchHelper->setScreenSize(screenWidth, screenHeight);
     
     // Create aimbot controller with touch helper
@@ -640,7 +641,8 @@ Java_com_aimbuddy_MainActivity_nativeInitAimbot(JNIEnv* env, jobject thiz) {
     }
 
     g_touchHelper->setJniBridge(g_jvm, env, thiz);
-    g_touchHelper->setBackend(g_settings.touchBackend == 1 ? TouchBackend::SHIZUKU : TouchBackend::UINPUT);
+    g_touchHelper->setBackend(g_settings.touchBackend == 2 ? TouchBackend::ACCESSIBILITY :
+                              g_settings.touchBackend == 1 ? TouchBackend::SHIZUKU : TouchBackend::UINPUT);
     g_touchHelper->setScreenSize(g_screenWidth, g_screenHeight);
     
     // THIS is where we actually init the touch device (needs root)
@@ -667,12 +669,13 @@ Java_com_aimbuddy_MainActivity_nativeInitAimbot(JNIEnv* env, jobject thiz) {
 
 JNIEXPORT void JNICALL
 Java_com_aimbuddy_MainActivity_nativeSetTouchBackend(JNIEnv* /* env */, jobject /* thiz */, jint backend) {
-    const int clamped = std::max(0, std::min(1, static_cast<int>(backend)));
+    const int clamped = std::max(0, std::min(2, static_cast<int>(backend)));
     g_settings.touchBackend = clamped;
     g_settings.validate();
 
     if (g_touchHelper) {
-        g_touchHelper->setBackend(clamped == 1 ? TouchBackend::SHIZUKU : TouchBackend::UINPUT);
+        g_touchHelper->setBackend(clamped == 2 ? TouchBackend::ACCESSIBILITY :
+                                 (clamped == 1 ? TouchBackend::SHIZUKU : TouchBackend::UINPUT));
     }
     LOGI("Touch backend set to %d", clamped);
 }
@@ -712,6 +715,13 @@ JNIEXPORT void JNICALL
 Java_com_aimbuddy_MainActivity_nativeSetShizukuBridgeAvailable(JNIEnv* /* env */, jobject /* thiz */, jboolean available) {
     if (g_touchHelper) {
         g_touchHelper->setShizukuBridgeAvailable(available == JNI_TRUE);
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_aimbuddy_MainActivity_nativeSetAccessibilityBridgeAvailable(JNIEnv* /* env */, jobject /* thiz */, jboolean available) {
+    if (g_touchHelper) {
+        g_touchHelper->setAccessibilityBridgeAvailable(available == JNI_TRUE);
     }
 }
 

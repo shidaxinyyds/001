@@ -6,6 +6,10 @@
 enum class TouchBackend : int {
     UINPUT = 0,
     SHIZUKU = 1,
+    // AccessibilityService-based injection. No root, no Shizuku: the user only
+    // needs to enable AimBuddy in system Accessibility settings once. This is
+    // the out-of-box ("开箱即用") path.
+    ACCESSIBILITY = 2,
 };
 
 /**
@@ -42,6 +46,11 @@ public:
     void setShizukuBridgeAvailable(bool available);
 
     /**
+     * Report whether Kotlin AccessibilityService bridge is ready.
+     */
+    void setAccessibilityBridgeAvailable(bool available);
+
+    /**
      * Set screen dimensions for coordinate scaling
      */
     void setScreenSize(int width, int height);
@@ -72,20 +81,28 @@ private:
     TouchBackend backend_;
     bool initialized_;
     bool shizukuBridgeAvailable_;
+    bool accessibilityBridgeAvailable_;
 
     JavaVM* javaVm_;
     jclass activityClassGlobal_;
     jmethodID shizukuMoveMethod_;
     jmethodID shizukuUpMethod_;
+    jmethodID accessibilityMoveMethod_;
+    jmethodID accessibilityUpMethod_;
 
     bool initUinput();
     bool initShizuku();
+    bool initAccessibility();
     void shutdownUinput();
     void releaseActiveTouch();
 
     bool callShizukuMove(float x, float y, bool isFirst);
     bool callShizukuUp();
     bool ensureJniMethods(JNIEnv* env);
+
+    bool callAccessibilityMove(float x, float y, bool isFirst);
+    bool callAccessibilityUp();
+    bool ensureAccessibilityJniMethods(JNIEnv* env);
 };
 
 #endif // TOUCH_HELPER_H

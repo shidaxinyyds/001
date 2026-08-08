@@ -477,7 +477,13 @@ void AimbotController::sanitizeMovement(float dx, float dy, float distance,
 }
 
 void AimbotController::applyMovement(float moveX, float moveY, const UnifiedSettings& settings) {
-    m_touch->setBackend(settings.touchBackend == 1 ? TouchBackend::SHIZUKU : TouchBackend::UINPUT);
+    if (settings.touchBackend == 2) {
+        m_touch->setBackend(TouchBackend::ACCESSIBILITY);
+    } else if (settings.touchBackend == 1) {
+        m_touch->setBackend(TouchBackend::SHIZUKU);
+    } else {
+        m_touch->setBackend(TouchBackend::UINPUT);
+    }
 
     // Heavier smoothing when already locked  -  the proportional/derivative
     // chain already produces a controlled output, so blending in some of the

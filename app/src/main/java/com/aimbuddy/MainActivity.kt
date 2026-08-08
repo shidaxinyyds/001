@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.content.ComponentName
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -22,6 +23,7 @@ import android.os.Looper
 import android.provider.Settings
 import android.provider.OpenableColumns
 import android.util.DisplayMetrics
+import android.text.TextUtils
 import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
@@ -155,6 +157,7 @@ class MainActivity : AppCompatActivity() {
         private const val REQUEST_MEDIA_PROJECTION = 1001
         private const val REQUEST_OVERLAY_PERMISSION = 1002
         private const val REQUEST_SHIZUKU_PERMISSION = 2001
+        private const val REQUEST_ACCESSIBILITY_SETTINGS = 3001
 
         // Capture resolution (720p for optimal SD888 performance)
         private const val CAPTURE_WIDTH = 1280
@@ -183,6 +186,18 @@ class MainActivity : AppCompatActivity() {
         fun nativeInjectShizukuAimUp(): Boolean {
             val activity = activityRef?.get() ?: return false
             return activity.injectShizukuAimUp()
+        }
+
+        @JvmStatic
+        fun nativeInjectAccessibilityAimMove(screenX: Float, screenY: Float, isFirst: Boolean): Boolean {
+            val activity = activityRef?.get() ?: return false
+            return activity.injectAccessibilityAimMove(screenX, screenY, isFirst)
+        }
+
+        @JvmStatic
+        fun nativeInjectAccessibilityAimUp(): Boolean {
+            val activity = activityRef?.get() ?: return false
+            return activity.injectAccessibilityAimUp()
         }
 
         /**
@@ -221,8 +236,10 @@ class MainActivity : AppCompatActivity() {
     private val rootCheckInProgress = AtomicBoolean(false)
     private val rootAvailable = AtomicBoolean(false)
     private val shizukuAvailable = AtomicBoolean(false)
+    private val accessibilityAvailable = AtomicBoolean(false)
     private var pendingStartAfterRoot = false
     private var pendingStartAfterShizuku = false
+    private var pendingStartAfterAccessibility = false
     private var pendingShizukuPermissionRequest = false
     private var shizukuWaitStartedAt = 0L
     private var shizukuInjector: ShizukuInputInjector? = null
@@ -323,6 +340,7 @@ class MainActivity : AppCompatActivity() {
     private external fun nativeSetTouchBackend(backend: Int)
     private external fun nativeGetTouchBackend(): Int
     private external fun nativeSetShizukuBridgeAvailable(available: Boolean)
+    private external fun nativeSetAccessibilityBridgeAvailable(available: Boolean)
 
     private val importParamLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) {
@@ -457,6 +475,7 @@ class MainActivity : AppCompatActivity() {
             setStatus("Status: Ready")
             ImGuiGLSurface.nativeSetRootAvailable(false)
             refreshShizukuState()
+            refreshAccessibilityState()
         }
 
         Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
@@ -480,6 +499,18 @@ class MainActivity : AppCompatActivity() {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
             enableImmersiveMode()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Re-evaluate backend availability after returning from system settings
+        // (e.g. the user just enabled the accessibility service).
+        refreshShizukuState()
+        refreshAccessibilityState()
+        if (pendingStartAfterAccessibility && accessibilityAvailable.get()) {
+            pendingStartAfterAccessibility = false
+            requestTouchBackendThenProjection()
         }
     }
     
@@ -533,15 +564,36 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        requestRootThenMediaProjection()
+        requestTouchBackendThenProjection()
+    }
+
+    /**
+     * Top-level start router. Resolves the best available input backend from the
+     * user's preference (persisted touchBackend) and routes to the matching
+     * setup path. Backend 2 (AccessibilityService) is the out-of-box default.
+     */
+    private fun requestTouchBackendThenProjection() {
+        val preferred = nativeGetTouchBackend().coerceIn(0, 2)
+        val effective = resolveEffectiveTouchBackend(preferred)
+        nativeSetTouchBackend(effective)
+        when (effective) {
+            0 -> requestRootThenMediaProjection()
+            1 -> requestShizukuThenMediaProjection()
+            2 -> requestAccessibilityThenMediaProjection()
+            else -> requestRootThenMediaProjection()
+        }
     }
 
     private fun requestRootThenMediaProjection() {
-        val backend = resolveEffectiveTouchBackend(nativeGetTouchBackend().coerceIn(0, 1))
+        val backend = resolveEffectiveTouchBackend(nativeGetTouchBackend().coerceIn(0, 2))
         nativeSetTouchBackend(backend)
 
         if (backend == 1) {
             requestShizukuThenMediaProjection()
+            return
+        }
+        if (backend == 2) {
+            requestAccessibilityThenMediaProjection()
             return
         }
 
@@ -562,12 +614,72 @@ class MainActivity : AppCompatActivity() {
                 requestMediaProjectionPermission()
             } else {
                 pendingStartAfterRoot = false
-                nativeSetTouchBackend(1)
-                showAppToast("Root 不可用，已切换至 Shizuku 免 Root 输入。", false)
-                setStatus("Status: Using Shizuku Backend")
-                requestShizukuThenMediaProjection()
+                // Fall back to a non-root backend if one is available.
+                if (shizukuAvailable.get()) {
+                    nativeSetTouchBackend(1)
+                    showAppToast("Root 不可用，已切换至 Shizuku 免 Root 输入。", false)
+                    setStatus("Status: Using Shizuku Backend")
+                    requestShizukuThenMediaProjection()
+                } else if (accessibilityAvailable.get()) {
+                    nativeSetTouchBackend(2)
+                    showAppToast("Root 不可用，已切换至无障碍输入。", false)
+                    setStatus("Status: Using Accessibility Backend")
+                    requestAccessibilityThenMediaProjection()
+                } else {
+                    setStatus("Status: Ready")
+                    showAppToast("Root 不可用；可在系统「无障碍」设置中开启 AimBuddy 实现免 Root 输入。", true)
+                }
             }
         }
+    }
+
+    /**
+     * Out-of-box (no root, no Shizuku) start path. If the accessibility service
+     * is already enabled by the user, init the aimbot and continue to screen
+     * capture. Otherwise prompt the user to enable it in system settings.
+     */
+    private fun requestAccessibilityThenMediaProjection() {
+        if (!accessibilityAvailable.get()) {
+            showAccessibilityEnableDialog()
+            return
+        }
+
+        setStatus("Status: Using Accessibility Backend")
+        nativeSetAccessibilityBridgeAvailable(true)
+        if (statusTextState != "Status: Init Failed") {
+            nativeInitAimbot()
+        }
+        requestMediaProjectionPermission()
+    }
+
+    private fun showAccessibilityEnableDialog() {
+        setStatus("Status: Accessibility Not Enabled")
+        AlertDialog.Builder(this)
+            .setTitle("开启无障碍服务")
+            .setMessage(
+                "AimBuddy 的免 Root 输入需要「无障碍」服务权限。\n\n" +
+                    "1) 点击「打开设置」\n" +
+                    "2) 在已安装应用/已下载应用中找到 AimBuddy\n" +
+                    "3) 开启「无障碍」服务开关并返回\n" +
+                    "4) 再次点击「启动服务」即可开箱即用"
+            )
+            .setPositiveButton("打开设置") { _, _ ->
+                pendingStartAfterAccessibility = true
+                try {
+                    startActivityForResult(
+                        Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS),
+                        REQUEST_ACCESSIBILITY_SETTINGS
+                    )
+                } catch (e: Throwable) {
+                    showAppToast("无法打开无障碍设置：${e.message}", true)
+                }
+            }
+            .setNegativeButton("取消", null)
+            .setNeutralButton("仅显示 ESP") { _, _ ->
+                requestMediaProjectionPermission()
+            }
+            .setCancelable(true)
+            .show()
     }
 
     private fun requestShizukuThenMediaProjection() {
@@ -577,25 +689,31 @@ class MainActivity : AppCompatActivity() {
         pendingStartAfterShizuku = true
         setStatus("Status: Waiting for Shizuku Permission")
 
-        refreshShizukuState()
-        if (!Shizuku.pingBinder()) {
-            if (isRootLikelyAvailable()) {
+    refreshShizukuState()
+    if (!Shizuku.pingBinder()) {
+        if (isRootLikelyAvailable()) {
+            pendingStartAfterShizuku = false
+            nativeSetTouchBackend(0)
+            showAppToast("Shizuku 不可用，已切换至 Root uinput 输入。", false)
+            setStatus("Status: Using Root Backend")
+            requestRootThenMediaProjection()
+        } else if (accessibilityAvailable.get()) {
+            pendingStartAfterShizuku = false
+            nativeSetTouchBackend(2)
+            showAppToast("Shizuku 不可用，已切换至无障碍输入。", false)
+            setStatus("Status: Using Accessibility Backend")
+            requestAccessibilityThenMediaProjection()
+        } else {
+            showAppToast("正在等待 Shizuku 连接……", false)
+            val waitedMs = System.currentTimeMillis() - shizukuWaitStartedAt
+            if (waitedMs > 4000) {
                 pendingStartAfterShizuku = false
-                nativeSetTouchBackend(0)
-                showAppToast("Shizuku 不可用，已切换至 Root uinput 输入。", false)
-                setStatus("Status: Using Root Backend")
-                requestRootThenMediaProjection()
-            } else {
-                showAppToast("正在等待 Shizuku 连接……", false)
-                val waitedMs = System.currentTimeMillis() - shizukuWaitStartedAt
-                if (waitedMs > 4000) {
-                    pendingStartAfterShizuku = false
-                    setStatus("Status: Shizuku Not Connected")
-                    showShizukuConnectionHelpDialog()
-                }
+                setStatus("Status: Shizuku Not Connected")
+                showShizukuConnectionHelpDialog()
             }
-            return
         }
+        return
+    }
 
         if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
             shizukuAvailable.set(true)
@@ -681,7 +799,7 @@ class MainActivity : AppCompatActivity() {
             REQUEST_OVERLAY_PERMISSION -> {
                 if (Settings.canDrawOverlays(this)) {
                     Log.i(TAG, "Overlay permission granted")
-                    requestRootThenMediaProjection()
+                    requestTouchBackendThenProjection()
                 } else {
                     Log.w(TAG, "Overlay permission denied")
                     showAppToast("需要悬浮窗权限", true)
@@ -1078,6 +1196,29 @@ class MainActivity : AppCompatActivity() {
         ImGuiGLSurface.nativeSetShizukuAvailable(available)
     }
 
+    private fun isAccessibilityServiceEnabled(): Boolean {
+        val expected = ComponentName(this, AimAccessibilityService::class.java)
+        val enabledServices = Settings.Secure.getString(
+            contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ) ?: return false
+        val splitter = TextUtils.SimpleStringSplitter(':')
+        splitter.setString(enabledServices)
+        for (entry in splitter) {
+            if (entry.equals(expected.flattenToString(), ignoreCase = true)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun refreshAccessibilityState() {
+        val available = isAccessibilityServiceEnabled()
+        accessibilityAvailable.set(available)
+        nativeSetAccessibilityBridgeAvailable(available)
+        ImGuiGLSurface.nativeSetAccessibilityAvailable(available)
+    }
+
     private fun isRootLikelyAvailable(): Boolean {
         return rootAvailable.get() || RootUtils.isRootAvailable()
     }
@@ -1085,11 +1226,13 @@ class MainActivity : AppCompatActivity() {
     private fun resolveEffectiveTouchBackend(preferredBackend: Int): Int {
         val rootReady = isRootLikelyAvailable()
         val shizukuReady = shizukuAvailable.get()
+        val a11yReady = accessibilityAvailable.get()
 
         return when (preferredBackend) {
-            0 -> if (rootReady) 0 else if (shizukuReady) 1 else 0
-            1 -> if (shizukuReady) 1 else if (rootReady) 0 else 1
-            else -> preferredBackend.coerceIn(0, 1)
+            0 -> if (rootReady) 0 else if (shizukuReady) 1 else if (a11yReady) 2 else 0
+            1 -> if (shizukuReady) 1 else if (rootReady) 0 else if (a11yReady) 2 else 1
+            2 -> if (a11yReady) 2 else if (rootReady) 0 else if (shizukuReady) 1 else 2
+            else -> 0
         }
     }
 
@@ -1141,6 +1284,16 @@ class MainActivity : AppCompatActivity() {
     private fun injectShizukuAimUp(): Boolean {
         val injector = shizukuInjector ?: return false
         return injector.releaseAim()
+    }
+
+    private fun injectAccessibilityAimMove(screenX: Float, screenY: Float, isFirst: Boolean): Boolean {
+        val svc = AimAccessibilityService.instance ?: return false
+        return svc.dispatchAim(screenX, screenY, isFirst)
+    }
+
+    private fun injectAccessibilityAimUp(): Boolean {
+        val svc = AimAccessibilityService.instance ?: return false
+        return svc.releaseAim()
     }
 
     private fun setupOverlay() {
@@ -1494,7 +1647,7 @@ class MainActivity : AppCompatActivity() {
                             modifier = Modifier.padding(bottom = 6.dp)
                         )
 
-                        BackendChips(rootReady = rootReady, shizukuReady = shizukuReady)
+                        BackendChips(rootReady = rootReady, shizukuReady = shizukuReady, a11yReady = accessibilityAvailable.get())
 
                         Spacer(Modifier.height(14.dp))
 
@@ -1608,7 +1761,9 @@ class MainActivity : AppCompatActivity() {
             "Using Shizuku Backend" -> "Shizuku 后端已启用"
             "Waiting for Shizuku Permission" -> "正在等待 Shizuku 权限"
             "Using Root Backend" -> "Root 后端已启用"
+            "Using Accessibility Backend" -> "无障碍后端已启用"
             "Shizuku Not Connected" -> "Shizuku 未连接"
+            "Accessibility Not Enabled" -> "无障碍服务未开启"
             "Waiting for Screen Capture Permission" -> "正在等待屏幕采集权限"
             "Starting" -> "正在启动服务"
             "Stopping" -> "正在停止服务"
@@ -1628,7 +1783,9 @@ class MainActivity : AppCompatActivity() {
             "Using Shizuku Backend" -> "合成触摸事件经由 Shizuku 包装转发。"
             "Waiting for Shizuku Permission" -> "请在提示时授权 Shizuku 管理器。"
             "Using Root Backend" -> "合成触摸事件直接注入到 /dev/uinput。"
+            "Using Accessibility Backend" -> "合成触摸事件由系统无障碍服务注入，无需 Root。"
             "Shizuku Not Connected" -> "请在 Shizuku 管理应用中启动服务。"
+            "Accessibility Not Enabled" -> "请在系统「无障碍」设置中开启 AimBuddy 服务。"
             "Waiting for Screen Capture Permission" -> "请在弹窗中确认屏幕投影权限。"
             "Starting" -> "正在创建虚拟设备并启动采集线程……"
             "Stopping" -> "正在释放图形 Surface 并停止后台任务……"
@@ -1777,7 +1934,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     @Composable
-    private fun BackendChips(rootReady: Boolean, shizukuReady: Boolean) {
+    private fun BackendChips(rootReady: Boolean, shizukuReady: Boolean, a11yReady: Boolean) {
         Row(
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically
@@ -1785,6 +1942,8 @@ class MainActivity : AppCompatActivity() {
             BackendChip(label = "Root", ready = rootReady)
             Spacer(Modifier.width(12.dp))
             BackendChip(label = "Shizuku", ready = shizukuReady)
+            Spacer(Modifier.width(12.dp))
+            BackendChip(label = "无障碍", ready = a11yReady)
         }
     }
 

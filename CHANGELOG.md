@@ -10,6 +10,26 @@ Pre-release work staged for the next tag.
 
 ---
 
+## [0.3.0-beta.5] - 2026-08-09
+
+方案 A：开箱即用的无障碍（AccessibilityService）输入后端。
+
+### Added
+- 第三种触摸输入后端 `ACCESSIBILITY`（值 2）：基于系统无障碍服务的 `dispatchGesture` 注入合成触摸，无需 Root、无需 Shizuku，开启「无障碍」服务即可使用，实现开箱即用。
+- 新增 `AimAccessibilityService`（`AccessibilityService` 子类）与 `res/xml/accessibility_service_config.xml`，并在 `AndroidManifest.xml` 中声明并申请 `BIND_ACCESSIBILITY_SERVICE` 权限。
+- 原生层 `TouchHelper` 增加 `ACCESSIBILITY` 后端分支与 JNI 桥接（`nativeInjectAccessibilityAimMove` / `nativeInjectAccessibilityAimUp` / `nativeSetAccessibilityBridgeAvailable`）。
+- 启动流程新增顶层路由 `requestTouchBackendThenProjection`：按用户偏好解析可用后端（Root / Shizuku / 无障碍）并自动回退；无障碍路径在未开启时弹出引导对话框并跳转到系统无障碍设置。
+- 原生菜单「触摸后端」新增第三项「无障碍服务（免 Root）」，并补充对应状态与提示文案（i18n）。
+- 启动器新增「无障碍」后端状态指示芯片，状态栏补充无障碍相关文案。
+
+### Changed
+- 默认输入后端改为 `2`（无障碍），新安装即走开箱即用路径；已保存的旧配置（值 0/1）保持不变。
+- `aimbot_controller` / `esp_jni` 的后端映射扩展支持值 2；`UnifiedSettings.touchBackend` 校验上限同步调整为 2。
+
+### Notes
+- `dispatchGesture` 每帧重发手势（合成指针从上一坐标移动到目标坐标并短暂停留），与真实手指并行工作，游戏仍可正常点击/滑动。
+- 无障碍手势按屏幕像素坐标注入，与原 Shizuku/uinput 后端坐标系一致。
+
 ## [0.3.0-beta.4] - 2026-08-09
 
 Touch passthrough hardening, residual-English cleanup, and ESP box resize.

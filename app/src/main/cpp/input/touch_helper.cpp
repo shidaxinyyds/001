@@ -355,10 +355,13 @@ TouchHelper::TouchHelper()
     : backend_(TouchBackend::UINPUT)
     , initialized_(false)
     , shizukuBridgeAvailable_(false)
+    , accessibilityBridgeAvailable_(false)
     , javaVm_(nullptr)
     , activityClassGlobal_(nullptr)
     , shizukuMoveMethod_(nullptr)
-    , shizukuUpMethod_(nullptr) {}
+    , shizukuUpMethod_(nullptr)
+    , accessibilityMoveMethod_(nullptr)
+    , accessibilityUpMethod_(nullptr) {}
 
 TouchHelper::~TouchHelper() {
     if (javaVm_ && activityClassGlobal_) {
@@ -409,6 +412,13 @@ void TouchHelper::setShizukuBridgeAvailable(bool available) {
     }
 }
 
+void TouchHelper::setAccessibilityBridgeAvailable(bool available) {
+    accessibilityBridgeAvailable_ = available;
+    if (!available && backend_ == TouchBackend::ACCESSIBILITY) {
+        shutdown();
+    }
+}
+
 bool TouchHelper::init() {
     if (initialized_) {
         return true;
@@ -416,6 +426,11 @@ bool TouchHelper::init() {
 
     if (backend_ == TouchBackend::SHIZUKU) {
         initialized_ = initShizuku();
+        return initialized_;
+    }
+
+    if (backend_ == TouchBackend::ACCESSIBILITY) {
+        initialized_ = initAccessibility();
         return initialized_;
     }
 
@@ -432,6 +447,10 @@ bool TouchHelper::initShizuku() {
     return shizukuBridgeAvailable_;
 }
 
+bool TouchHelper::initAccessibility() {
+    return accessibilityBridgeAvailable_;
+}
+
 void TouchHelper::releaseActiveTouch() {
     if (!initialized_) {
         return;
@@ -439,6 +458,11 @@ void TouchHelper::releaseActiveTouch() {
 
     if (backend_ == TouchBackend::SHIZUKU) {
         callShizukuUp();
+        return;
+    }
+
+    if (backend_ == TouchBackend::ACCESSIBILITY) {
+        callAccessibilityUp();
         return;
     }
 
@@ -461,6 +485,14 @@ void TouchHelper::touchDown(int slot, float x, float y) {
         }
         return;
     }
+
+    if (backend_ == TouchBackend::ACCESSIBILITY) {
+        if (!callAccessibilityMove(x, y, true)) {
+            initialized_ = false;
+        }
+        return;
+    }
+
     sendTouchDownOrMove(static_cast<int>(x), static_cast<int>(y), true);
 }
 
@@ -476,6 +508,14 @@ void TouchHelper::touchMove(int slot, float x, float y) {
         }
         return;
     }
+
+    if (backend_ == TouchBackend::ACCESSIBILITY) {
+        if (!callAccessibilityMove(x, y, false)) {
+            initialized_ = false;
+        }
+        return;
+    }
+
     sendTouchDownOrMove(static_cast<int>(x), static_cast<int>(y), false);
 }
 
@@ -491,6 +531,14 @@ void TouchHelper::touchUp(int slot) {
         }
         return;
     }
+
+    if (backend_ == TouchBackend::ACCESSIBILITY) {
+        if (!callAccessibilityUp()) {
+            initialized_ = false;
+        }
+        return;
+    }
+
     sendTouchUp();
 }
 
@@ -583,6 +631,93 @@ bool TouchHelper::callShizukuUp() {
     bool ok = false;
     if (ensureJniMethods(env)) {
         const jboolean result = env->CallStaticBooleanMethod(activityClassGlobal_, shizukuUpMethod_);
+        ok = (result == JNI_TRUE) && !env->ExceptionCheck();
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
+
+    if (attached) {
+        javaVm_->DetachCurrentThread();
+    }
+    return ok;
+}
+
+bool TouchHelper::ensureAccessibilityJniMethods(JNIEnv* env) {
+    if (!env || !activityClassGlobal_) {
+        return false;
+    }
+
+    if (!accessibilityMoveMethod_) {
+        accessibilityMoveMethod_ = env->GetStaticMethodID(
+            activityClassGlobal_,
+            "nativeInjectAccessibilityAimMove",
+            "(FFZ)Z"
+        );
+    }
+    if (!accessibilityUpMethod_) {
+        accessibilityUpMethod_ = env->GetStaticMethodID(
+            activityClassGlobal_,
+            "nativeInjectAccessibilityAimUp",
+            "()Z"
+        );
+    }
+
+    return accessibilityMoveMethod_ && accessibilityUpMethod_;
+}
+
+bool TouchHelper::callAccessibilityMove(float x, float y, bool isFirst) {
+    if (!javaVm_ || !accessibilityBridgeAvailable_) {
+        return false;
+    }
+
+    JNIEnv* env = nullptr;
+    bool attached = false;
+    if (javaVm_->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+        if (javaVm_->AttachCurrentThread(&env, nullptr) != JNI_OK) {
+            return false;
+        }
+        attached = true;
+    }
+
+    bool ok = false;
+    if (ensureAccessibilityJniMethods(env)) {
+        const jboolean result = env->CallStaticBooleanMethod(
+            activityClassGlobal_,
+            accessibilityMoveMethod_,
+            static_cast<jfloat>(x),
+            static_cast<jfloat>(y),
+            static_cast<jboolean>(isFirst)
+        );
+        ok = (result == JNI_TRUE) && !env->ExceptionCheck();
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
+
+    if (attached) {
+        javaVm_->DetachCurrentThread();
+    }
+    return ok;
+}
+
+bool TouchHelper::callAccessibilityUp() {
+    if (!javaVm_ || !accessibilityBridgeAvailable_) {
+        return false;
+    }
+
+    JNIEnv* env = nullptr;
+    bool attached = false;
+    if (javaVm_->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+        if (javaVm_->AttachCurrentThread(&env, nullptr) != JNI_OK) {
+            return false;
+        }
+        attached = true;
+    }
+
+    bool ok = false;
+    if (ensureAccessibilityJniMethods(env)) {
+        const jboolean result = env->CallStaticBooleanMethod(activityClassGlobal_, accessibilityUpMethod_);
         ok = (result == JNI_TRUE) && !env->ExceptionCheck();
         if (env->ExceptionCheck()) {
             env->ExceptionClear();

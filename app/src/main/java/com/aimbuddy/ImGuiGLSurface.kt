@@ -61,6 +61,9 @@ class ImGuiGLSurface @JvmOverloads constructor(
 
         @JvmStatic
         external fun nativeSetShizukuAvailable(available: Boolean)
+
+        @JvmStatic
+        external fun nativeSetAccessibilityAvailable(available: Boolean)
     }
 
     private var screenWidth = 0

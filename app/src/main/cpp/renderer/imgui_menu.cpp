@@ -53,6 +53,7 @@ static int g_screenHeight = 0;
 static bool g_menuVisible = false;
 static std::atomic<bool> g_rootAvailable{false};  // Track root status
 static std::atomic<bool> g_shizukuAvailable{false};
+static std::atomic<bool> g_accessibilityAvailable{false};
 
 // Icon position synced from Kotlin layer (existing SVG icon)
 static ImVec2 g_iconPos = ImVec2(60.0f, 200.0f);  // Initial default
@@ -777,25 +778,31 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
 
                     if (ImGui::BeginTabItem(T(Key::TabAim))) {
                         int touchBackend = g_settings.touchBackend;
-                        const char* touchBackends[] = { "uinput（需 Root）", "Shizuku（免 Root）" };
-                        if (ImGui::Combo(T(Key::AimTouchBackend), &touchBackend, touchBackends, 2)) {
+                        const char* touchBackends[] = { "uinput（需 Root）", "Shizuku（免 Root）", "无障碍服务（免 Root）" };
+                        if (ImGui::Combo(T(Key::AimTouchBackend), &touchBackend, touchBackends, 3)) {
                             g_settings.touchBackend = touchBackend;
                             settingsDirty = true;
                         }
                         if (touchBackend == 0) {
                             ImGui::TextDisabled("%s", rootAvailable ? T(Key::AimBackendStatusReady) : T(Key::AimBackendStatusMissingRoot));
-                        } else {
+                        } else if (touchBackend == 1) {
                             ImGui::TextDisabled("%s", shizukuAvailable ? T(Key::AimBackendStatusReady) : T(Key::AimBackendStatusMissingShizuku));
+                        } else {
+                            ImGui::TextDisabled("%s", g_accessibilityAvailable.load(std::memory_order_relaxed) ? T(Key::AimBackendStatusReady) : T(Key::AimBackendStatusMissingAccessibility));
                         }
                         ImGui::Separator();
 
-                        const bool backendReady = (touchBackend == 0) ? rootAvailable : shizukuAvailable;
+                        const bool backendReady = (touchBackend == 0) ? rootAvailable
+                                                  : (touchBackend == 1) ? shizukuAvailable
+                                                  : g_accessibilityAvailable.load(std::memory_order_relaxed);
                         if (!backendReady) {
                             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.35f, 0.35f, 1.0f));
                             if (touchBackend == 0) {
                                 ImGui::TextUnformatted(T(Key::AimRootRequired));
-                            } else {
+                            } else if (touchBackend == 1) {
                                 ImGui::TextUnformatted(T(Key::AimShizukuRequired));
+                            } else {
+                                ImGui::TextUnformatted(T(Key::AimAccessibilityRequired));
                             }
                             ImGui::PopStyleColor();
                         } else {
@@ -1171,6 +1178,12 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_aimbuddy_ImGuiGLSurface_nativeSetShizukuAvailable(JNIEnv* /* env */, jclass /* this */, jboolean available) {
     g_shizukuAvailable.store(available == JNI_TRUE, std::memory_order_relaxed);
     LOGI("Shizuku status updated: %s", available ? "AVAILABLE" : "NOT AVAILABLE");
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_aimbuddy_ImGuiGLSurface_nativeSetAccessibilityAvailable(JNIEnv* /* env */, jclass /* this */, jboolean available) {
+    g_accessibilityAvailable.store(available == JNI_TRUE, std::memory_order_relaxed);
+    LOGI("Accessibility status updated: %s", available ? "AVAILABLE" : "NOT AVAILABLE");
 }
 
 extern "C" bool IsImGuiMenuVisible() {
