@@ -2,6 +2,8 @@
 #include <chrono>
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <vector>
 #include <android/hardware_buffer_jni.h>
 
 namespace ESP {
@@ -196,13 +198,38 @@ bool YoloDetector::detect(AHardwareBuffer* buffer, DetectionResult& result) {
 
     DetectionArray combined;
 
-    for (int startY = 0; startY < srcHeight; startY += step) {
-        int tileH = std::min(tile, srcHeight - startY);
-        if (tileH <= 0) break;
-        for (int startX = 0; startX < srcWidth; startX += step) {
-            int tileW = std::min(tile, srcWidth - startX);
-            if (tileW <= 0) break;
+    // Build uniform, full-size tile origins. Naively walking `startX += step`
+    // and clamping the *size* at the right/bottom edge produced thin strips
+    // (e.g. 128x336) that were then stretched into a 256x256 square input.
+    // That extreme aspect distortion is a major source of phantom detections
+    // ("enemy found where there is none"). Instead we clamp the *origin* so
+    // every tile keeps the same square shape and the last one sits flush
+    // against the edge; overlap absorbs the difference.
+    const int tileW = std::min(tile, srcWidth);
+    const int tileH = std::min(tile, srcHeight);
 
+    std::vector<int> xOrigins;
+    for (int x = 0;; x += step) {
+        const int sx = std::min(x, srcWidth - tileW);
+        if (!xOrigins.empty() && sx == xOrigins.back()) break;
+        xOrigins.push_back(sx);
+        if (sx + tileW >= srcWidth) break;
+    }
+
+    std::vector<int> yOrigins;
+    for (int y = 0;; y += step) {
+        const int sy = std::min(y, srcHeight - tileH);
+        if (!yOrigins.empty() && sy == yOrigins.back()) break;
+        yOrigins.push_back(sy);
+        if (sy + tileH >= srcHeight) break;
+    }
+
+    // Precomputed, identical for every tile now that they are all the same size.
+    const float scaleX = (static_cast<float>(tileW) / modelSize) * captureToScreenX;
+    const float scaleY = (static_cast<float>(tileH) / modelSize) * captureToScreenY;
+
+    for (int startY : yOrigins) {
+        for (int startX : xOrigins) {
             const uint8_t* tileStart = srcPixels
                 + static_cast<size_t>(startY) * static_cast<size_t>(srcStride)
                 + static_cast<size_t>(startX) * 4u;
@@ -220,10 +247,8 @@ bool YoloDetector::detect(AHardwareBuffer* buffer, DetectionResult& result) {
             ncnn::Mat output;
             if (runInference(inputMat_, output)) {
                 // Map this tile's model-space boxes into screen space.
-                float scaleX = (static_cast<float>(tileW) / modelSize) * captureToScreenX;
-                float scaleY = (static_cast<float>(tileH) / modelSize) * captureToScreenY;
-                float offsetX = static_cast<float>(startX) * captureToScreenX;
-                float offsetY = static_cast<float>(startY) * captureToScreenY;
+                const float offsetX = static_cast<float>(startX) * captureToScreenX;
+                const float offsetY = static_cast<float>(startY) * captureToScreenY;
                 decodeBoxes(output, combined, scaleX, scaleY, offsetX, offsetY, confThreshold);
             }
         }
@@ -419,16 +444,57 @@ bool YoloDetector::runInference(const ncnn::Mat& input, ncnn::Mat& output) {
     return true;
 }
 
+namespace {
+
+/// Reject boxes that cannot plausibly correspond to a real target.
+/// Degenerate, frame-sized, off-frame or absurdly elongated boxes are the
+/// classic signature of a phantom detection fired on background noise.
+inline bool IsPlausibleModelBox(float cx, float cy, float w, float h, float modelSize) {
+    if (!std::isfinite(cx) || !std::isfinite(cy) ||
+        !std::isfinite(w) || !std::isfinite(h)) {
+        return false;
+    }
+    if (w < 2.0f || h < 2.0f) return false;
+    if (w > modelSize * 1.05f || h > modelSize * 1.05f) return false;
+
+    const float margin = modelSize * 0.15f;
+    if (cx < -margin || cx > modelSize + margin) return false;
+    if (cy < -margin || cy > modelSize + margin) return false;
+
+    const float ratio = w / h;
+    if (ratio > 8.0f || ratio < 0.125f) return false;
+
+    return true;
+}
+
+} // namespace
+
 void YoloDetector::decodeBoxes(const ncnn::Mat& output, DetectionArray& out,
                                 float scaleX, float scaleY, float offsetX, float offsetY,
                                 float confThreshold) {
-    int numBoxes = output.h;
-    int numValues = output.w;
+    int numBoxes, numValues;
     bool transposed = false;
 
-    if (numBoxes < numValues) {
+    // Determine the per-box channel dimension robustly. YOLOv26n-style heads
+    // emit 5 channels (x,y,w,h,conf) or 6 (x,y,w,h,obj,conf) per box. Locking
+    // onto the dimension whose size is 5 or 6 (the channel count) is safer than
+    // the old "smaller dimension wins" heuristic, which silently transposes the
+    // tensor - and therefore reads garbage - for any unusual output shape.
+    if (output.w == 5 || output.w == 6) {
+        numBoxes = output.h;
+        numValues = output.w;
+        transposed = false;
+    } else if (output.h == 5 || output.h == 6) {
+        numBoxes = output.w;
+        numValues = output.h;
         transposed = true;
-        std::swap(numBoxes, numValues);
+    } else {
+        numBoxes = output.h;
+        numValues = output.w;
+        if (numBoxes < numValues) {
+            transposed = true;
+            std::swap(numBoxes, numValues);
+        }
     }
 
     float modelSize = static_cast<float>(Config::MODEL_INPUT_SIZE);
@@ -437,7 +503,7 @@ void YoloDetector::decodeBoxes(const ncnn::Mat& output, DetectionArray& out,
     int classOffset = 4;
     float objectness = 1.0f;
 
-    // Auto-detect YOLO version
+    // Auto-detect YOLO version (extra objectness channel present).
     if (numClasses == Config::NUM_CLASSES + 1) {
         classOffset = 5;
         numClasses -= 1;
@@ -468,6 +534,7 @@ void YoloDetector::decodeBoxes(const ncnn::Mat& output, DetectionArray& out,
                 }
             }
 
+            if (!std::isfinite(maxClassProb)) continue;
             if (maxClassProb < confThreshold) continue;
             if (Config::FILTER_ENEMY_ONLY && bestClassId != Config::ENEMY_CLASS_ID) continue;
 
@@ -482,6 +549,8 @@ void YoloDetector::decodeBoxes(const ncnn::Mat& output, DetectionArray& out,
                 width *= modelSize;
                 height *= modelSize;
             }
+
+            if (!IsPlausibleModelBox(xCenter, yCenter, width, height, modelSize)) continue;
 
             float halfW = width * 0.5f;
             float halfH = height * 0.5f;
@@ -523,6 +592,7 @@ void YoloDetector::decodeBoxes(const ncnn::Mat& output, DetectionArray& out,
                 }
             }
 
+            if (!std::isfinite(maxClassProb)) continue;
             if (maxClassProb < confThreshold) continue;
             if (Config::FILTER_ENEMY_ONLY && bestClassId != Config::ENEMY_CLASS_ID) continue;
 
@@ -537,6 +607,8 @@ void YoloDetector::decodeBoxes(const ncnn::Mat& output, DetectionArray& out,
                 width *= modelSize;
                 height *= modelSize;
             }
+
+            if (!IsPlausibleModelBox(xCenter, yCenter, width, height, modelSize)) continue;
 
             float halfW = width * 0.5f;
             float halfH = height * 0.5f;
@@ -565,15 +637,28 @@ void YoloDetector::postprocess(const ncnn::Mat& output, DetectionResult& result,
     result.boxes.clear(); // Fix ghosting: Clear previous frame detections
     float confThreshold = confidenceThreshold_.load(std::memory_order_relaxed);
     
-    int numBoxes = output.h;
-    int numValues = output.w;
-    bool transposed = false; 
+    int numBoxes, numValues;
+    bool transposed = false;
 
-    if (numBoxes < numValues) {
+    // Robust orientation detection (see decodeBoxes): lock onto the 5/6-channel
+    // dimension instead of the fragile "smaller dimension wins" swap.
+    if (output.w == 5 || output.w == 6) {
+        numBoxes = output.h;
+        numValues = output.w;
+        transposed = false;
+    } else if (output.h == 5 || output.h == 6) {
+        numBoxes = output.w;
+        numValues = output.h;
         transposed = true;
-        std::swap(numBoxes, numValues);
+    } else {
+        numBoxes = output.h;
+        numValues = output.w;
+        if (numBoxes < numValues) {
+            transposed = true;
+            std::swap(numBoxes, numValues);
+        }
     }
-    
+
     // Cache coordinate mapping scalars (Math Optimization)
     float captureWidth = static_cast<float>(currentCaptureWidth_ > 0 ? currentCaptureWidth_ : Config::CAPTURE_WIDTH);
     float captureHeight = static_cast<float>(currentCaptureHeight_ > 0 ? currentCaptureHeight_ : Config::CAPTURE_HEIGHT);
@@ -653,6 +738,9 @@ void YoloDetector::postprocess(const ncnn::Mat& output, DetectionResult& result,
                 height *= modelSize;
             }
 
+            if (!std::isfinite(maxClassProb)) continue;
+            if (!IsPlausibleModelBox(xCenter, yCenter, width, height, modelSize)) continue;
+
             // Optimized coordinate transform (Fused Multiply-Add)
             // box.x = (xCenter - width/2) * scaleX + offsetX
             float halfW = width * 0.5f;
@@ -696,6 +784,7 @@ void YoloDetector::postprocess(const ncnn::Mat& output, DetectionResult& result,
                 }
             }
             
+            if (!std::isfinite(maxClassProb)) continue;
             if (maxClassProb < confThreshold) continue;
             if (Config::FILTER_ENEMY_ONLY && bestClassId != Config::ENEMY_CLASS_ID) continue;
 
@@ -710,6 +799,8 @@ void YoloDetector::postprocess(const ncnn::Mat& output, DetectionResult& result,
                 width *= modelSize;
                 height *= modelSize;
             }
+
+            if (!IsPlausibleModelBox(xCenter, yCenter, width, height, modelSize)) continue;
 
             float halfW = width * 0.5f;
             float halfH = height * 0.5f;

@@ -15,9 +15,11 @@
 #include <android/configuration.h>
 #include <GLES3/gl3.h>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -50,7 +52,37 @@ static ANativeWindow* g_menuWindow = nullptr;
 static bool g_imguiInitialized = false;
 static int g_screenWidth = 0;
 static int g_screenHeight = 0;
-static bool g_menuVisible = false;
+static std::atomic<bool> g_menuVisible{false};
+
+// ---------------------------------------------------------------------------
+// Touch input plumbing
+//
+// nativeMotionEvent() runs on the Android UI thread while nativeTick() renders
+// on the GLSurfaceView render thread. ImGui's input event queue is NOT thread
+// safe: pushing events from the UI thread races with NewFrame() consuming and
+// clearing the queue on the render thread, so taps were regularly dropped and
+// the menu felt "stuck" / extremely laggy.
+//
+// We now only enqueue raw touch samples here and translate them into ImGui
+// input events from the render thread, right before NewFrame(). This also lets
+// us implement swipe-to-scroll safely.
+// ---------------------------------------------------------------------------
+struct PendingTouch {
+    int action;   // 0 = ACTION_DOWN, 1 = ACTION_UP, 2 = ACTION_MOVE
+    float x;
+    float y;
+};
+static std::mutex g_touchMutex;
+static std::vector<PendingTouch> g_touchQueue;
+
+// Render-thread-only drag state used for swipe-to-scroll inside the menu.
+static float g_touchDownX = 0.0f;
+static float g_touchDownY = 0.0f;
+static float g_lastTouchY = 0.0f;
+static bool  g_touchScrolling = false;
+static int   g_framesSinceTouchDown = 0;
+static float g_pendingScrollPx = 0.0f;
+static bool  g_anyItemActiveLastFrame = false;
 static std::atomic<bool> g_rootAvailable{false};  // Track root status
 static std::atomic<bool> g_shizukuAvailable{false};
 static std::atomic<bool> g_accessibilityAvailable{false};
@@ -340,6 +372,87 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeInit(JNIEnv* env, jclass /* this */, jobj
         UpdateScreenSize(width, height);
     }
 
+// Translate queued touch samples into ImGui input events.
+// MUST be called on the render thread, after the backend NewFrame() helpers and
+// immediately before ImGui::NewFrame() (which drains the ImGui event queue).
+static void ProcessPendingTouchEvents() {
+    std::vector<PendingTouch> events;
+    {
+        std::lock_guard<std::mutex> lock(g_touchMutex);
+        events.swap(g_touchQueue);
+    }
+
+    if (!g_menuVisible.load(std::memory_order_relaxed)) {
+        // Menu closed between enqueue and drain: drop everything and reset.
+        g_touchScrolling = false;
+        g_pendingScrollPx = 0.0f;
+        ++g_framesSinceTouchDown;
+        return;
+    }
+
+    ImGuiIO& io = ImGui::GetIO();
+
+    // A vertical swipe longer than this (and dominant over the horizontal
+    // component) is treated as a scroll gesture instead of a widget drag.
+    constexpr float kScrollTriggerPx = 18.0f;
+
+    for (const PendingTouch& e : events) {
+        switch (e.action) {
+            case 0: // ACTION_DOWN
+                g_touchDownX = e.x;
+                g_touchDownY = e.y;
+                g_lastTouchY = e.y;
+                g_touchScrolling = false;
+                g_framesSinceTouchDown = 0;
+                io.AddMousePosEvent(e.x, e.y);
+                io.AddMouseButtonEvent(0, true);
+                break;
+
+            case 2: // ACTION_MOVE
+                if (!g_touchScrolling) {
+                    const float dx = e.x - g_touchDownX;
+                    const float dy = e.y - g_touchDownY;
+                    // Only hijack the gesture as a scroll when no widget grabbed
+                    // the press (sliders / scrollbar / buttons keep working) and
+                    // the press has already been through one frame so ActiveId
+                    // is up to date.
+                    if (!g_anyItemActiveLastFrame &&
+                        g_framesSinceTouchDown >= 1 &&
+                        std::fabs(dy) > kScrollTriggerPx &&
+                        std::fabs(dy) > std::fabs(dx)) {
+                        g_touchScrolling = true;
+                        g_lastTouchY = e.y;
+                        // Release the press: this gesture is a scroll, not a tap.
+                        io.AddMouseButtonEvent(0, false);
+                    }
+                }
+                if (g_touchScrolling) {
+                    g_pendingScrollPx += (e.y - g_lastTouchY);
+                } else {
+                    io.AddMousePosEvent(e.x, e.y);
+                }
+                g_lastTouchY = e.y;
+                break;
+
+            case 1: // ACTION_UP
+                if (g_touchScrolling) {
+                    g_pendingScrollPx += (e.y - g_lastTouchY);
+                    g_touchScrolling = false;
+                } else {
+                    io.AddMousePosEvent(e.x, e.y);
+                    io.AddMouseButtonEvent(0, false);
+                }
+                g_lastTouchY = e.y;
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    ++g_framesSinceTouchDown;
+}
+
 // Render ImGui (menu + ESP)
 extern "C" JNIEXPORT void JNICALL
 Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */) {
@@ -348,19 +461,18 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
     }
 
     try {
-        // Cap overlay render rate to ~60 FPS regardless of the device's
-        // native refresh (120/144 Hz panels would otherwise burn GPU time
-        // redrawing the same overlay twice per inference frame).
-        // The menu, when visible, may render faster (up to 90 FPS) for
-        // smoother slider feedback.
+        // Cap the *background* overlay (menu hidden) to ~60 FPS to avoid
+        // burning GPU on high-refresh panels. When the menu is open we render
+        // uncapped (vsync-limited) so taps and tab switches feel instant.
         constexpr int kBaseFpsCap = 60;
-        constexpr int kMenuFpsCap = 90;
-        const int fpsCap = g_menuVisible ? kMenuFpsCap : kBaseFpsCap;
-        const auto minFrameTime = std::chrono::nanoseconds(1'000'000'000LL / fpsCap);
-        if (g_lastOverlayTickTime.time_since_epoch().count() != 0) {
-            const auto elapsed = std::chrono::steady_clock::now() - g_lastOverlayTickTime;
-            if (elapsed < minFrameTime) {
-                std::this_thread::sleep_for(minFrameTime - elapsed);
+        const int fpsCap = g_menuVisible ? 0 : kBaseFpsCap;
+        if (fpsCap > 0) {
+            const auto minFrameTime = std::chrono::nanoseconds(1'000'000'000LL / fpsCap);
+            if (g_lastOverlayTickTime.time_since_epoch().count() != 0) {
+                const auto elapsed = std::chrono::steady_clock::now() - g_lastOverlayTickTime;
+                if (elapsed < minFrameTime) {
+                    std::this_thread::sleep_for(minFrameTime - elapsed);
+                }
             }
         }
         const auto nowTick = std::chrono::steady_clock::now();
@@ -378,6 +490,9 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
         // Start ImGui frame
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplAndroid_NewFrame();
+        // Feed queued touches (thread-safe hand-off from the UI thread) before
+        // NewFrame() consumes the ImGui input queue.
+        ProcessPendingTouchEvents();
         ImGui::NewFrame();
 
         // Access global settings
@@ -660,6 +775,14 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
 
                 ImGui::Separator();
                 ImGui::BeginChild("##MenuScroll", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 6.0f), false, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+
+                // Apply swipe-to-scroll accumulated from touch input. ImGui has
+                // no native touch scrolling, so a finger drag over the content
+                // area is turned into a direct, pixel-accurate scroll here.
+                if (g_pendingScrollPx != 0.0f) {
+                    ImGui::SetScrollY(ImGui::GetScrollY() - g_pendingScrollPx);
+                    g_pendingScrollPx = 0.0f;
+                }
 
                 if (ImGui::BeginTabBar("##MenuTabs", ImGuiTabBarFlags_FittingPolicyResizeDown)) {
                     if (ImGui::BeginTabItem(T(Key::TabEsp))) {
@@ -1054,6 +1177,14 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
             NotifyStreamerModeChanged(g_streamerModeAppliedState);
         }
 
+        // Latch widget-activity for the next frame's gesture classification
+        // (a swipe only scrolls when no widget grabbed the initial press).
+        g_anyItemActiveLastFrame = ImGui::IsAnyItemActive();
+        if (!g_menuVisible.load(std::memory_order_relaxed)) {
+            g_pendingScrollPx = 0.0f;
+            g_touchScrolling = false;
+        }
+
         // Render ImGui
         ImGui::Render();
         
@@ -1080,32 +1211,28 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeMotionEvent(
         return JNI_FALSE;
     }
 
-    ImGuiIO& io = ImGui::GetIO();
-
-    // If menu is visible, feed ImGui input
-    if (g_menuVisible) {
-        // Update mouse position
-        io.AddMousePosEvent(x, y);
-
-        switch (action) {
-            case 0: // ACTION_DOWN
-                io.AddMouseButtonEvent(0, true);
-                break;
-            case 1: // ACTION_UP
-                io.AddMouseButtonEvent(0, false);
-                break;
-            case 2: // ACTION_MOVE
-                break;
-            default:
-                return JNI_FALSE;
-        }
-
-        // Consume input while menu is visible
-        return JNI_TRUE;
+    // Menu closed -> let the touch fall through to the game underneath.
+    if (!g_menuVisible.load(std::memory_order_relaxed)) {
+        return JNI_FALSE;
     }
 
-    // Pass-through to game
-    return JNI_FALSE;
+    if (action != 0 && action != 1 && action != 2) {
+        return JNI_FALSE;
+    }
+
+    // Hand the sample over to the render thread. Never touch ImGui state here:
+    // its input queue is not thread safe and racing with NewFrame() silently
+    // drops taps (the root cause of the "menu takes forever to react" bug).
+    {
+        std::lock_guard<std::mutex> lock(g_touchMutex);
+        // Guard against unbounded growth if the render thread ever stalls.
+        if (g_touchQueue.size() < 512) {
+            g_touchQueue.push_back(PendingTouch{static_cast<int>(action), x, y});
+        }
+    }
+
+    // Consume input while the menu is visible.
+    return JNI_TRUE;
 }
 
 // Expose whether ImGui wants to capture touch

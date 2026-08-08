@@ -63,8 +63,10 @@ namespace Config {
     /// Model binary file name
     constexpr const char* MODEL_BIN_FILE = "models/yolo26n-opt.bin";
     
-    /// Default confidence threshold for detections
-    constexpr float DEFAULT_CONFIDENCE_THRESHOLD = 0.5f;
+    /// Default confidence threshold for detections.
+    /// Raised from 0.5 to 0.55 to reduce phantom detections on the
+    /// single-class YOLOv26n model while still catching distant enemies.
+    constexpr float DEFAULT_CONFIDENCE_THRESHOLD = 0.55f;
     
     /// NMS (Non-Maximum Suppression) IoU threshold
     /// YOLOv26n is NMS-free, so we use a standard threshold to merge overlapping boxes

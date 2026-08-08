@@ -15,10 +15,11 @@
 #include "../utils/vector2.h"
 
 struct UnifiedSettings {
-    // Bumped to 0xE5BA1007 so that settings.bin written by older builds is
-    // rejected. Without this, an upgrading user keeps touchBackend=1 (Shizuku)
-    // and never lands on the new out-of-box accessibility default.
-    uint32_t magic = 0xE5BA1007;  // Magic number for validation
+    // Bumped to 0xE5BA1008 so that settings.bin written by older builds is
+    // rejected and users get a clean slate with the new defaults (higher
+    // confidence threshold to cut phantom detections, accessibility backend,
+    // etc.).
+    uint32_t magic = 0xE5BA1008;  // Magic number for validation
     
     bool aimbotEnabled = false;
     bool espEnabled = true;
@@ -69,7 +70,7 @@ struct UnifiedSettings {
     float boxColorG = 0.0f;
     float boxColorB = 0.0f;
     int32_t boxThickness = 2;
-    float confidenceThreshold = 0.5f;
+    float confidenceThreshold = 0.55f;
     bool showFPS = false;
     bool showDetectionCount = false;
     bool showLabels = true;
@@ -109,7 +110,7 @@ struct UnifiedSettings {
         UnifiedSettings temp;
         if (fread(&temp, sizeof(UnifiedSettings), 1, f) == 1) {
             // Verify magic number
-            if (temp.magic == 0xE5BA1007) {
+            if (temp.magic == 0xE5BA1008) {
                 *this = temp;
                 fclose(f);
                 return true;

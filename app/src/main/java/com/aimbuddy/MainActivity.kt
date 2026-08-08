@@ -405,13 +405,10 @@ class MainActivity : AppCompatActivity() {
                     LauncherScreen(
                         isRunning = isRunningState,
                         statusText = statusTextState,
-                        activeModelText = activeModelTextState,
                         rootReady = rootAvailable.get(),
                         shizukuReady = shizukuAvailable.get(),
                         onStart = { onStartClicked() },
                         onStop = { onStopClicked() },
-                        onImportModel = { onImportModelClicked() },
-                        onOpenStore = { onStoreClicked() },
                         onOpenGithub = { openGithubUrl() },
                         onOpenCreator = { openCreatorUrl() },
                     )
@@ -456,7 +453,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         modelCatalog.ensureDefaultAssetModel(hasAssetParam, hasAssetBin)
-        migrateLegacySingleImportedModel()
         applyActiveModelSelection()
 
         // Get MediaProjectionManager
@@ -819,8 +815,9 @@ class MainActivity : AppCompatActivity() {
                         startService(serviceIntent)
                     }
                     
-                    // Small delay to ensure service is promoted to foreground
-                    // In a production app, use a bound service or callback, but a handler delay is often sufficient for this check
+                    // Brief delay so the foreground service is promoted before
+                    // we bind the MediaProjection. 300ms is enough; the old
+                    // 1000ms made startup feel sluggish.
                     Handler(Looper.getMainLooper()).postDelayed({
                         try {
                             mediaProjection = mediaProjectionManager?.getMediaProjection(resultCode, data)
@@ -830,7 +827,7 @@ class MainActivity : AppCompatActivity() {
                             Log.e(TAG, "Failed to create MediaProjection: ${e.message}")
                             showAppToast("启动采集失败：${e.message}", true)
                         }
-                    }, 1000) // 1 second delay
+                    }, 300)
                     
                 } else {
                     Log.w(TAG, "MediaProjection permission denied")
@@ -864,6 +861,12 @@ class MainActivity : AppCompatActivity() {
             setupScreenCapture()
             setupOverlay()
             nativeStart()
+
+            // Start with the menu hidden so the game underneath stays fully
+            // touchable/clickable. The floating gear icon toggles the menu.
+            ImGuiGLSurface.nativeSetMenuVisible(false)
+            menuVisible = false
+            applyOverlayTouchable(false)
 
             updateButtonStates(true)
             showAppToast("ESP 已启动", false)
@@ -1007,20 +1010,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun applyActiveModelSelection() {
-        val active = modelCatalog.getActiveModel()
-        installedModelsState = modelCatalog.getInstalledModels()
-        if (active == null) {
-            nativeSetModelPaths(null, null)
-            activeModelTextState = "模型：缺失"
-            return
-        }
-
-        if (active.source == ModelSource.ASSET) {
-            nativeSetModelPaths(null, null)
-        } else {
-            nativeSetModelPaths(active.paramPath, active.binPath)
-        }
-        activeModelTextState = "模型：${active.title} (${active.source.name.lowercase()})"
+        // Out-of-box: always use the built-in asset model. There is no model
+        // switching UI anymore, so we never point native at an imported/store
+        // model.
+        nativeSetModelPaths(null, null)
+        activeModelTextState = "模型：内置默认"
     }
 
     private fun reinitializeNativeIfIdle() {
@@ -1554,13 +1548,10 @@ class MainActivity : AppCompatActivity() {
     private fun LauncherScreen(
         isRunning: Boolean,
         statusText: String,
-        activeModelText: String,
         rootReady: Boolean,
         shizukuReady: Boolean,
         onStart: () -> Unit,
         onStop: () -> Unit,
-        onImportModel: () -> Unit,
-        onOpenStore: () -> Unit,
         onOpenGithub: () -> Unit,
         onOpenCreator: () -> Unit,
     ) {
@@ -1598,7 +1589,7 @@ class MainActivity : AppCompatActivity() {
                     horizontalArrangement = Arrangement.spacedBy(24.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Left Panel: Status & Active Model
+                    // Left Panel: Status
                     Column(
                         modifier = Modifier
                             .weight(1.2f)
@@ -1610,13 +1601,6 @@ class MainActivity : AppCompatActivity() {
                             statusText = statusText,
                             accent = statusColor,
                             isRunning = isRunning,
-                        )
-                        
-                        Spacer(Modifier.height(12.dp))
-                        
-                        ActiveModelCard(
-                            activeModelText = activeModelText,
-                            onSelectModel = { onOpenStore() }
                         )
                     }
 
@@ -1687,18 +1671,6 @@ class MainActivity : AppCompatActivity() {
                 ) {
                     Column(modifier = Modifier.padding(vertical = 4.dp)) {
                         DropdownMenuItemContent(
-                            text = "导入模型文件",
-                            icon = Icons.Filled.FolderOpen,
-                            onClick = { menuOpen = false; onImportModel() }
-                        )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.08f))
-                        DropdownMenuItemContent(
-                            text = "模型商店",
-                            icon = Icons.Filled.Download,
-                            onClick = { menuOpen = false; onOpenStore() }
-                        )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.08f))
-                        DropdownMenuItemContent(
                             text = "项目主页",
                             icon = Icons.Filled.Info,
                             onClick = { menuOpen = false; onOpenGithub() }
@@ -1707,13 +1679,8 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // Custom Compose Model Store Screen overlay
-            if (showStoreState) {
-                ModelStoreScreen(
-                    onClose = { showStoreState = false },
-                    onImportModel = onImportModel
-                )
-            }
+            // Model store / import UI removed: the app ships with a single
+            // built-in model (out-of-box).
         }
     }
 
