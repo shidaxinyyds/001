@@ -10,6 +10,24 @@ Pre-release work staged for the next tag.
 
 ---
 
+## [0.3.0-beta.3] - 2026-08-08
+
+Full-screen detection, complete Chinese UI, and touch restoration.
+
+### Added
+- Full-screen tiled detection: scan the entire 1280×720 capture frame with overlapping 512×512 tiles instead of only the center crop, then merge results with a global NMS.
+- DPI-aware ImGui font scaling so menu text is readable on high-density screens; falls back to system CJK fonts or `assets/fonts/cjk.ttf`.
+
+### Changed
+- Default language switched to Chinese and all UI text translated:
+  - Native ImGui settings menu, tooltips, and combo items (target priority, aim mode, filter type, touch backend).
+  - Kotlin system dialogs, Toast messages, and Compose home screen labels.
+- Auto-close the settings menu when aim assist is enabled so the overlay stops intercepting touches and the game receives normal tap/slide input.
+- Settings binary magic bumped so legacy English configs stored under `/data/local/tmp` are invalidated and fresh installs default to Chinese.
+
+### Removed
+- Startup "AimBuddy Notice" AlertDialog about the project being free/open source.
+
 ## [0.3.0-beta.2] - 2026-06-04
 
 UX overhaul and critical APK installation fix.
