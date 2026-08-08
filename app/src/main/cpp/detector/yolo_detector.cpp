@@ -254,7 +254,8 @@ bool YoloDetector::detect(AHardwareBuffer* buffer, DetectionResult& result) {
     return true;
 }
 
-bool YoloDetector::detect(AHardwareBuffer* buffer, DetectionResult& result, int dynamicCropSize) {
+bool YoloDetector::detect(AHardwareBuffer* buffer, DetectionResult& result, int dynamicCropSize,
+                          bool fullFrame) {
     if (!initialized_) {
         LOGE("Detector not initialized");
         return false;
@@ -270,7 +271,7 @@ bool YoloDetector::detect(AHardwareBuffer* buffer, DetectionResult& result, int 
     auto startTime = std::chrono::high_resolution_clock::now();
     
     // Preprocess: extract pixels, center crop, resize into persistent buffer
-    if (!preprocess(buffer, inputMat_, dynamicCropSize, /*fullFrame=*/false)) {
+    if (!preprocess(buffer, inputMat_, dynamicCropSize, fullFrame)) {
         LOGE("Preprocessing failed");
         return false;
     }
@@ -283,7 +284,7 @@ bool YoloDetector::detect(AHardwareBuffer* buffer, DetectionResult& result, int 
     }
 
     // Post-process: decode boxes, NMS, coordinate mapping
-    postprocess(output, result, dynamicCropSize, /*fullFrame=*/false);
+    postprocess(output, result, dynamicCropSize, fullFrame);
     
     auto endTime = std::chrono::high_resolution_clock::now();
     result.inferenceTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
