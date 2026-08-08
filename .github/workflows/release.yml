@@ -1,0 +1,248 @@
+name: Build and Release APK
+
+# Trigger conditions:
+#  - Any push to master that touches CHANGELOG.md (the workflow then checks
+#    whether the top non-Unreleased version differs from the latest tag).
+#  - Manual dispatch (useful for re-running a failed publish).
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'CHANGELOG.md'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # required to create releases and upload assets
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Step 1: read the changelog, decide whether this commit introduces a new
+  # version that has not yet been released.
+  # ---------------------------------------------------------------------------
+  detect-version:
+    name: Detect new changelog version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      should_release: ${{ steps.read.outputs.should_release }}
+      release_notes: ${{ steps.read.outputs.release_notes }}
+      release_date: ${{ steps.read.outputs.release_date }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # need full history so we can list tags
+
+      - name: Parse top released version from CHANGELOG.md
+        id: read
+        shell: bash
+        run: |
+          set -euo pipefail
+          CHANGELOG="CHANGELOG.md"
+          if [ ! -f "$CHANGELOG" ]; then
+            echo "CHANGELOG.md not found; nothing to release."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Grab the first '## [x.y.z] - YYYY-MM-DD' heading that is NOT
+          # the [Unreleased] placeholder.
+          HEADER=$(grep -m1 -E '^## \[[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$' "$CHANGELOG" || true)
+          if [ -z "$HEADER" ]; then
+            echo "No released-version heading found in CHANGELOG.md."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          VERSION=$(echo "$HEADER" | sed -E 's/^## \[([^]]+)\] - .*/\1/')
+          RELEASE_DATE=$(echo "$HEADER" | sed -E 's/.* - ([0-9-]+)$/\1/')
+          TAG="v${VERSION}"
+          echo "Detected version: ${VERSION} (date: ${RELEASE_DATE}, tag: ${TAG})"
+
+          # Skip if the tag already exists on origin.
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Tag ${TAG} already exists locally; skipping release."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q "${TAG}$"; then
+            echo "Tag ${TAG} already exists on origin; skipping release."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Extract the changelog section for this version (from this heading
+          # to the next '## [' heading, exclusive).
+          awk -v ver="${VERSION}" '
+            BEGIN { capture = 0 }
+            /^## \[/ {
+              if (capture) { exit }
+              if ($0 ~ "^## \\[" ver "\\] - ") { capture = 1; next }
+            }
+            capture { print }
+          ' "$CHANGELOG" > release_notes.md
+
+          # Strip leading/trailing blank lines.
+          sed -i -e '/./,$!d' -e :a -e '/^\n*$/{$d;N;ba' -e '}' release_notes.md || true
+
+          # Emit outputs. Multiline release notes use the GH Actions heredoc trick.
+          {
+            echo "version=${VERSION}"
+            echo "release_date=${RELEASE_DATE}"
+            echo "should_release=true"
+            echo "release_notes<<EOF"
+            cat release_notes.md
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # Step 2: build the release APK. Runs only when detect-version says so.
+  # Signs with the upload keystore if KEYSTORE_BASE64 is configured as a
+  # repository secret; otherwise produces an unsigned APK.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build release APK
+    needs: detect-version
+    if: needs.detect-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      apk_path: ${{ steps.locate.outputs.apk_path }}
+      apk_name: ${{ steps.locate.outputs.apk_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify app version matches changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+          GRADLE_VERSION=$(grep -E '^aimbuddy\.versionName=' gradle.properties | head -n1 | cut -d'=' -f2-)
+          CHANGELOG_VERSION="${{ needs.detect-version.outputs.version }}"
+          echo "gradle.properties aimbuddy.versionName : ${GRADLE_VERSION}"
+          echo "Changelog version                      : ${CHANGELOG_VERSION}"
+          if [ "${GRADLE_VERSION}" != "${CHANGELOG_VERSION}" ]; then
+            echo "ERROR: aimbuddy.versionName in gradle.properties (${GRADLE_VERSION}) does not match latest CHANGELOG entry (${CHANGELOG_VERSION})."
+            echo "Bump aimbuddy.versionName in gradle.properties to ${CHANGELOG_VERSION} and re-push."
+            exit 1
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;36.0.0 ndk;29.0.13113456 cmake;3.22.1'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle', '**/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Decode signing keystore (optional)
+        id: keystore
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
+            echo "No KEYSTORE_BASE64 secret configured; APK will be unsigned."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p "$RUNNER_TEMP/keystore"
+          KEYSTORE_PATH="$RUNNER_TEMP/keystore/upload.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          echo "keystore_path=$KEYSTORE_PATH" >> "$GITHUB_OUTPUT"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build release APK (signed)
+        if: steps.keystore.outputs.signed == 'true'
+        env:
+          KEYSTORE_PATH: ${{ steps.keystore.outputs.keystore_path }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon assembleRelease \
+            -Pandroid.injected.signing.store.file="$KEYSTORE_PATH" \
+            -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
+            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
+
+      - name: Build release APK (unsigned)
+        if: steps.keystore.outputs.signed != 'true'
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon assembleRelease
+
+      - name: Locate built APK
+        id: locate
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.detect-version.outputs.version }}"
+          APK=$(find app/build/outputs/apk/release -maxdepth 2 -name '*.apk' | head -n1)
+          if [ -z "${APK}" ]; then
+            echo "No APK found under app/build/outputs/apk/release."
+            ls -R app/build/outputs || true
+            exit 1
+          fi
+          SUFFIX="signed"
+          if [ "${{ steps.keystore.outputs.signed }}" != "true" ]; then
+            SUFFIX="unsigned"
+          fi
+          OUT_NAME="AimBuddy-v${VERSION}-${SUFFIX}.apk"
+          OUT_PATH="${RUNNER_TEMP}/${OUT_NAME}"
+          cp "${APK}" "${OUT_PATH}"
+          echo "apk_path=${OUT_PATH}" >> "$GITHUB_OUTPUT"
+          echo "apk_name=${OUT_NAME}" >> "$GITHUB_OUTPUT"
+          ls -lh "${OUT_PATH}"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.locate.outputs.apk_name }}
+          path: ${{ steps.locate.outputs.apk_path }}
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Step 3: create the GitHub Release and attach the APK.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Create GitHub Release
+    needs: [detect-version, build]
+    if: needs.detect-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.apk_name }}
+          path: ./release
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.detect-version.outputs.version }}
+          name: AimBuddy v${{ needs.detect-version.outputs.version }}
+          body: ${{ needs.detect-version.outputs.release_notes }}
+          draft: false
+          prerelease: ${{ contains(needs.detect-version.outputs.version, '-') }}
+          files: ./release/${{ needs.build.outputs.apk_name }}
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

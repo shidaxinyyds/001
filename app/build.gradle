@@ -1,0 +1,139 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.plugin.compose' version '2.1.0'
+}
+
+// Single source of truth: edit aimbuddy.versionName and aimbuddy.versionCode
+// in the root gradle.properties. APK metadata, BuildConfig, the AIMBUDDY_VERSION
+// CMake define (used by native i18n / ImGui title), and the release workflow
+// all read those two values.
+def aimbuddyVersionName = providers.gradleProperty('aimbuddy.versionName').getOrElse('0.0.0-dev')
+def aimbuddyVersionCode = providers.gradleProperty('aimbuddy.versionCode').getOrElse('1').toInteger()
+
+android {
+    namespace = 'com.aimbuddy'
+    compileSdk = 35
+
+    defaultConfig {
+        applicationId = "com.aimbuddy"
+        minSdk = 30  // Android 11+ for HardwareBuffer support
+        targetSdk = 35
+        versionCode = aimbuddyVersionCode
+        versionName = aimbuddyVersionName
+
+        // Only build for arm64-v8a; covers all modern Android flagship and mid-range phones.
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+
+        externalNativeBuild {
+            cmake {
+                cppFlags "-std=c++17"
+                // AIMBUDDY_VERSION is consumed by utils/i18n.h and friends so
+                // the in-app menu shows the same string as the APK metadata.
+                arguments "-DANDROID_STL=c++_static",
+                          "-DANDROID_ARM_NEON=TRUE",
+                          "-DAIMBUDDY_VERSION=\"${aimbuddyVersionName}\""
+            }
+        }
+
+        buildConfigField "String", "AIMBUDDY_VERSION", "\"${aimbuddyVersionName}\""
+    }
+
+    buildTypes {
+        release {
+            signingConfig signingConfigs.debug
+            minifyEnabled = true
+            shrinkResources = true
+            debuggable = false
+            jniDebuggable = false
+            pseudoLocalesEnabled = false
+            zipAlignEnabled = true
+            ndk {
+                debugSymbolLevel = 'none'
+            }
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+        debug {
+            debuggable = true
+            jniDebuggable = false
+            ndk {
+                debugSymbolLevel = 'none'
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = 'src/main/cpp/CMakeLists.txt'
+            version = '3.22.1'
+        }
+    }
+
+    // Source sets for assets
+    sourceSets {
+        main {
+            assets.srcDirs = ['src/main/assets']
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
+    }
+
+    buildFeatures {
+        compose = true
+        prefab = true
+        buildConfig = true
+    }
+
+    packaging {
+        jniLibs {
+            // Map JNI libs directly from the APK without extraction — saves RAM at runtime
+            useLegacyPackaging = false
+            pickFirsts += ['**/libc++_shared.so']
+        }
+        resources {
+            // Strip unnecessary resource files from the APK
+            excludes += [
+                'META-INF/*.kotlin_module',
+                'META-INF/LICENSE*',
+                'META-INF/NOTICE*',
+                'kotlin/**',
+                '**.proto'
+            ]
+        }
+    }
+
+    buildToolsVersion = '35.0.0'
+    ndkVersion = '29.0.13113456'
+}
+
+dependencies {
+    // AndroidX core
+    implementation 'androidx.core:core-ktx:1.15.0'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'com.google.android.material:material:1.12.0'
+
+    // AndroidSVG
+    implementation 'com.caverock:androidsvg:1.4'
+
+    // Jetpack Compose — use latest BOM for coordinated dependency versions
+    implementation platform('androidx.compose:compose-bom:2025.01.00')
+    implementation 'androidx.activity:activity-compose:1.10.0'
+    implementation 'androidx.compose.ui:ui'
+    implementation 'androidx.compose.material3:material3'
+    implementation 'androidx.compose.material:material-icons-extended'
+    implementation 'androidx.documentfile:documentfile:1.0.1'
+    // Debug-only: keep tooling preview off the release build
+    debugImplementation 'androidx.compose.ui:ui-tooling-preview'
+    debugImplementation 'androidx.compose.ui:ui-tooling'
+
+    // Optional non-root input backend (Shizuku)
+    implementation 'dev.rikka.shizuku:api:13.1.5'
+    implementation 'dev.rikka.shizuku:provider:13.1.5'
+    // Bypass hidden-API reflection restrictions so we can call the hidden
+    // IInputManager.injectInputEvent from the Shizuku-authorized context.
+    implementation 'org.lsposed.hiddenapibypass:hiddenapibypass:4.3'
+}

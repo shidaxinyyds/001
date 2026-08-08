@@ -1,0 +1,91 @@
+# Android and Gradle artifacts
+.gradle/
+build/
+**/build/
+.kotlin/
+**/.cxx/
+app/.externalNativeBuild/
+app/release/
+
+# Android Studio and IntelliJ
+.idea/
+*.iml
+captures/
+
+# VS Code workspace metadata
+.vscode/
+
+# Local machine settings
+local.properties
+
+# Build outputs and packaged binaries
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# Native and symbol artifacts
+*.so
+*.o
+*.obj
+*.a
+*.lib
+*.pdb
+
+# NCNN vendored static libs are required for CMake to link.
+# Whitelist the prebuilt arm64-v8a archives so they ship in the repo
+# (~15 MB, well inside GitHub's per-file/per-repo soft limits).
+!app/src/main/cpp/ncnn/lib/**/*.a
+
+# Python virtual environments and caches
+.venv/
+venv/
+venv310/
+**/venv*/
+env/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Logs and temp files
+*.log
+*.tmp
+*.temp
+warnings.txt
+Info.txt
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local-only workspace archive
+archive_local/
+
+# Agent/local workspace metadata (not part of the project source)
+.workbuddy/
+
+# Training generated artifacts and local datasets
+training/dataset/
+training/raw_frames/
+training/videos/
+training/outputs/
+training/export/
+training/export
+
+# Keep model deployment folder structure but ignore actual deployed model binaries
+app/src/main/assets/models/*
+!app/src/main/assets/models/.gitkeep
+# Deploy the trained detector model so the CI build produces a working APK.
+!app/src/main/assets/models/*.param
+!app/src/main/assets/models/*.bin
+
+# Model and checkpoint artifacts generated during training
+training/**/*.pt
+training/**/*.pth
+training/**/*.onnx
+training/**/*.bin
+training/**/*.param
