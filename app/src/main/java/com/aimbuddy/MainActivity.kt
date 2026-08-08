@@ -1473,21 +1473,38 @@ class MainActivity : AppCompatActivity() {
         touchHandler.post(object : Runnable {
             override fun run() {
                 if (!touchPolling) return
-                val view = imguiOverlay ?: return
-                val params = view.layoutParams as? WindowManager.LayoutParams ?: return
 
-                val wantsCapture = ImGuiGLSurface.nativeWantsCapture()
-                val isTouchable = (params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0
+                // Everything below is best-effort: the loop MUST reschedule
+                // itself no matter what. An early `return` here (null view,
+                // unexpected params type, WindowManager throwing) would kill
+                // the poller permanently while `touchPolling` stayed true, so
+                // startTouchPolling() could never restart it and the overlay
+                // would be stuck in whatever touch state it had.
+                try {
+                    val view = imguiOverlay
+                    val params = view?.layoutParams as? WindowManager.LayoutParams
+                    if (view != null && params != null) {
+                        val wantsCapture = ImGuiGLSurface.nativeWantsCapture()
+                        val isTouchable =
+                            (params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0
 
-                if (wantsCapture && !isTouchable) {
-                    params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
-                    windowManager?.updateViewLayout(view, params)
-                } else if (!wantsCapture && isTouchable) {
-                    params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                    windowManager?.updateViewLayout(view, params)
+                        if (wantsCapture && !isTouchable) {
+                            params.flags =
+                                params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                            windowManager?.updateViewLayout(view, params)
+                        } else if (!wantsCapture && isTouchable) {
+                            params.flags =
+                                params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                            windowManager?.updateViewLayout(view, params)
+                        }
+                    }
+                } catch (t: Throwable) {
+                    Log.w(TAG, "Touch polling cycle failed: ${t.message}")
+                } finally {
+                    if (touchPolling) {
+                        touchHandler.postDelayed(this, 50)
+                    }
                 }
-
-                touchHandler.postDelayed(this, 50)
             }
         })
     }
@@ -1595,7 +1612,7 @@ class MainActivity : AppCompatActivity() {
                         )
                     }
 
-                    // Right Panel: Primary Toggle & Backend Status
+                    // Right Panel: Primary Toggle
                     Column(
                         modifier = Modifier
                             .weight(1f)

@@ -151,7 +151,15 @@ namespace {
     constexpr int   kTrackCapacity = Config::MAX_DETECTIONS;
     constexpr int   kConfirmHits   = 2;      // sightings required before publishing
     constexpr int   kMaxMisses     = 2;      // cycles a track survives unmatched
-    constexpr float kMatchIoU      = 0.25f;  // association threshold
+    constexpr float kMatchIoU          = 0.25f;  // gate for an unconfirmed track
+    constexpr float kMatchIoUConfirmed = 0.10f;  // looser gate once confirmed
+
+    // Geometric plausibility limits, applied here (shared by ESP *and* aimbot)
+    // rather than only at draw time. Previously the renderer dropped these
+    // boxes while the aimbot still locked onto them, so the crosshair could be
+    // dragged toward a "target" the user could not even see.
+    constexpr float kMinBoxPx   = 14.0f;  // degenerate sliver
+    constexpr float kMaxBoxFrac = 0.85f;  // near-fullscreen blob (lobby panels)
 
     struct DetTrack {
         float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
@@ -180,6 +188,27 @@ namespace {
         g_trackCount = 0;
     }
 
+    /// Drop boxes whose geometry cannot plausibly be a player. Runs before the
+    /// temporal filter so a fullscreen artefact never even enters the track
+    /// table (a static UI panel would otherwise stay "confirmed" forever).
+    void DropImplausibleBoxes(ESP::DetectionArray& boxes) {
+        const float screenW = static_cast<float>(std::max(1, g_screenWidth));
+        const float screenH = static_cast<float>(std::max(1, g_screenHeight));
+
+        ESP::DetectionArray kept;
+        for (int i = 0; i < boxes.size(); ++i) {
+            const ESP::BoundingBox& b = boxes[i];
+            if (!std::isfinite(b.x) || !std::isfinite(b.y) ||
+                !std::isfinite(b.width) || !std::isfinite(b.height)) {
+                continue;
+            }
+            if (b.width < kMinBoxPx || b.height < kMinBoxPx) continue;
+            if (b.width > screenW * kMaxBoxFrac && b.height > screenH * kMaxBoxFrac) continue;
+            kept.push(b);
+        }
+        boxes = kept;
+    }
+
     /// Filter `boxes` in place, keeping only temporally-confirmed detections.
     void ApplyTemporalConfirmation(ESP::DetectionArray& boxes) {
         for (int i = 0; i < g_trackCount; ++i) {
@@ -191,13 +220,21 @@ namespace {
         for (int b = 0; b < boxes.size(); ++b) {
             const ESP::BoundingBox& box = boxes[b];
 
+            // Greedy best-IoU association. An already-confirmed track gets a
+            // looser gate: during a fast flick the same enemy can jump far
+            // enough that a strict IoU would break the association, reset the
+            // track to "unconfirmed" and make the box flicker off for a cycle.
+            // A brand-new track keeps the strict gate so noise cannot latch on.
             int   best = -1;
-            float bestIoU = kMatchIoU;
+            float bestScore = 0.0f;
             for (int i = 0; i < g_trackCount; ++i) {
                 if (g_tracks[i].used) continue;
+                const float gate = (g_tracks[i].hits >= kConfirmHits)
+                                       ? kMatchIoUConfirmed
+                                       : kMatchIoU;
                 const float iou = TrackIoU(g_tracks[i], box);
-                if (iou > bestIoU) {
-                    bestIoU = iou;
+                if (iou > gate && iou > bestScore) {
+                    bestScore = iou;
                     best = i;
                 }
             }
@@ -369,9 +406,11 @@ namespace {
                             adaptiveCropSize = std::min(cachedCropSize, adaptiveCropSize + kUpscaleStep);
                         }
 
-                        // Drop single-cycle phantoms before anything consumes
-                        // the result (ESP rendering AND aimbot targeting).
-                        ApplyTemporalConfirmation(result.boxes);
+                        // Clean the result before anything consumes it, so ESP
+                        // rendering AND aimbot targeting always agree on what
+                        // counts as a real enemy.
+                        DropImplausibleBoxes(result.boxes);      // geometry
+                        ApplyTemporalConfirmation(result.boxes); // persistence
 
                         // Copy result to shared state (Thread-Safe)
                         {

@@ -1248,8 +1248,11 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
             NotifyStreamerModeChanged(streamerNow != 0);
         }
 
-        // Latch widget-activity for the next frame's gesture classification
-        // (a swipe only scrolls when no widget grabbed the initial press).
+        // Latch widget-activity for the next frame's gesture classification.
+        // It only selects WHICH swipe distance threshold applies (a press that
+        // landed on a widget needs a longer, clearly deliberate drag) - it must
+        // never veto scrolling outright, or the menu becomes unscrollable
+        // because almost every row is a widget.
         g_anyItemActiveLastFrame = ImGui::IsAnyItemActive();
         if (!g_menuVisible.load(std::memory_order_relaxed)) {
             g_pendingScrollPx = 0.0f;

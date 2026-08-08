@@ -17,7 +17,8 @@ Dates are in ISO-8601 (YYYY-MM-DD).
   - **新增时序确认过滤**（`esp_jni.cpp` 的 `ApplyTemporalConfirmation`）：维护一张 IoU 关联的轻量轨迹表，一个框必须在**连续 2 个检测周期**内被稳定看到才会被发布；连续 2 周期未命中的轨迹被丢弃。幽灵框通常只闪现一帧，因此会被直接吃掉，而真实目标只延迟一个周期（约 30~60ms）。ESP 渲染与自瞄共用过滤后的结果。
   - **默认开启主播模式**（`streamerMode = true`），叠加层带 `FLAG_SECURE`，被排除在采集帧之外，从物理上切断自反馈回路；Kotlin 侧 `streamerModeEnabled` 默认值同步改为 `true`，保证叠加层从 `addView` 的第一帧起就是 secure 的。
   - 默认置信度阈值 0.55 → 0.60，NMS IoU 0.45 → 0.35（更激进地合并/丢弃真实框旁边的幽灵框）。
-  - 渲染层增加屏幕空间合理性过滤：丢弃宽或高小于 14px 的碎框，以及同时超过屏幕 85% 宽高的整屏框。
+  - 增加屏幕空间几何合理性过滤（`DropImplausibleBoxes`）：丢弃宽或高小于 14px 的碎框、非有限值坐标，以及同时超过屏幕 85% 宽高的整屏框。该过滤位于时序确认之前的**共享路径**上，ESP 与自瞄使用完全相同的结果——此前它只作用于渲染层，会出现「屏幕上看不到框、准星却被拖向一个不可见目标」的情况。
+  - 时序确认的关联门限区分新旧轨迹：未确认轨迹沿用严格的 IoU 0.25 防止噪点挂靠，已确认轨迹放宽到 0.10，避免快速甩枪／转视角时同一敌人因位移过大而断开关联、方框闪断一帧。
 - **主播模式首帧下发竞态**：`g_streamerModeAppliedState` 原为 `bool` 且初值 `false`，当已保存配置里 `streamerMode` 恰好也是 `false` 时，首帧不会触发下发，Java 侧状态可能与原生不一致。改为三态 `int`（初值 `-1`），保证第一帧一定把真实值同步过去。
 - **左侧弹窗无法直接下滑**：真正的原因是旧逻辑里「上一帧有控件被激活（`g_anyItemActiveLastFrame`）就完全禁止滚动」——而菜单里绝大部分区域都是复选框/滑块，手指一按下控件就被激活，于是拖内容区永远滚不动，只能去够那根细滚动条。现在改为：
   - 控件未被激活时触发距离 10px（原 18px），被激活时给 24px 宽限但**不再拥有一票否决权**；
@@ -25,6 +26,8 @@ Dates are in ISO-8601 (YYYY-MM-DD).
   - 判定为滚动的瞬间先把 ImGui 光标移到 `(-FLT_MAX, -FLT_MAX)` 再抬起按键，避免「从复选框上起手的滑动顺手把它勾上」（ImGui 会把按下/抬起分帧下发）；
   - 进入滚动态后持续累计位移，滑动跟手。
 - **ESP / 瞄准 / 信息 切页响应慢**：菜单窗口移除多余标题栏（`ImGuiWindowFlags_NoTitleBar`），配合滚动手势判定的收紧，点击不再被误判为拖拽而延迟生效。
+- **触摸轮询可能永久停摆**：`startTouchPolling()` 的 `Runnable` 中途 `return`（叠加层为 null、`layoutParams` 类型不符、`WindowManager` 抛异常）时不会重新排队，而 `touchPolling` 仍为 `true`，导致轮询再也无法启动、叠加层卡在当时的触摸状态。改为 `try/finally` 结构，任何情况下都保证续期。
+- **构建失败**：ImGui 自 1.91.9 起将 `style.TabMinWidthForCloseButton` 重命名为 `TabCloseButtonMinWidthUnselected` 且未保留兼容别名，导致 NDK 编译中断。菜单标签页本就没有关闭按钮，改为设置 `TabBarBorderSize = 0`（同时去掉标签栏下方的分隔线，更贴合极简主题）。
 
 ### Changed
 - **启动器精简**：移除「启动服务」按钮下方的「触摸输入后端」标签、Root/Shizuku/无障碍 三个状态芯片，以及「由 1337XCode 打造」署名行；同步删除 `BackendChips` / `BackendChip` 组件与相关常量、跳转函数。
