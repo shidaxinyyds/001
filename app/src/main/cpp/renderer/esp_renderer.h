@@ -56,6 +56,7 @@ struct RenderConfig {
     std::atomic<float> touchCenterY{0.5f};   // Screen ratio (0.5 = middle)
     std::atomic<float> touchRadius{150.0f};  // Pixels
     std::atomic<float> aimDelay{0.0f};       // Milliseconds between movements
+    std::atomic<float> boxScale{1.0f};       // ESP box display scale (1.0 = actual detected size)
 };
 
 /**

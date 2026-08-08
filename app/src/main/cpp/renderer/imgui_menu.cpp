@@ -472,10 +472,16 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
                     continue;
                 }
 
-                float left = box.x;
-                float top = box.y;
-                float right = box.x + box.width;
-                float bottom = box.y + box.height;
+                // Apply user box-scale (expand/contract around the box center).
+                const float boxScale = settings->boxScale.load(std::memory_order_relaxed);
+                const float cx = box.x + box.width * 0.5f;
+                const float cy = box.y + box.height * 0.5f;
+                const float halfW = (box.width * 0.5f) * boxScale;
+                const float halfH = (box.height * 0.5f) * boxScale;
+                float left = cx - halfW;
+                float top = cy - halfH;
+                float right = cx + halfW;
+                float bottom = cy + halfH;
 
                 // Clamp to screen bounds
                 if (left < 0.0f) left = 0.0f;
@@ -518,7 +524,7 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
 
                 if (showLabels) {
                     // Top-center label: "Enemy" with shadow
-                    const char* enemyLabel = "Enemy";
+                    const char* enemyLabel = "敌人";
                     ImVec2 enemySize = ImGui::CalcTextSize(enemyLabel);
                     ImVec2 enemyPos(
                         left + (right - left - enemySize.x) * 0.5f,
@@ -605,7 +611,7 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
 
                 // Format: "X enemy" or "X enemies"
                 char countText[64];
-                const char* label = (detCount == 1) ? "enemy" : "enemies";
+                const char* label = "敌人";
                 snprintf(countText, sizeof(countText), "%d %s", detCount, label);
 
                 ImVec2 textSize = font->CalcTextSizeA(largeSize, FLT_MAX, 0.0f, countText);
@@ -704,6 +710,12 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
                             settings->boxThickness.store(static_cast<int>(thickness), std::memory_order_relaxed);
                             settingsDirty = true;
                         }
+                        float boxScale = settings->boxScale.load(std::memory_order_relaxed);
+                        if (ImGui::SliderFloat("识别框缩放", &boxScale, 0.5f, 3.0f, "%.2f")) {
+                            settings->boxScale.store(boxScale, std::memory_order_relaxed);
+                            settingsDirty = true;
+                        }
+                        ShowSettingHelp("放大或缩小识别框的显示尺寸（不影响检测范围，检测已覆盖全屏）。");
                         ShowSettingHelp("数值越高越容易看清；数值越低越简洁。");
 
                         ImGui::Separator();
@@ -1095,8 +1107,11 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeWantsCapture(JNIEnv* /* env */, jclass /*
     if (!g_imguiInitialized) {
         return JNI_FALSE;
     }
-    ImGuiIO& io = ImGui::GetIO();
-    return (g_menuVisible || io.WantCaptureMouse) ? JNI_TRUE : JNI_FALSE;
+    // Only capture touches while the menu is actually open. Relying on
+    // io.WantCaptureMouse here previously kept the full-screen overlay
+    // touchable (swallowing all game input) whenever a widget briefly held
+    // capture, which made the underlying screen unclickable/unslidable.
+    return g_menuVisible ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -1106,6 +1121,14 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeSetMenuVisible(JNIEnv* /* env */, jclass 
         settings->menuVisible.store(visible == JNI_TRUE, std::memory_order_relaxed);
     }
     g_menuVisible = (visible == JNI_TRUE);
+}
+
+// Expose current menu visibility to the Kotlin layer so the floating-icon
+// toggle always reflects the real state (the native aim-enable path can close
+// the menu directly, desyncing the Kotlin-side flag).
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_aimbuddy_ImGuiGLSurface_nativeIsMenuVisible(JNIEnv* /* env */, jclass /* this */) {
+    return g_menuVisible ? JNI_TRUE : JNI_FALSE;
 }
 
 

@@ -10,6 +10,19 @@ Pre-release work staged for the next tag.
 
 ---
 
+## [0.3.0-beta.4] - 2026-08-09
+
+Touch passthrough hardening, residual-English cleanup, and ESP box resize.
+
+### Changed
+- Overlay only captures touch while the ImGui menu is actually open (`nativeWantsCapture` now keys off `g_menuVisible` only). Previously a transient `io.WantCaptureMouse` kept the full-screen overlay touchable and swallowed all game input, making the screen unclickable/unslidable after starting the service.
+- Floating-icon menu toggle now reads the real native menu state and applies the touchable flag immediately, eliminating the ~50 ms polling latency and the stale-toggle desync that forced extra taps to reopen the menu.
+- Added a `识别框缩放` (box scale) slider on the ESP tab so detection boxes can be freely enlarged/shrunk on screen; detection still covers the entire screen.
+- Removed remaining "open source"/"GitHub" wording from the UI: startup-page credit line, the "View on GitHub" menu item, and the Info-tab title. Translated the last live English overlay strings ("Enemy", "enemy(s)") to Chinese.
+
+### Fixed
+- Resolved the root cause of "can't click/slide the screen after enabling" and the delayed menu-button response.
+
 ## [0.3.0-beta.3] - 2026-08-08
 
 Full-screen detection, complete Chinese UI, and touch restoration.

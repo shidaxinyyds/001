@@ -1265,8 +1265,10 @@ class MainActivity : AppCompatActivity() {
                 }
                 MotionEvent.ACTION_UP -> {
                     if (!iconMoved) {
-                        menuVisible = !menuVisible
-                        ImGuiGLSurface.nativeSetMenuVisible(menuVisible)
+                        val newVisible = !ImGuiGLSurface.nativeIsMenuVisible()
+                        ImGuiGLSurface.nativeSetMenuVisible(newVisible)
+                        menuVisible = newVisible
+                        applyOverlayTouchable(newVisible)
                     }
                     true
                 }
@@ -1308,6 +1310,19 @@ class MainActivity : AppCompatActivity() {
         }
         floatingIconView = null
         floatingIconParams = null
+    }
+
+    private fun applyOverlayTouchable(touchable: Boolean) {
+        val view = imguiOverlay ?: return
+        val params = view.layoutParams as? WindowManager.LayoutParams ?: return
+        val isTouchable = (params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0
+        if (touchable && !isTouchable) {
+            params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+            windowManager?.updateViewLayout(view, params)
+        } else if (!touchable && isTouchable) {
+            params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            windowManager?.updateViewLayout(view, params)
+        }
     }
 
     private fun startTouchPolling() {
@@ -1484,7 +1499,7 @@ class MainActivity : AppCompatActivity() {
                         Spacer(Modifier.height(14.dp))
 
                         Text(
-                            text = "开源项目 · 由 $CREATOR_NAME 创建",
+                            text = "由 $CREATOR_NAME 打造",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
                             modifier = Modifier
@@ -1535,7 +1550,7 @@ class MainActivity : AppCompatActivity() {
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.08f))
                         DropdownMenuItemContent(
-                            text = "在 GitHub 查看",
+                            text = "项目主页",
                             icon = Icons.Filled.Info,
                             onClick = { menuOpen = false; onOpenGithub() }
                         )

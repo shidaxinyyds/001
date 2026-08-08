@@ -49,6 +49,9 @@ class ImGuiGLSurface @JvmOverloads constructor(
 
         @JvmStatic
         external fun nativeSetMenuVisible(visible: Boolean)
+
+        @JvmStatic
+        external fun nativeIsMenuVisible(): Boolean
         
         @JvmStatic
         external fun nativeSetIconPosition(x: Float, y: Float)

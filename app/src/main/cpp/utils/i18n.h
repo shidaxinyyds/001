@@ -202,7 +202,7 @@ inline const char* kTranslations[static_cast<int>(Key::Count)][static_cast<int>(
     /* AimDelay */                  { "Aim delay",        "\xe7\x9e\x84\xe5\x87\x86\xe5\xbb\xb6\xe8\xbf\x9f" },
     /* AimResetTouchZone */         { "Reset touch zone", "\xe9\x87\x8d\xe7\xbd\xae\xe8\xa7\xa6\xe6\x8e\xa7\xe5\x8c\xba" },
 
-    /* InfoTitle */                 { "AimBuddy (open source)", "AimBuddy\xef\xbc\x88\xe5\xbc\x80\xe6\xba\x90\xef\xbc\x89" },
+    /* InfoTitle */                 { "AimBuddy", "AimBuddy" },
     /* InfoVersion */               { "Version: " AIMBUDDY_VERSION, "\xe7\x89\x88\xe6\x9c\xac\xef\xbc\x9a " AIMBUDDY_VERSION },
     /* InfoOverlayFps */            { "Overlay FPS",      "\xe5\x8f\xa0\xe5\xb1\x82 FPS" },
     /* InfoInferenceMs */           { "Inference",        "\xe6\x8e\xa8\xe7\x90\x86\xe6\x97\xb6\xe9\x97\xb4" },
