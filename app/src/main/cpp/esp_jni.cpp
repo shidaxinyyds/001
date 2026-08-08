@@ -207,8 +207,8 @@ namespace {
 
                     const auto inferStart = std::chrono::steady_clock::now();
                     
-                    // Run detection with dynamic crop
-                    if (g_detector->detect(frame.hardwareBuffer, result, adaptiveCropSize)) {
+                    // Run detection on the whole screen (full-frame mode)
+                    if (g_detector->detect(frame.hardwareBuffer, result)) {
                         const auto inferEnd = std::chrono::steady_clock::now();
                         const double inferMs = std::chrono::duration<double, std::milli>(inferEnd - inferStart).count();
                         statsInferenceMs += inferMs;

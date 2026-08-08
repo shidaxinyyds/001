@@ -163,7 +163,6 @@ class MainActivity : AppCompatActivity() {
         private const val CREATOR_NAME = "1337XCode"
         private const val CREATOR_URL = "https://www.darshanchheda.com"
         private const val PREFS_NAME = "aimbuddy_prefs"
-        private const val PREF_OSS_NOTICE_SHOWN = "oss_notice_shown"
         private const val PREF_MODEL_PARAM_PATH = "model_param_path"
         private const val PREF_MODEL_BIN_PATH = "model_bin_path"
         private const val ASSET_MODEL_PARAM = "models/yolo26n-opt.param"
@@ -204,7 +203,7 @@ class MainActivity : AppCompatActivity() {
     // UI state
     private var isRunningState by mutableStateOf(false)
     private var statusTextState by mutableStateOf("Status: Model Loading")
-    private var activeModelTextState by mutableStateOf("Model: Auto")
+    private var activeModelTextState by mutableStateOf("模型：自动")
     private var showStoreState by mutableStateOf(false)
     private var isFetchingStoreState by mutableStateOf(false)
     private var storeModelsState by mutableStateOf<List<StoreModelDefinition>>(emptyList())
@@ -239,7 +238,7 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread {
             refreshShizukuState(forceUnavailable = true)
             if (nativeGetTouchBackend() == 1) {
-                showAppToast("Shizuku disconnected. Reconnect and press Start again.", true)
+                showAppToast("Shizuku 已断开，请重新连接后再次点击开始。", true)
             }
         }
     }
@@ -251,9 +250,9 @@ class MainActivity : AppCompatActivity() {
         pendingShizukuPermissionRequest = false
         refreshShizukuState()
         if (granted) {
-            showAppToast("Shizuku permission granted.", false)
+            showAppToast("Shizuku 权限已授予。", false)
         } else {
-            showAppToast("Shizuku permission denied. Aim assist stays visual-only.", true)
+            showAppToast("Shizuku 权限被拒绝，瞄准辅助仅保留可视化显示。", true)
         }
         if (pendingStartAfterShizuku) {
             pendingStartAfterShizuku = false
@@ -293,7 +292,7 @@ class MainActivity : AppCompatActivity() {
             Log.w(TAG, "MediaProjection stopped by system/user")
             runOnUiThread {
                 if (isRunningState || isStarting.get()) {
-                    showAppToast("Screen capture ended. ESP stopped.", true)
+                    showAppToast("屏幕采集已结束，ESP 已停止。", true)
                     stopESP()
                 }
             }
@@ -332,7 +331,7 @@ class MainActivity : AppCompatActivity() {
         pendingImportParamUri = uri
         pendingImportName = getDisplayName(uri).substringBeforeLast('.', "local-model")
 
-        showAppToast(".param imported. Now select the matching .bin file.", false)
+        showAppToast(".param 已导入，请选择对应的 .bin 文件。", false)
         importBinLauncher.launch(arrayOf("application/octet-stream", "*/*"))
     }
 
@@ -342,7 +341,7 @@ class MainActivity : AppCompatActivity() {
         }
         val paramUri = pendingImportParamUri
         if (paramUri == null) {
-            showAppToast("Select .param first, then .bin.", true)
+            showAppToast("请先选择 .param，再选择 .bin。", true)
             return@registerForActivityResult
         }
 
@@ -354,14 +353,14 @@ class MainActivity : AppCompatActivity() {
         val paramOk = copyUriToFile(paramUri, paramFile)
         val binOk = copyUriToFile(uri, binFile)
         if (!paramOk || !binOk) {
-            showAppToast("Failed to import selected model files", true)
+            showAppToast("导入所选模型文件失败", true)
             return@registerForActivityResult
         }
 
         val installed = InstalledModel(
             id = modelId,
             title = pendingImportName,
-            description = "Imported from local storage",
+            description = "从本地存储导入",
             source = ModelSource.LOCAL,
             paramPath = paramFile.absolutePath,
             binPath = binFile.absolutePath,
@@ -369,7 +368,7 @@ class MainActivity : AppCompatActivity() {
         )
         modelCatalog.addOrUpdateModel(installed, makeActive = true)
         applyActiveModelSelection()
-        showAppToast("Model imported from storage", false)
+        showAppToast("已从存储空间导入模型", false)
         reinitializeNativeIfIdle()
         pendingImportParamUri = null
     }
@@ -434,7 +433,7 @@ class MainActivity : AppCompatActivity() {
                 if (!hasAssetParam) add(ASSET_MODEL_PARAM)
                 if (!hasAssetBin) add(ASSET_MODEL_BIN)
             }.joinToString(", ")
-            showAppToast("Missing model in assets: $missing", true)
+            showAppToast("assets 中缺少模型：$missing", true)
         }
 
         modelCatalog.ensureDefaultAssetModel(hasAssetParam, hasAssetBin)
@@ -449,16 +448,15 @@ class MainActivity : AppCompatActivity() {
         if (!nativeInit(assets, screenWidth, screenHeight)) {
             Log.e(TAG, "Failed to initialize native components")
             if (!hasAssetParam || !hasAssetBin) {
-                showAppToast("Initialization failed. Import model manually or add assets models.", true)
+                showAppToast("初始化失败，请手动导入模型或添加 assets 模型。", true)
             } else {
-                showAppToast("Failed to initialize ESP. Check model files.", true)
+                showAppToast("ESP 初始化失败，请检查模型文件。", true)
             }
             setStatus("Status: Init Failed")
         } else {
             setStatus("Status: Ready")
             ImGuiGLSurface.nativeSetRootAvailable(false)
             refreshShizukuState()
-            maybeShowOpenSourceDialogOnce()
         }
 
         Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
@@ -512,7 +510,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (statusTextState == "Status: Init Failed") {
-            showAppToast("Initialization failed. Check model files.", true)
+            showAppToast("初始化失败，请检查模型文件。", true)
             return
         }
 
@@ -520,16 +518,16 @@ class MainActivity : AppCompatActivity() {
         if (!Settings.canDrawOverlays(this)) {
             Log.i(TAG, "Requesting overlay permission")
             AlertDialog.Builder(this)
-                .setTitle("Overlay Permission Required")
-                .setMessage("AimBuddy needs the 'Display over other apps' permission to draw the ESP overlay.\n\nTap 'Open Settings', find AimBuddy in the list and enable the permission, then come back and press Start.")
-                .setPositiveButton("Open Settings") { _, _ ->
+                .setTitle("需要悬浮窗权限")
+                .setMessage("AimBuddy 需要「在其他应用上层显示」权限才能绘制 ESP 叠加层。\n\n点击「打开设置」，在列表中找到 AimBuddy 并开启权限，然后返回点击开始。")
+                .setPositiveButton("打开设置") { _, _ ->
                     val intent = Intent(
                         Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                         Uri.parse("package:$packageName")
                     )
                     startActivityForResult(intent, REQUEST_OVERLAY_PERMISSION)
                 }
-                .setNegativeButton("Cancel", null)
+                .setNegativeButton("取消", null)
                 .setCancelable(true)
                 .show()
             return
@@ -555,7 +553,7 @@ class MainActivity : AppCompatActivity() {
 
         pendingStartAfterRoot = true
         setStatus("Status: Waiting for Root Permission")
-        showAppToast("Approve root request if you want assisted input.", false)
+        showAppToast("如需辅助输入，请授予 Root 权限。", false)
         beginAsyncRootCheck { hasRoot ->
             if (!pendingStartAfterRoot) return@beginAsyncRootCheck
 
@@ -565,7 +563,7 @@ class MainActivity : AppCompatActivity() {
             } else {
                 pendingStartAfterRoot = false
                 nativeSetTouchBackend(1)
-                showAppToast("Root unavailable. Switched to Shizuku non-root input.", false)
+                showAppToast("Root 不可用，已切换至 Shizuku 免 Root 输入。", false)
                 setStatus("Status: Using Shizuku Backend")
                 requestShizukuThenMediaProjection()
             }
@@ -584,11 +582,11 @@ class MainActivity : AppCompatActivity() {
             if (isRootLikelyAvailable()) {
                 pendingStartAfterShizuku = false
                 nativeSetTouchBackend(0)
-                showAppToast("Shizuku unavailable. Switched to root uinput input.", false)
+                showAppToast("Shizuku 不可用，已切换至 Root uinput 输入。", false)
                 setStatus("Status: Using Root Backend")
                 requestRootThenMediaProjection()
             } else {
-                showAppToast("Waiting for Shizuku connection...", false)
+                showAppToast("正在等待 Shizuku 连接……", false)
                 val waitedMs = System.currentTimeMillis() - shizukuWaitStartedAt
                 if (waitedMs > 4000) {
                     pendingStartAfterShizuku = false
@@ -615,11 +613,11 @@ class MainActivity : AppCompatActivity() {
             pendingShizukuPermissionRequest = true
             try {
                 Shizuku.requestPermission(REQUEST_SHIZUKU_PERMISSION)
-                showAppToast("Approve Shizuku permission request.", false)
+                showAppToast("请授予 Shizuku 权限请求。", false)
             } catch (e: Throwable) {
                 pendingShizukuPermissionRequest = false
                 pendingStartAfterShizuku = false
-                showAppToast("Failed to request Shizuku permission: ${e.message}", true)
+                showAppToast("请求 Shizuku 权限失败：${e.message}", true)
                 setStatus("Status: Ready")
             }
         }
@@ -627,22 +625,22 @@ class MainActivity : AppCompatActivity() {
 
     private fun showShizukuConnectionHelpDialog() {
         AlertDialog.Builder(this)
-            .setTitle("Shizuku Not Connected")
+            .setTitle("Shizuku 未连接")
             .setMessage(
-                "AimBuddy could not receive Shizuku binder.\n\n" +
-                    "1) Open Shizuku app and make sure service is running\n" +
-                    "2) Confirm AimBuddy is allowed in Shizuku app\n" +
-                    "3) Return and press Start again"
+                "AimBuddy 无法接收到 Shizuku 服务。\n\n" +
+                    "1) 打开 Shizuku 应用并确认服务正在运行\n" +
+                    "2) 确认 AimBuddy 已在 Shizuku 应用中被允许\n" +
+                    "3) 返回并再次点击开始"
             )
-            .setPositiveButton("Open Shizuku") { _, _ ->
+            .setPositiveButton("打开 Shizuku") { _, _ ->
                 val launch = packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")
                 if (launch != null) {
                     startActivity(launch)
                 } else {
-                    showAppToast("Shizuku app not found.", true)
+                    showAppToast("未找到 Shizuku 应用。", true)
                 }
             }
-            .setNegativeButton("Retry") { _, _ ->
+            .setNegativeButton("重试") { _, _ ->
                 requestShizukuThenMediaProjection()
             }
             .setNeutralButton("Continue Visual Only") { _, _ ->
@@ -658,7 +656,7 @@ class MainActivity : AppCompatActivity() {
         val captureIntent = mediaProjectionManager?.createScreenCaptureIntent()
             ?: run {
                 Log.e(TAG, "MediaProjectionManager is null")
-                showAppToast("Unable to start screen capture", true)
+                showAppToast("无法启动屏幕采集", true)
                 setStatus("Status: Ready")
                 return
             }
@@ -686,7 +684,7 @@ class MainActivity : AppCompatActivity() {
                     requestRootThenMediaProjection()
                 } else {
                     Log.w(TAG, "Overlay permission denied")
-                    showAppToast("Overlay permission required", true)
+                    showAppToast("需要悬浮窗权限", true)
                 }
             }
 
@@ -711,13 +709,13 @@ class MainActivity : AppCompatActivity() {
                             startESP()
                         } catch (e: Exception) {
                             Log.e(TAG, "Failed to create MediaProjection: ${e.message}")
-                            showAppToast("Failed to start capture: ${e.message}", true)
+                            showAppToast("启动采集失败：${e.message}", true)
                         }
                     }, 1000) // 1 second delay
                     
                 } else {
                     Log.w(TAG, "MediaProjection permission denied")
-                    showAppToast("Screen capture permission required", true)
+                    showAppToast("需要屏幕采集权限", true)
                 }
             }
         }
@@ -733,13 +731,13 @@ class MainActivity : AppCompatActivity() {
         setStatus("Status: Starting")
         try {
             if (mediaProjection == null) {
-                showAppToast("Screen capture not initialized", true)
+                showAppToast("屏幕采集未初始化", true)
                 setStatus("Status: Ready")
                 return
             }
 
             if (!Settings.canDrawOverlays(this)) {
-                showAppToast("Overlay permission required", true)
+                showAppToast("需要悬浮窗权限", true)
                 setStatus("Status: Ready")
                 return
             }
@@ -749,10 +747,10 @@ class MainActivity : AppCompatActivity() {
             nativeStart()
 
             updateButtonStates(true)
-            showAppToast("ESP started", false)
+            showAppToast("ESP 已启动", false)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start ESP: ${e.message}", e)
-            showAppToast("Failed to start ESP: ${e.message}", true)
+            showAppToast("启动 ESP 失败：${e.message}", true)
             stopESP()
         } finally {
             isStarting.set(false)
@@ -894,7 +892,7 @@ class MainActivity : AppCompatActivity() {
         installedModelsState = modelCatalog.getInstalledModels()
         if (active == null) {
             nativeSetModelPaths(null, null)
-            activeModelTextState = "Model: Missing"
+            activeModelTextState = "模型：缺失"
             return
         }
 
@@ -903,12 +901,12 @@ class MainActivity : AppCompatActivity() {
         } else {
             nativeSetModelPaths(active.paramPath, active.binPath)
         }
-        activeModelTextState = "Model: ${active.title} (${active.source.name.lowercase()})"
+        activeModelTextState = "模型：${active.title} (${active.source.name.lowercase()})"
     }
 
     private fun reinitializeNativeIfIdle() {
         if (isRunningState || isStarting.get() || isStopping.get()) {
-            showAppToast("New model will be used on next start.", false)
+            showAppToast("新模型将在下次启动时生效。", false)
             return
         }
         nativeShutdown()
@@ -918,10 +916,10 @@ class MainActivity : AppCompatActivity() {
                 nativeInitAimbot()
             }
             setStatus("Status: Ready")
-            showAppToast("Model applied", false)
+            showAppToast("模型已应用", false)
         } else {
             setStatus("Status: Init Failed")
-            showAppToast("Imported model failed to initialize", true)
+            showAppToast("导入的模型初始化失败", true)
         }
     }
 
@@ -929,7 +927,7 @@ class MainActivity : AppCompatActivity() {
         try {
             importParamLauncher.launch(arrayOf("application/octet-stream", "*/*"))
         } catch (e: ActivityNotFoundException) {
-            showAppToast("No file picker found on this device", true)
+            showAppToast("本设备未找到文件选择器", true)
         }
     }
 
@@ -982,7 +980,7 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 runOnUiThread {
                     isFetchingStoreState = false
-                    showAppToast("Store fetch failed: ${e.message}", true)
+                    showAppToast("商店获取失败：${e.message}", true)
                 }
             }
         }
@@ -990,7 +988,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun downloadStoreModelAsync(model: StoreModelDefinition) {
         downloadingModelIdState = model.id
-        showAppToast("Downloading ${model.title}...", false)
+        showAppToast("正在下载 ${model.title}……", false)
         thread(start = true, name = "aimbuddy-store-download") {
             try {
                 val modelId = modelCatalog.sanitizeModelId(model.id)
@@ -1012,12 +1010,12 @@ class MainActivity : AppCompatActivity() {
                     downloadingModelIdState = null
                     applyActiveModelSelection()
                     reinitializeNativeIfIdle()
-                    showAppToast("Downloaded and switched to ${model.title}", false)
+                    showAppToast("已下载并切换至 ${model.title}", false)
                 }
             } catch (e: Exception) {
                 runOnUiThread {
                     downloadingModelIdState = null
-                    showAppToast("Download failed: ${e.message}", true)
+                    showAppToast("下载失败：${e.message}", true)
                 }
             }
         }
@@ -1025,18 +1023,18 @@ class MainActivity : AppCompatActivity() {
 
     private fun showDeleteModelConfirmationDialog(model: InstalledModel) {
         AlertDialog.Builder(this)
-            .setTitle("Delete Model")
-            .setMessage("Are you sure you want to permanently delete \"${model.title}\" and free up space?")
-            .setPositiveButton("Delete") { _, _ ->
+            .setTitle("删除模型")
+            .setMessage("确定要永久删除「${model.title}」并释放空间吗？")
+            .setPositiveButton("删除") { _, _ ->
                 if (modelCatalog.deleteModel(model.id)) {
                     applyActiveModelSelection()
                     reinitializeNativeIfIdle()
-                    showAppToast("Model deleted successfully", false)
+                    showAppToast("模型已成功删除", false)
                 } else {
-                    showAppToast("Failed to delete model", true)
+                    showAppToast("删除模型失败", true)
                 }
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton("取消", null)
             .show()
     }
 
@@ -1360,26 +1358,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun maybeShowOpenSourceDialogOnce() {
-        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-        if (prefs.getBoolean(PREF_OSS_NOTICE_SHOWN, false)) {
-            return
-        }
-
-        AlertDialog.Builder(this)
-            .setTitle("AimBuddy Notice")
-            .setMessage("AimBuddy is completely free and open source. If you paid for this app, you were scammed.\n\nRepository: $OSS_GITHUB_URL")
-            .setPositiveButton("Open GitHub") { _, _ ->
-                prefs.edit().putBoolean(PREF_OSS_NOTICE_SHOWN, true).apply()
-                openGithubUrl()
-            }
-            .setNegativeButton("Cancel") { _, _ ->
-                prefs.edit().putBoolean(PREF_OSS_NOTICE_SHOWN, true).apply()
-            }
-            .setCancelable(false)
-            .show()
-    }
-
     private fun showAppToast(message: String, isError: Boolean) {
         val textView = android.widget.TextView(this).apply {
             text = message
@@ -1494,7 +1472,7 @@ class MainActivity : AppCompatActivity() {
                         Spacer(Modifier.height(14.dp))
 
                         Text(
-                            text = "Touch Input Backends",
+                            text = "触摸输入后端",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             fontWeight = FontWeight.SemiBold,
@@ -1506,7 +1484,7 @@ class MainActivity : AppCompatActivity() {
                         Spacer(Modifier.height(14.dp))
 
                         Text(
-                            text = "Open source - created by $CREATOR_NAME",
+                            text = "开源项目 · 由 $CREATOR_NAME 创建",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
                             modifier = Modifier
@@ -1545,19 +1523,19 @@ class MainActivity : AppCompatActivity() {
                 ) {
                     Column(modifier = Modifier.padding(vertical = 4.dp)) {
                         DropdownMenuItemContent(
-                            text = "Import model files",
+                            text = "导入模型文件",
                             icon = Icons.Filled.FolderOpen,
                             onClick = { menuOpen = false; onImportModel() }
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.08f))
                         DropdownMenuItemContent(
-                            text = "Model store",
+                            text = "模型商店",
                             icon = Icons.Filled.Download,
                             onClick = { menuOpen = false; onOpenStore() }
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.08f))
                         DropdownMenuItemContent(
-                            text = "View on GitHub",
+                            text = "在 GitHub 查看",
                             icon = Icons.Filled.Info,
                             onClick = { menuOpen = false; onOpenGithub() }
                         )
@@ -1607,19 +1585,19 @@ class MainActivity : AppCompatActivity() {
     private fun mapStatusToDisplayTitle(status: String): String {
         val raw = status.removePrefix("Status: ").trim()
         return when (raw) {
-            "Model Loading" -> "Initializing Model"
-            "Init Failed" -> "Setup Failed"
-            "Ready" -> "System Ready"
-            "Waiting for Root Permission" -> "Root Request Pending"
-            "Root Granted" -> "Root Access Confirmed"
-            "Using Shizuku Backend" -> "Shizuku Backend Active"
-            "Waiting for Shizuku Permission" -> "Shizuku Request Pending"
-            "Using Root Backend" -> "Root Backend Active"
-            "Shizuku Not Connected" -> "Shizuku Offline"
-            "Waiting for Screen Capture Permission" -> "Capture Auth Pending"
-            "Starting" -> "Starting Service"
-            "Stopping" -> "Stopping Service"
-            "Running" -> "Service Active"
+            "Model Loading" -> "模型加载中"
+            "Init Failed" -> "初始化失败"
+            "Ready" -> "系统就绪"
+            "Waiting for Root Permission" -> "正在等待 Root 权限"
+            "Root Granted" -> "Root 权限已授予"
+            "Using Shizuku Backend" -> "Shizuku 后端已启用"
+            "Waiting for Shizuku Permission" -> "正在等待 Shizuku 权限"
+            "Using Root Backend" -> "Root 后端已启用"
+            "Shizuku Not Connected" -> "Shizuku 未连接"
+            "Waiting for Screen Capture Permission" -> "正在等待屏幕采集权限"
+            "Starting" -> "正在启动服务"
+            "Stopping" -> "正在停止服务"
+            "Running" -> "服务运行中"
             else -> raw
         }
     }
@@ -1627,20 +1605,20 @@ class MainActivity : AppCompatActivity() {
     private fun mapStatusToDisplayDescription(status: String): String {
         val raw = status.removePrefix("Status: ").trim()
         return when (raw) {
-            "Model Loading" -> "Mapping memory buffers and initializing weights..."
-            "Init Failed" -> "Engine initialization failed. Please check your model files."
-            "Ready" -> "System configured. Tap START SERVICE below to begin."
-            "Waiting for Root Permission" -> "Please grant Superuser authorization when prompted."
-            "Root Granted" -> "Superuser access verified. Mounting touch inputs."
-            "Using Shizuku Backend" -> "Synthetic touch events routed via Shizuku wrapper."
-            "Waiting for Shizuku Permission" -> "Please authorize Shizuku shell manager when prompted."
-            "Using Root Backend" -> "Synthetic touch events injected directly to /dev/uinput."
-            "Shizuku Not Connected" -> "Start Shizuku server inside the Shizuku Manager app."
-            "Waiting for Screen Capture Permission" -> "Please confirm screen projection permission in dialog."
-            "Starting" -> "Instantiating virtual devices and capture threads..."
-            "Stopping" -> "Disposing graphics surfaces and stopping background tasks..."
-            "Running" -> "Drawing ESP overlay dynamically on top of capture buffers."
-            else -> "System state: $raw"
+            "Model Loading" -> "正在映射内存缓冲并初始化权重……"
+            "Init Failed" -> "引擎初始化失败，请检查模型文件。"
+            "Ready" -> "系统已配置，点击下方「启动服务」开始。"
+            "Waiting for Root Permission" -> "请在提示时授予超级用户授权。"
+            "Root Granted" -> "已验证超级用户权限，正在挂载触摸输入。"
+            "Using Shizuku Backend" -> "合成触摸事件经由 Shizuku 包装转发。"
+            "Waiting for Shizuku Permission" -> "请在提示时授权 Shizuku 管理器。"
+            "Using Root Backend" -> "合成触摸事件直接注入到 /dev/uinput。"
+            "Shizuku Not Connected" -> "请在 Shizuku 管理应用中启动服务。"
+            "Waiting for Screen Capture Permission" -> "请在弹窗中确认屏幕投影权限。"
+            "Starting" -> "正在创建虚拟设备并启动采集线程……"
+            "Stopping" -> "正在释放图形 Surface 并停止后台任务……"
+            "Running" -> "正在采集缓冲上动态绘制 ESP 叠加层。"
+            else -> "系统状态：$raw"
         }
     }
 
@@ -1718,14 +1696,14 @@ class MainActivity : AppCompatActivity() {
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "ACTIVE MODEL",
+                        text = "当前模型",
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f)
                     )
                     Spacer(Modifier.height(2.dp))
                     Text(
-                        text = activeModelText.removePrefix("Model: "),
+                        text = activeModelText.removePrefix("模型： "),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface,
@@ -1747,7 +1725,7 @@ class MainActivity : AppCompatActivity() {
         val containerColor = if (isRunning) Color(0xFFDC2626) else MaterialTheme.colorScheme.primary
         val contentColor = if (isRunning) Color.White else Color(0xFF070B13)
         val icon = if (isRunning) Icons.Filled.Stop else Icons.Filled.PlayArrow
-        val label = if (isRunning) "STOP SERVICE" else "START SERVICE"
+        val label = if (isRunning) "停止服务" else "启动服务"
         
         Card(
             modifier = Modifier
@@ -1845,7 +1823,7 @@ class MainActivity : AppCompatActivity() {
                         }
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            text = "Model Store",
+                            text = "模型商店",
                             style = MaterialTheme.typography.headlineSmall,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onSurface
@@ -1880,7 +1858,7 @@ class MainActivity : AppCompatActivity() {
                         ) {
                             Icon(Icons.Filled.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("Import Local", style = MaterialTheme.typography.bodySmall)
+                            Text("本地导入", style = MaterialTheme.typography.bodySmall)
                         }
                     }
                 }
@@ -1897,12 +1875,12 @@ class MainActivity : AppCompatActivity() {
                     Tab(
                         selected = selectedTab == 0,
                         onClick = { selectedTab = 0 },
-                        text = { Text("Store Catalog", fontWeight = FontWeight.Bold) }
+                        text = { Text("商店目录", fontWeight = FontWeight.Bold) }
                     )
                     Tab(
                         selected = selectedTab == 1,
                         onClick = { selectedTab = 1 },
-                        text = { Text("My Models (${installedModelsState.size})", fontWeight = FontWeight.Bold) }
+                        text = { Text("我的模型 (${installedModelsState.size})", fontWeight = FontWeight.Bold) }
                     )
                 }
 
@@ -1927,16 +1905,16 @@ class MainActivity : AppCompatActivity() {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.height(12.dp))
-                    Text("Fetching catalog from GitHub...", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("正在从 GitHub 获取目录……", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         } else if (storeModelsState.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("No models available in store.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("商店中暂无可用模型。", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.height(12.dp))
                     OutlinedButton(onClick = { fetchStoreModelsAsync() }) {
-                        Text("Retry Fetch")
+                        Text("重新获取")
                     }
                 }
             }
@@ -2016,7 +1994,7 @@ class MainActivity : AppCompatActivity() {
                                         .padding(horizontal = 6.dp, vertical = 2.dp)
                                 ) {
                                     Text(
-                                        text = "ACTIVE",
+                                        text = "使用中",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.primary,
                                         fontWeight = FontWeight.Bold
@@ -2049,7 +2027,7 @@ class MainActivity : AppCompatActivity() {
                                 shape = RoundedCornerShape(10.dp),
                                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
                             ) {
-                                Text("Use", style = MaterialTheme.typography.labelMedium)
+                                Text("使用", style = MaterialTheme.typography.labelMedium)
                             }
                         } else if (model.isDownloadable) {
                             FilledTonalButton(
@@ -2057,11 +2035,11 @@ class MainActivity : AppCompatActivity() {
                                 shape = RoundedCornerShape(10.dp),
                                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
                             ) {
-                                Text("Download", style = MaterialTheme.typography.labelMedium)
+                                Text("下载", style = MaterialTheme.typography.labelMedium)
                             }
                         } else {
                             Text(
-                                text = "Demo",
+                                text = "演示",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 fontWeight = FontWeight.Bold
@@ -2077,9 +2055,9 @@ class MainActivity : AppCompatActivity() {
                     horizontalArrangement = Arrangement.Start,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    val sizeStr = if (model.totalSizeBytes > 0L) formatBytes(model.totalSizeBytes) else "metadata only"
+                    val sizeStr = if (model.totalSizeBytes > 0L) formatBytes(model.totalSizeBytes) else "仅元数据"
                     Text(
-                        text = "Size: $sizeStr",
+                        text = "大小：$sizeStr",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                     )
@@ -2099,7 +2077,7 @@ class MainActivity : AppCompatActivity() {
         if (installedModelsState.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
-                    text = "No models installed. Import model files or download from store.",
+                    text = "尚未安装模型，请导入模型文件或从商店下载。",
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
@@ -2174,7 +2152,7 @@ class MainActivity : AppCompatActivity() {
                                         .padding(horizontal = 6.dp, vertical = 2.dp)
                                 ) {
                                     Text(
-                                        text = "ACTIVE",
+                                        text = "使用中",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.primary,
                                         fontWeight = FontWeight.Bold
@@ -2199,7 +2177,7 @@ class MainActivity : AppCompatActivity() {
                                 shape = RoundedCornerShape(10.dp),
                                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
                             ) {
-                                Text("Use", style = MaterialTheme.typography.labelMedium)
+                                Text("使用", style = MaterialTheme.typography.labelMedium)
                             }
                             
                             Spacer(Modifier.width(8.dp))
@@ -2224,15 +2202,15 @@ class MainActivity : AppCompatActivity() {
                     horizontalArrangement = Arrangement.Start,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    val sizeStr = if (model.totalSizeBytes > 0L) formatBytes(model.totalSizeBytes) else "n/a"
+                    val sizeStr = if (model.totalSizeBytes > 0L) formatBytes(model.totalSizeBytes) else "无"
                     Text(
-                        text = "Size: $sizeStr",
+                        text = "大小：$sizeStr",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                     )
                     Spacer(Modifier.width(16.dp))
                     Text(
-                        text = "Source: ${model.source.name.lowercase()}",
+                        text = "来源：${model.source.name.lowercase()}",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                     )
@@ -2272,11 +2250,11 @@ class MainActivity : AppCompatActivity() {
                         if (nativeInitAimbot()) {
                             Log.i(TAG, "Aimbot initialized successfully")
                             if (nativeGetTouchBackend() == 0) {
-                                showAppToast("Root granted! Aimbot enabled.", false)
+                                showAppToast("Root 已授予！瞄准辅助已开启。", false)
                             }
                         } else {
                             Log.w(TAG, "Aimbot init failed after root grant")
-                            showAppToast("Root granted but aimbot init failed. Check /dev/uinput.", true)
+                            showAppToast("Root 已授予，但瞄准辅助初始化失败，请检查 /dev/uinput。", true)
                         }
                     }
                 } else {

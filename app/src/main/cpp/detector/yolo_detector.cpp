@@ -137,44 +137,120 @@ bool YoloDetector::detect(AHardwareBuffer* buffer, DetectionResult& result) {
         LOGE("Detector not initialized");
         return false;
     }
-    
+
     if (!buffer) {
         LOGE("Hardware buffer is null");
         return false;
     }
-    
+
     result.clear();
-    
+
     auto startTime = std::chrono::high_resolution_clock::now();
-    
-    // Preprocess: extract pixels, center crop, resize into persistent buffer
-    // ncnn::Mat inputMat; <- REMOVED, using member inputMat_
-    if (!preprocess(buffer, inputMat_, Config::CROP_SIZE)) {
-        LOGE("Preprocessing failed");
+
+    // ---- Full-screen tiled detection -------------------------------------
+    // The whole capture frame is scanned with overlapping square tiles, each
+    // resized into the model input. This covers the ENTIRE screen while keeping
+    // a gentle downscale (e.g. 480 -> 256), which is far more accurate than
+    // stretching the whole 1280x720 frame into a single 256x256 square.
+
+    AHardwareBuffer_Desc desc;
+    AHardwareBuffer_describe(buffer, &desc);
+
+    if (desc.format != AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM) {
+        LOGE("Unsupported buffer format: %d", desc.format);
         return false;
     }
-    
-    // Run inference
-    ncnn::Mat output;
-    if (!runInference(inputMat_, output)) {
-        LOGE("Inference failed");
+
+    void* pixels = nullptr;
+    int lockResult = AHardwareBuffer_lock(buffer, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN,
+                                          -1, nullptr, &pixels);
+    if (lockResult != 0 || !pixels) {
+        LOGE("Failed to lock hardware buffer: %d", lockResult);
         return false;
     }
-    
-    // Post-process: decode boxes, NMS, coordinate mapping
-    postprocess(output, result, Config::CROP_SIZE);
-    
+
+    const uint8_t* srcPixels = static_cast<const uint8_t*>(pixels);
+    int srcWidth = static_cast<int>(desc.width);
+    int srcHeight = static_cast<int>(desc.height);
+    int srcStride = static_cast<int>(desc.stride) * 4;  // RGBA = 4 bytes per pixel
+
+    currentCaptureWidth_ = srcWidth;
+    currentCaptureHeight_ = srcHeight;
+    currentCropX_ = 0;
+    currentCropY_ = 0;
+    fullFrame_ = true;
+
+    float screenW = static_cast<float>(screenWidth_.load(std::memory_order_relaxed));
+    float screenH = static_cast<float>(screenHeight_.load(std::memory_order_relaxed));
+    float captureToScreenX = (srcWidth > 0) ? (screenW / static_cast<float>(srcWidth)) : 1.0f;
+    float captureToScreenY = (srcHeight > 0) ? (screenH / static_cast<float>(srcHeight)) : 1.0f;
+
+    const int tile = Config::FULL_FRAME_TILE_SIZE;
+    const int step = std::max(1, tile - Config::FULL_FRAME_TILE_OVERLAP);
+    const float modelSize = static_cast<float>(Config::MODEL_INPUT_SIZE);
+
+    const std::array<float, 3> meanVals = {0.0f, 0.0f, 0.0f};
+    const std::array<float, 3> normVals = {1.0f / 255.0f, 1.0f / 255.0f, 1.0f / 255.0f};
+
+    float confThreshold = confidenceThreshold_.load(std::memory_order_relaxed);
+
+    DetectionArray combined;
+
+    for (int startY = 0; startY < srcHeight; startY += step) {
+        int tileH = std::min(tile, srcHeight - startY);
+        if (tileH <= 0) break;
+        for (int startX = 0; startX < srcWidth; startX += step) {
+            int tileW = std::min(tile, srcWidth - startX);
+            if (tileW <= 0) break;
+
+            const uint8_t* tileStart = srcPixels
+                + static_cast<size_t>(startY) * static_cast<size_t>(srcStride)
+                + static_cast<size_t>(startX) * 4u;
+
+            // Resize this tile (tileW x tileH) directly into the model input.
+            inputMat_ = ncnn::Mat::from_pixels_resize(
+                tileStart,
+                ncnn::Mat::PIXEL_RGBA2RGB,
+                tileW, tileH,
+                srcStride,
+                Config::MODEL_INPUT_SIZE, Config::MODEL_INPUT_SIZE
+            );
+            inputMat_.substract_mean_normalize(meanVals.data(), normVals.data());
+
+            ncnn::Mat output;
+            if (runInference(inputMat_, output)) {
+                // Map this tile's model-space boxes into screen space.
+                float scaleX = (static_cast<float>(tileW) / modelSize) * captureToScreenX;
+                float scaleY = (static_cast<float>(tileH) / modelSize) * captureToScreenY;
+                float offsetX = static_cast<float>(startX) * captureToScreenX;
+                float offsetY = static_cast<float>(startY) * captureToScreenY;
+                decodeBoxes(output, combined, scaleX, scaleY, offsetX, offsetY, confThreshold);
+            }
+        }
+    }
+
+    int unlockResult = AHardwareBuffer_unlock(buffer, nullptr);
+    if (unlockResult != 0) {
+        LOGW("AHardwareBuffer_unlock failed: %d", unlockResult);
+    }
+
+    // One global NMS across all tiles so overlapping detections merge cleanly.
+    if (combined.size() > 1) {
+        applyNMS(combined);
+    }
+    result.boxes = combined;
+
     auto endTime = std::chrono::high_resolution_clock::now();
     result.inferenceTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
-    
+
     // Store result thread-safely
     {
         std::scoped_lock lock(resultMutex_);
         latestResult_ = result;
     }
-    
+
     LOGP("Detection: %d boxes in %.2f ms", result.boxes.size(), result.inferenceTimeMs);
-    
+
     return true;
 }
 
@@ -194,20 +270,20 @@ bool YoloDetector::detect(AHardwareBuffer* buffer, DetectionResult& result, int 
     auto startTime = std::chrono::high_resolution_clock::now();
     
     // Preprocess: extract pixels, center crop, resize into persistent buffer
-    if (!preprocess(buffer, inputMat_, dynamicCropSize)) {
+    if (!preprocess(buffer, inputMat_, dynamicCropSize, /*fullFrame=*/false)) {
         LOGE("Preprocessing failed");
         return false;
     }
-    
+
     // Run inference
     ncnn::Mat output;
     if (!runInference(inputMat_, output)) {
         LOGE("Inference failed");
         return false;
     }
-    
+
     // Post-process: decode boxes, NMS, coordinate mapping
-    postprocess(output, result, dynamicCropSize);
+    postprocess(output, result, dynamicCropSize, /*fullFrame=*/false);
     
     auto endTime = std::chrono::high_resolution_clock::now();
     result.inferenceTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
@@ -228,7 +304,7 @@ DetectionResult YoloDetector::getResult() const {
     return latestResult_;
 }
 
-bool YoloDetector::preprocess(AHardwareBuffer* buffer, ncnn::Mat& inputMat, int cropSize) {
+bool YoloDetector::preprocess(AHardwareBuffer* buffer, ncnn::Mat& inputMat, int cropSize, bool fullFrame) {
     // Get hardware buffer description
     AHardwareBuffer_Desc desc;
     AHardwareBuffer_describe(buffer, &desc);
@@ -256,23 +332,37 @@ bool YoloDetector::preprocess(AHardwareBuffer* buffer, ncnn::Mat& inputMat, int 
     currentCaptureHeight_ = srcHeight;
     
     // Clamp crop size
-    int actualCropSize = std::min(cropSize, std::min(srcWidth, srcHeight));
-    actualCropSize = std::max(32, actualCropSize);
+    currentCropX_ = 0;
+    currentCropY_ = 0;
+    fullFrame_ = fullFrame;
 
-    // Center crop coordinates
-    int cropX = (srcWidth - actualCropSize) / 2;
-    int cropY = (srcHeight - actualCropSize) / 2;
-    currentCropX_ = std::max(0, std::min(cropX, srcWidth - actualCropSize));
-    currentCropY_ = std::max(0, std::min(cropY, srcHeight - actualCropSize));
-    
+    int actualW, actualH;
+    if (fullFrame) {
+        // Whole-screen detection: resize the entire capture frame into the
+        // square model input. Coordinate mapping is handled in postprocess().
+        actualW = srcWidth;
+        actualH = srcHeight;
+    } else {
+        int actualCropSize = std::min(cropSize, std::min(srcWidth, srcHeight));
+        actualCropSize = std::max(32, actualCropSize);
+
+        // Center crop coordinates
+        int cropX = (srcWidth - actualCropSize) / 2;
+        int cropY = (srcHeight - actualCropSize) / 2;
+        currentCropX_ = std::max(0, std::min(cropX, srcWidth - actualCropSize));
+        currentCropY_ = std::max(0, std::min(cropY, srcHeight - actualCropSize));
+        actualW = actualCropSize;
+        actualH = actualCropSize;
+    }
+
     // OPTIMIZED: Direct resize from RGBA buffer to model input (skip intermediate crop)
     const uint8_t* srcStart = srcPixels + currentCropY_ * srcStride + currentCropX_ * 4;
-    
+
     // Use NCNN's optimized from_pixels_resize (handles RGBA->RGB + resize in one pass)
     inputMat = ncnn::Mat::from_pixels_resize(
         srcStart,
         ncnn::Mat::PIXEL_RGBA2RGB,
-        actualCropSize, actualCropSize,
+        actualW, actualH,
         srcStride,  // stride in bytes
         Config::MODEL_INPUT_SIZE, Config::MODEL_INPUT_SIZE
     );
@@ -328,7 +418,149 @@ bool YoloDetector::runInference(const ncnn::Mat& input, ncnn::Mat& output) {
     return true;
 }
 
-void YoloDetector::postprocess(const ncnn::Mat& output, DetectionResult& result, int cropSize) {
+void YoloDetector::decodeBoxes(const ncnn::Mat& output, DetectionArray& out,
+                                float scaleX, float scaleY, float offsetX, float offsetY,
+                                float confThreshold) {
+    int numBoxes = output.h;
+    int numValues = output.w;
+    bool transposed = false;
+
+    if (numBoxes < numValues) {
+        transposed = true;
+        std::swap(numBoxes, numValues);
+    }
+
+    float modelSize = static_cast<float>(Config::MODEL_INPUT_SIZE);
+
+    int numClasses = numValues - 4;
+    int classOffset = 4;
+    float objectness = 1.0f;
+
+    // Auto-detect YOLO version
+    if (numClasses == Config::NUM_CLASSES + 1) {
+        classOffset = 5;
+        numClasses -= 1;
+    }
+    if (numClasses < 1) numClasses = 1;
+
+    if (transposed) {
+        const float* row0 = output.row(0);
+        const float* row1 = output.row(1);
+        const float* row2 = output.row(2);
+        const float* row3 = output.row(3);
+        const float* rowObj = (classOffset > 4) ? output.row(4) : nullptr;
+
+        for (int i = 0; i < numBoxes; ++i) {
+            if (out.full()) break;
+
+            float maxClassProb = 0.0f;
+            int bestClassId = 0;
+
+            if (classOffset > 4) objectness = rowObj[i];
+
+            for (int c = 0; c < numClasses; ++c) {
+                float prob = output.row(classOffset + c)[i];
+                prob *= objectness;
+                if (prob > maxClassProb) {
+                    maxClassProb = prob;
+                    bestClassId = c;
+                }
+            }
+
+            if (maxClassProb < confThreshold) continue;
+            if (Config::FILTER_ENEMY_ONLY && bestClassId != Config::ENEMY_CLASS_ID) continue;
+
+            float xCenter = row0[i];
+            float yCenter = row1[i];
+            float width = row2[i];
+            float height = row3[i];
+
+            if (xCenter <= 1.5f) {
+                xCenter *= modelSize;
+                yCenter *= modelSize;
+                width *= modelSize;
+                height *= modelSize;
+            }
+
+            float halfW = width * 0.5f;
+            float halfH = height * 0.5f;
+
+            float boxX = (xCenter - halfW) * scaleX + offsetX;
+            float boxY = (yCenter - halfH) * scaleY + offsetY;
+            float boxW = width * scaleX;
+            float boxH = height * scaleY;
+
+            if (boxW <= 0.0f || boxH <= 0.0f) continue;
+
+            BoundingBox box;
+            box.x = boxX;
+            box.y = boxY;
+            box.width = boxW;
+            box.height = boxH;
+            box.confidence = maxClassProb;
+            box.classId = bestClassId;
+
+            out.push(box);
+        }
+    } else {
+        for (int i = 0; i < numBoxes; ++i) {
+            if (out.full()) break;
+
+            const float* values = output.row(i);
+
+            float maxClassProb = 0.0f;
+            int bestClassId = 0;
+
+            if (classOffset > 4) objectness = values[4];
+
+            for (int c = 0; c < numClasses; ++c) {
+                float prob = values[classOffset + c];
+                prob *= objectness;
+                if (prob > maxClassProb) {
+                    maxClassProb = prob;
+                    bestClassId = c;
+                }
+            }
+
+            if (maxClassProb < confThreshold) continue;
+            if (Config::FILTER_ENEMY_ONLY && bestClassId != Config::ENEMY_CLASS_ID) continue;
+
+            float xCenter = values[0];
+            float yCenter = values[1];
+            float width = values[2];
+            float height = values[3];
+
+            if (xCenter <= 1.5f) {
+                xCenter *= modelSize;
+                yCenter *= modelSize;
+                width *= modelSize;
+                height *= modelSize;
+            }
+
+            float halfW = width * 0.5f;
+            float halfH = height * 0.5f;
+
+            float boxX = (xCenter - halfW) * scaleX + offsetX;
+            float boxY = (yCenter - halfH) * scaleY + offsetY;
+            float boxW = width * scaleX;
+            float boxH = height * scaleY;
+
+            if (boxW <= 0.0f || boxH <= 0.0f) continue;
+
+            BoundingBox box;
+            box.x = boxX;
+            box.y = boxY;
+            box.width = boxW;
+            box.height = boxH;
+            box.confidence = maxClassProb;
+            box.classId = bestClassId;
+
+            out.push(box);
+        }
+    }
+}
+
+void YoloDetector::postprocess(const ncnn::Mat& output, DetectionResult& result, int cropSize, bool fullFrame) {
     result.boxes.clear(); // Fix ghosting: Clear previous frame detections
     float confThreshold = confidenceThreshold_.load(std::memory_order_relaxed);
     
@@ -348,15 +580,24 @@ void YoloDetector::postprocess(const ncnn::Mat& output, DetectionResult& result,
     float screenH = static_cast<float>(screenHeight_.load(std::memory_order_relaxed));
     
     float modelSize = static_cast<float>(Config::MODEL_INPUT_SIZE);
-    float modelToCrop = static_cast<float>(cropSize) / modelSize;
-    float captureToScreenX = screenW / captureWidth;
-    float captureToScreenY = screenH / captureHeight;
-    
+
     // Combined scalars for single-fused multiply (Caching)
-    float scaleX = modelToCrop * captureToScreenX;
-    float scaleY = modelToCrop * captureToScreenY;
-    float offsetX = static_cast<float>(currentCropX_) * captureToScreenX;
-    float offsetY = static_cast<float>(currentCropY_) * captureToScreenY;
+    float scaleX, scaleY, offsetX, offsetY;
+    if (fullFrame) {
+        // Whole-screen mode: model input maps linearly to the full screen.
+        scaleX = screenW / modelSize;
+        scaleY = screenH / modelSize;
+        offsetX = 0.0f;
+        offsetY = 0.0f;
+    } else {
+        float modelToCrop = static_cast<float>(cropSize) / modelSize;
+        float captureToScreenX = screenW / captureWidth;
+        float captureToScreenY = screenH / captureHeight;
+        scaleX = modelToCrop * captureToScreenX;
+        scaleY = modelToCrop * captureToScreenY;
+        offsetX = static_cast<float>(currentCropX_) * captureToScreenX;
+        offsetY = static_cast<float>(currentCropY_) * captureToScreenY;
+    }
     
     int numClasses = numValues - 4;
     int classOffset = 4;

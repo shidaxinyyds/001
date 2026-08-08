@@ -30,6 +30,19 @@ namespace Config {
     /// this down under pressure; this cap is the maximum.
     constexpr int CROP_SIZE = 320;
 
+    /// Full-screen detection tile size (square region sent to the model).
+    /// Each tile is resized into MODEL_INPUT_SIZE (256). 512 -> 256 = 2.0x
+    /// downscale, far gentler than stretching the whole 1280x720 frame into a
+    /// single 256x256 square (~5x distorting downscale that misses distant enemies).
+    /// On a 1280x720 capture this yields 8 tiles (step = 512-128 = 384):
+    /// 4 columns x 2 rows. For higher accuracy at the cost of FPS, lower this
+    /// value (e.g. 384 -> 12 tiles, ~1.5x downscale). For higher FPS, raise it.
+    constexpr int FULL_FRAME_TILE_SIZE = 512;
+
+    /// Overlap between adjacent full-screen tiles (px) so targets near tile
+    /// boundaries are neither split nor missed. step = TILE_SIZE - OVERLAP.
+    constexpr int FULL_FRAME_TILE_OVERLAP = 128;
+
     /// ImageReader buffer depth. 3 is the minimum for triple buffering
     /// (one being captured, one queued, one being consumed by inference).
     constexpr int IMAGE_READER_MAX_IMAGES = 3;

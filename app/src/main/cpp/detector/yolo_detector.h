@@ -77,7 +77,8 @@ public:
      * @return true if detection successful
      */
     bool detect(AHardwareBuffer* buffer, DetectionResult& result);
-    bool detect(AHardwareBuffer* buffer, DetectionResult& result, int dynamicCropSize);
+    bool detect(AHardwareBuffer* buffer, DetectionResult& result, int dynamicCropSize,
+                bool fullFrame = false);
 
     /**
      * @brief Update screen size for coordinate mapping
@@ -124,7 +125,8 @@ private:
      * @param inputMat Output NCNN mat ready for inference
      * @return true if preprocessing successful
      */
-    bool preprocess(AHardwareBuffer* buffer, ncnn::Mat& inputMat, int cropSize = Config::CROP_SIZE);
+    bool preprocess(AHardwareBuffer* buffer, ncnn::Mat& inputMat, int cropSize = Config::CROP_SIZE,
+                    bool fullFrame = false);
     
     /**
      * @brief Run NCNN inference
@@ -139,7 +141,21 @@ private:
      * @param output Raw network output
      * @param result Output detection result
      */
-    void postprocess(const ncnn::Mat& output, DetectionResult& result, int cropSize = Config::CROP_SIZE);
+    void postprocess(const ncnn::Mat& output, DetectionResult& result, int cropSize = Config::CROP_SIZE,
+                     bool fullFrame = false);
+
+    /**
+     * @brief Decode network output into screen-space boxes.
+     * Shared by the tiled full-screen path and the cropped path.
+     * @param output Raw network output
+     * @param out Append target for decoded (screen-space) boxes
+     * @param scaleX,scaleY Model->screen scale
+     * @param offsetX,offsetY Screen-space offset of the source region origin
+     * @param confThreshold Confidence cutoff
+     */
+    void decodeBoxes(const ncnn::Mat& output, DetectionArray& out,
+                     float scaleX, float scaleY, float offsetX, float offsetY,
+                     float confThreshold);
     
     /**
      * @brief Apply Non-Maximum Suppression
@@ -164,6 +180,7 @@ private:
     int currentCropY_ = 0;
     int currentCaptureWidth_ = 0;
     int currentCaptureHeight_ = 0;
+    bool fullFrame_ = false;
 
     // Cached blob names to avoid repeated lookup warnings
     std::string inputBlobName_;

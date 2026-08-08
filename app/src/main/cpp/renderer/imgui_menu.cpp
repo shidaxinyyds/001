@@ -12,6 +12,7 @@
 #include <android/asset_manager_jni.h>
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
+#include <android/configuration.h>
 #include <GLES3/gl3.h>
 #include <algorithm>
 #include <chrono>
@@ -273,21 +274,38 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeInit(JNIEnv* env, jclass /* this */, jobj
     style.Colors[ImGuiCol_Header] = ImVec4(0.2f, 0.2f, 0.3f, 1.0f);
     style.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.3f, 0.3f, 0.4f, 1.0f);
     
-    // Scale for mobile without making controls overly cramped
-    style.ScaleAllSizes(1.15f);
-    io.FontGlobalScale = 1.08f;
+    // Scale UI + font to the device's real DPI so the menu is readable on
+    // high-resolution phones (the old fixed 18px font looked tiny).
+    float densityScale = 1.0f;
+    AConfiguration* aconfig = AConfiguration_new();
+    if (aconfig) {
+        AConfiguration_fromAssetManager(aconfig, AAssetManager_fromJava(env, assetManager));
+        int32_t dpi = AConfiguration_getDensity(aconfig);
+        AConfiguration_delete(aconfig);
+        if (dpi > 0) {
+            densityScale = std::clamp(static_cast<float>(dpi) / 160.0f, 1.0f, 3.0f);
+        }
+    }
+    // Base font size (both Latin and CJK built at this size, then uniformly
+    // scaled by densityScale so they stay the same visual size).
+    const float baseFontPx = 18.0f;
+    ImFontConfig defaultFontCfg;
+    defaultFontCfg.SizePixels = baseFontPx;
+    defaultFontCfg.PixelSnapH = true;
+    io.Fonts->AddFontDefault(&defaultFontCfg);
+    TryLoadCjkFont(env, assetManager, baseFontPx);
+
+    // Uniform scale: font size via FontGlobalScale, other widgets via ScaleAllSizes
+    // (partial factor so the panel does not become absurdly large on tablets).
+    io.FontGlobalScale = densityScale;
+    style.ScaleAllSizes(1.0f + (densityScale - 1.0f) * 0.6f);
+
     style.WindowPadding = ImVec2(16.0f, 14.0f);
     style.FramePadding = ImVec2(10.0f, 8.0f);
     style.ItemSpacing = ImVec2(10.0f, 8.0f);
     style.ItemInnerSpacing = ImVec2(8.0f, 6.0f);
     style.WindowBorderSize = 1.0f;
     style.ScrollbarSize = 18.0f;
-    
-    // Load CJK font (optional) BEFORE backend init  -  backend builds the
-    // font atlas during its own init. Default font is always loaded first
-    // so English glyphs come from the standard ImGui font.
-    io.Fonts->AddFontDefault();
-    TryLoadCjkFont(env, assetManager, 18.0f);
 
     // Apply persisted language preference so the very first frame renders
     // in the user's chosen language without a one-frame English flash.
@@ -645,24 +663,24 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
                         bool smoothOn = settings->enableSmoothing.load(std::memory_order_relaxed);
 
                         if (ImGui::Checkbox(T(Key::EspLabels), &showLabels)) { settings->showLabels.store(showLabels, std::memory_order_relaxed); settingsDirty = true; }
-                        ShowSettingHelp("Shows label text over each detected target.");
+                        ShowSettingHelp("在每个检测到的目标上显示标签文字。");
                         if (ImGui::Checkbox(T(Key::EspSnapLine), &drawLine)) { settings->drawLine.store(drawLine, std::memory_order_relaxed); settingsDirty = true; }
-                        ShowSettingHelp("Draws a line from your screen center to the target box.");
+                        ShowSettingHelp("从屏幕中心到目标框绘制一条连线。");
                         if (ImGui::Checkbox(T(Key::EspHeadDot), &drawDot)) { settings->drawDot.store(drawDot, std::memory_order_relaxed); settingsDirty = true; }
-                        ShowSettingHelp("Marks the estimated head point for each detection.");
+                        ShowSettingHelp("标记每个检测结果预估的头部位置。");
                         if (ImGui::Checkbox(T(Key::EspDetectionCount), &countOn)) { settings->showDetectionCount.store(countOn, std::memory_order_relaxed); settingsDirty = true; }
-                        ShowSettingHelp("Shows how many targets are currently detected.");
+                        ShowSettingHelp("显示当前检测到的目标数量。");
                         ImGui::Separator();
 
                         if (ImGui::Checkbox(T(Key::EspEnableSmoothing), &smoothOn)) { settings->enableSmoothing.store(smoothOn, std::memory_order_relaxed); settingsDirty = true; }
-                        ShowSettingHelp("Stabilizes box movement to reduce jitter between frames.");
+                        ShowSettingHelp("稳定目标框的移动，减少帧间抖动。");
                         if (smoothOn) {
                             float smooth = settings->smoothingFactor.load(std::memory_order_relaxed);
                             if (ImGui::SliderFloat(T(Key::EspSmoothingAmount), &smooth, 0.10f, 1.0f, "%.2f")) {
                                 settings->smoothingFactor.store(smooth, std::memory_order_relaxed);
                                 settingsDirty = true;
                             }
-                            ShowSettingHelp("Lower values react faster; higher values are smoother but lag more.");
+                            ShowSettingHelp("数值越低反应越快；数值越高越平滑，但延迟更明显。");
                         }
 
                         ImGui::Separator();
@@ -679,14 +697,14 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
                             settings->boxColorB.store(boxColor[2], std::memory_order_relaxed);
                             settingsDirty = true;
                         }
-                        ShowSettingHelp("Changes ESP box color for better visibility.");
+                        ShowSettingHelp("更改 ESP 框颜色以提升可见性。");
 
                         float thickness = static_cast<float>(settings->boxThickness.load(std::memory_order_relaxed));
                         if (ImGui::SliderFloat(T(Key::EspBoxThickness), &thickness, 1.0f, 5.0f, "%.0f")) {
                             settings->boxThickness.store(static_cast<int>(thickness), std::memory_order_relaxed);
                             settingsDirty = true;
                         }
-                        ShowSettingHelp("Higher values make boxes easier to see; lower values look cleaner.");
+                        ShowSettingHelp("数值越高越容易看清；数值越低越简洁。");
 
                         ImGui::Separator();
 
@@ -695,7 +713,7 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
                             settings->confidenceThreshold.store(conf, std::memory_order_relaxed);
                             settingsDirty = true;
                         }
-                        ShowSettingHelp("Minimum detection confidence. Higher reduces false positives.");
+                        ShowSettingHelp("最小检测置信度。数值越高，误报越少。");
 
                         float detFov = settings->fovRadius.load(std::memory_order_relaxed);
                         if (ImGui::SliderFloat(T(Key::EspDetectionZone), &detFov, 100.0f, 650.0f, "%.0f px")) {
@@ -705,21 +723,21 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
                             }
                             settingsDirty = true;
                         }
-                        ShowSettingHelp("Limits detection processing to a center region for more stable targeting.");
+                        ShowSettingHelp("ESP 检测与瞄准生效的范围（以屏幕中心为圆心的半径）。数值越小越只关注屏幕中心区域。");
 
                         bool showTouchZone = g_settings.showTouchZone;
                         if (ImGui::Checkbox(T(Key::EspTouchZoneOverlay), &showTouchZone)) {
                             g_settings.showTouchZone = showTouchZone;
                             settingsDirty = true;
                         }
-                        ShowSettingHelp("Shows the touch input area used for assist movement.");
+                        ShowSettingHelp("显示辅助移动所使用的触摸输入区域。");
                         if (g_settings.showTouchZone) {
                             float alpha = g_settings.touchZoneAlpha;
                             if (ImGui::SliderFloat(T(Key::EspTouchZoneOpacity), &alpha, 0.10f, 1.0f, "%.2f")) {
                                 g_settings.touchZoneAlpha = QuantizeStep(alpha, 0.01f);
                                 settingsDirty = true;
                             }
-                            ShowSettingHelp("Lower opacity is less distracting; higher opacity is easier to locate.");
+                            ShowSettingHelp("不透明度越低越不干扰；越高越容易定位。");
                         }
 
                         ImGui::Separator();
@@ -728,7 +746,7 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
                             g_settings.streamerMode = streamer;
                             settingsDirty = true;
                         }
-                        ShowSettingHelp("Marks overlay windows as secure. The overlay still appears on your screen but is stripped from screen recorders, screenshots, and screen mirroring.");
+                        ShowSettingHelp("将覆盖层标记为安全窗口。覆盖层仍显示在你的屏幕上，但不会被录屏、截图和屏幕镜像捕获。");
 
                         // Language picker. Items come from i18n::LanguageDisplayName.
                         const char* languageItems[2] = {
@@ -741,13 +759,13 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
                             aimbuddy::i18n::SetLanguage(langIndex);
                             settingsDirty = true;
                         }
-                        ShowSettingHelp("UI language. Drop assets/fonts/cjk.ttf to render Chinese glyphs.");
+                        ShowSettingHelp("界面语言。将 cjk.ttf 放入 assets/fonts/ 即可显示中文。");
                         ImGui::EndTabItem();
                     }
 
                     if (ImGui::BeginTabItem(T(Key::TabAim))) {
                         int touchBackend = g_settings.touchBackend;
-                        const char* touchBackends[] = { "uinput (Root)", "Shizuku (Non-root)" };
+                        const char* touchBackends[] = { "uinput（需 Root）", "Shizuku（免 Root）" };
                         if (ImGui::Combo(T(Key::AimTouchBackend), &touchBackend, touchBackends, 2)) {
                             g_settings.touchBackend = touchBackend;
                             settingsDirty = true;
@@ -769,11 +787,17 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
                             }
                             ImGui::PopStyleColor();
                         } else {
-                            bool enabled = settings->aimbotEnabled.load(std::memory_order_relaxed);
-                            if (ImGui::Checkbox(T(Key::AimEnable), &enabled)) {
-                                settings->aimbotEnabled.store(enabled, std::memory_order_relaxed);
-                                settingsDirty = true;
+                        bool enabled = settings->aimbotEnabled.load(std::memory_order_relaxed);
+                        if (ImGui::Checkbox(T(Key::AimEnable), &enabled)) {
+                            settings->aimbotEnabled.store(enabled, std::memory_order_relaxed);
+                            settingsDirty = true;
+                            // Auto-close the menu once aim assist is enabled so the
+                            // game underneath stays touchable (screen clickable/slidable).
+                            if (enabled) {
+                                settings->menuVisible.store(false, std::memory_order_relaxed);
+                                g_menuVisible = false;
                             }
+                        }
 
                             if (enabled) {
                                 ImGui::Spacing();
@@ -836,10 +860,10 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
                                     settings->headOffset.store(offset, std::memory_order_relaxed);
                                     settingsDirty = true;
                                 }
-                                ShowSettingHelp("Adjusts vertical aim point inside the box. Increase to target higher.");
+                                ShowSettingHelp("调整框内垂直瞄准点。增大可瞄准更高位置。");
 
                                 int priority = static_cast<int>(g_settings.targetPriority);
-                                const char* priorities[] = { "Nearest", "Largest", "Confidence" };
+                                const char* priorities[] = { "最近", "最大", "置信度" };
                                 if (ImGui::Combo(T(Key::AimTargetPriority), &priority, priorities, 3)) {
                                     g_settings.targetPriority = priority;
                                     settingsDirty = true;
@@ -851,17 +875,17 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
                                     g_settings.aimFovRadius = settings->fovRadius.load(std::memory_order_relaxed);
                                 }
 
-                                const char* aimModes[] = { "Smooth", "Snap", "Magnetic" };
+                                const char* aimModes[] = { "平滑", "瞬移", "磁吸" };
                                 int aimMode = static_cast<int>(g_settings.aimMode);
                                 if (ImGui::Combo(T(Key::AimMode), &aimMode, aimModes, 3)) { g_settings.aimMode = aimMode; settingsDirty = true; }
 
                                 float aimSpeed = g_settings.aimSpeed;
                                 if (ImGui::SliderFloat(T(Key::AimSpeed), &aimSpeed, 0.1f, 1.0f, "%.2f")) { g_settings.aimSpeed = QuantizeStep(aimSpeed, 0.01f); settingsDirty = true; }
-                                ShowSettingHelp("Higher is faster snap movement; lower is slower and smoother.");
+                                ShowSettingHelp("数值越高移动越快；越低越慢越平滑。");
 
                                 float smoothness = g_settings.smoothness;
                                 if (ImGui::SliderFloat(T(Key::AimSmoothness), &smoothness, 0.0f, 1.0f, "%.2f")) { g_settings.smoothness = QuantizeStep(smoothness, 0.01f); settingsDirty = true; }
-                                ShowSettingHelp("Higher smoothness looks natural but reacts slower.");
+                                ShowSettingHelp("平滑度越高越自然，但反应越慢。");
 
                                 float aimFov = g_settings.aimFovRadius;
                                 if (ImGui::SliderFloat(T(Key::AimFovRadius), &aimFov, 50.0f, 600.0f, "%.0f px")) {
@@ -871,7 +895,7 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
                                     }
                                     settingsDirty = true;
                                 }
-                                ShowSettingHelp("Only targets inside this radius can be selected.");
+                                ShowSettingHelp("只有该半径范围内的目标才会被选中。");
 
                                 float maxDist = g_settings.maxAimDistance;
                                 if (ImGui::SliderFloat(T(Key::AimMaxDistance), &maxDist, 100.0f, 1000.0f, "%.0f px")) {
@@ -884,11 +908,11 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
                                     g_settings.aimbotFps = static_cast<uint32_t>(fps);
                                     settingsDirty = true;
                                 }
-                                ShowSettingHelp("Update rate for assist logic. Higher is more responsive but heavier.");
+                                ShowSettingHelp("辅助逻辑刷新频率。越高响应越快，但更耗性能。");
 
                                 ImGui::Separator();
 
-                                const char* filterTypes[] = { "None", "EMA", "Kalman" };
+                                const char* filterTypes[] = { "无", "EMA", "Kalman" };
                                 int filterType = static_cast<int>(g_settings.filterType);
                                 if (ImGui::Combo(T(Key::AimFilter), &filterType, filterTypes, 3)) {
                                     g_settings.filterType = filterType;
@@ -896,58 +920,58 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
                                 }
                                 if (g_settings.filterType == 1) {
                                     float ema = g_settings.emaAlpha;
-                                    if (ImGui::SliderFloat("EMA alpha", &ema, 0.1f, 0.9f, "%.2f")) { g_settings.emaAlpha = QuantizeStep(ema, 0.01f); settingsDirty = true; }
+                                    if (ImGui::SliderFloat("EMA 系数", &ema, 0.1f, 0.9f, "%.2f")) { g_settings.emaAlpha = QuantizeStep(ema, 0.01f); settingsDirty = true; }
                                 } else if (g_settings.filterType == 2) {
                                     float pn = g_settings.kalmanProcessNoise;
-                                    if (ImGui::SliderFloat("Kalman process", &pn, 0.1f, 5.0f, "%.1f")) { g_settings.kalmanProcessNoise = QuantizeStep(pn, 0.1f); settingsDirty = true; }
+                                    if (ImGui::SliderFloat("Kalman 过程噪声", &pn, 0.1f, 5.0f, "%.1f")) { g_settings.kalmanProcessNoise = QuantizeStep(pn, 0.1f); settingsDirty = true; }
                                     float mn = g_settings.kalmanMeasurementNoise;
-                                    if (ImGui::SliderFloat("Kalman measure", &mn, 1.0f, 10.0f, "%.1f")) { g_settings.kalmanMeasurementNoise = QuantizeStep(mn, 0.1f); settingsDirty = true; }
+                                    if (ImGui::SliderFloat("Kalman 测量噪声", &mn, 1.0f, 10.0f, "%.1f")) { g_settings.kalmanMeasurementNoise = QuantizeStep(mn, 0.1f); settingsDirty = true; }
                                 }
 
                                 bool antiOvershoot = g_settings.enableConvergenceDamping;
-                                if (ImGui::Checkbox("Anti overshoot", &antiOvershoot)) { g_settings.enableConvergenceDamping = antiOvershoot; settingsDirty = true; }
+                                if (ImGui::Checkbox("抗超调", &antiOvershoot)) { g_settings.enableConvergenceDamping = antiOvershoot; settingsDirty = true; }
                                 if (g_settings.enableConvergenceDamping) {
                                     float cr = g_settings.convergenceRadius;
-                                    if (ImGui::SliderFloat("Damp radius", &cr, 10.0f, 100.0f, "%.0f px")) { g_settings.convergenceRadius = QuantizeStep(cr, 1.0f); settingsDirty = true; }
+                                    if (ImGui::SliderFloat("阻尼半径", &cr, 10.0f, 100.0f, "%.0f px")) { g_settings.convergenceRadius = QuantizeStep(cr, 1.0f); settingsDirty = true; }
                                 }
 
                                 float pdGain = g_settings.pdDerivativeGain;
-                                if (ImGui::SliderFloat("Derivative damping", &pdGain, 0.0f, 0.12f, "%.3f")) { g_settings.pdDerivativeGain = QuantizeStep(pdGain, 0.005f); settingsDirty = true; }
+                                if (ImGui::SliderFloat("微分阻尼", &pdGain, 0.0f, 0.12f, "%.3f")) { g_settings.pdDerivativeGain = QuantizeStep(pdGain, 0.005f); settingsDirty = true; }
 
                                 float leadFactor = g_settings.velocityLeadFactor;
-                                if (ImGui::SliderFloat("Velocity lead", &leadFactor, 0.0f, 1.5f, "%.2f")) { g_settings.velocityLeadFactor = QuantizeStep(leadFactor, 0.05f); settingsDirty = true; }
-                                ShowSettingHelp("How aggressively to lead running targets. 0 = no prediction, 1.0 = full velocity * pipeline-delay lead.");
+                                if (ImGui::SliderFloat("速度预判", &leadFactor, 0.0f, 1.5f, "%.2f")) { g_settings.velocityLeadFactor = QuantizeStep(leadFactor, 0.05f); settingsDirty = true; }
+                                ShowSettingHelp("对移动目标的提前量强度。0 = 不预判，1.0 = 全力按速度×延迟预判。");
                                 float leadClamp = g_settings.velocityLeadClamp;
-                                if (ImGui::SliderFloat("Lead clamp", &leadClamp, 1.0f, 120.0f, "%.0f px")) { g_settings.velocityLeadClamp = QuantizeStep(leadClamp, 1.0f); settingsDirty = true; }
+                                if (ImGui::SliderFloat("预判上限", &leadClamp, 1.0f, 120.0f, "%.0f px")) { g_settings.velocityLeadClamp = QuantizeStep(leadClamp, 1.0f); settingsDirty = true; }
 
                                 bool recoilOn = g_settings.recoilCompensationEnabled;
-                                if (ImGui::Checkbox("Recoil compensation", &recoilOn)) { g_settings.recoilCompensationEnabled = recoilOn; settingsDirty = true; }
+                                if (ImGui::Checkbox("后坐力补偿", &recoilOn)) { g_settings.recoilCompensationEnabled = recoilOn; settingsDirty = true; }
                                 if (g_settings.recoilCompensationEnabled) {
                                     float rs = g_settings.recoilCompensationStrength;
-                                    if (ImGui::SliderFloat("Recoil strength", &rs, 0.0f, 0.35f, "%.2f")) { g_settings.recoilCompensationStrength = QuantizeStep(rs, 0.01f); settingsDirty = true; }
+                                    if (ImGui::SliderFloat("后坐力强度", &rs, 0.0f, 0.35f, "%.2f")) { g_settings.recoilCompensationStrength = QuantizeStep(rs, 0.01f); settingsDirty = true; }
                                     float rm = g_settings.recoilCompensationMax;
-                                    if (ImGui::SliderFloat("Recoil max", &rm, 2.0f, 18.0f, "%.0f px")) { g_settings.recoilCompensationMax = QuantizeStep(rm, 1.0f); settingsDirty = true; }
+                                    if (ImGui::SliderFloat("后坐力最大值", &rm, 2.0f, 18.0f, "%.0f px")) { g_settings.recoilCompensationMax = QuantizeStep(rm, 1.0f); settingsDirty = true; }
                                     float rd = g_settings.recoilCompensationDecay;
-                                    if (ImGui::SliderFloat("Recoil decay", &rd, 0.50f, 0.98f, "%.2f")) { g_settings.recoilCompensationDecay = QuantizeStep(rd, 0.01f); settingsDirty = true; }
+                                    if (ImGui::SliderFloat("后坐力衰减", &rd, 0.50f, 0.98f, "%.2f")) { g_settings.recoilCompensationDecay = QuantizeStep(rd, 0.01f); settingsDirty = true; }
                                 }
 
                                 int missFrames = g_settings.maxLockMissFrames;
-                                if (ImGui::SliderInt("Miss grace", &missFrames, 1, 12, "%d")) { g_settings.maxLockMissFrames = missFrames; settingsDirty = true; }
+                                if (ImGui::SliderInt("丢失宽容", &missFrames, 1, 12, "%d")) { g_settings.maxLockMissFrames = missFrames; settingsDirty = true; }
                                 int switchDelay = g_settings.targetSwitchDelayFrames;
-                                if (ImGui::SliderInt("Switch delay", &switchDelay, 0, 20, "%d")) { g_settings.targetSwitchDelayFrames = switchDelay; settingsDirty = true; }
+                                if (ImGui::SliderInt("切换延迟", &switchDelay, 0, 20, "%d")) { g_settings.targetSwitchDelayFrames = switchDelay; settingsDirty = true; }
 
                                 ImGui::Separator();
 
                                 float tcx = settings->touchCenterX.load(std::memory_order_relaxed);
-                                if (ImGui::SliderFloat("Touch center X", &tcx, 0.5f, 0.95f, "%.2f")) { settings->touchCenterX.store(tcx, std::memory_order_relaxed); settingsDirty = true; }
+                                if (ImGui::SliderFloat("触摸中心 X", &tcx, 0.5f, 0.95f, "%.2f")) { settings->touchCenterX.store(tcx, std::memory_order_relaxed); settingsDirty = true; }
                                 float tcy = settings->touchCenterY.load(std::memory_order_relaxed);
-                                if (ImGui::SliderFloat("Touch center Y", &tcy, 0.3f, 0.7f, "%.2f")) { settings->touchCenterY.store(tcy, std::memory_order_relaxed); settingsDirty = true; }
+                                if (ImGui::SliderFloat("触摸中心 Y", &tcy, 0.3f, 0.7f, "%.2f")) { settings->touchCenterY.store(tcy, std::memory_order_relaxed); settingsDirty = true; }
                                 float tr = settings->touchRadius.load(std::memory_order_relaxed);
-                                if (ImGui::SliderFloat("Touch radius", &tr, 50.0f, 300.0f, "%.0f px")) { settings->touchRadius.store(tr, std::memory_order_relaxed); settingsDirty = true; }
+                                if (ImGui::SliderFloat("触摸半径", &tr, 50.0f, 300.0f, "%.0f px")) { settings->touchRadius.store(tr, std::memory_order_relaxed); settingsDirty = true; }
                                 float ad = settings->aimDelay.load(std::memory_order_relaxed);
-                                if (ImGui::SliderFloat("Aim delay", &ad, 0.0f, 5.0f, "%.1f ms")) { settings->aimDelay.store(ad, std::memory_order_relaxed); settingsDirty = true; }
+                                if (ImGui::SliderFloat("瞄准延迟", &ad, 0.0f, 5.0f, "%.1f ms")) { settings->aimDelay.store(ad, std::memory_order_relaxed); settingsDirty = true; }
 
-                                if (ImGui::Button("Reset touch zone", ImVec2(220.0f, 0.0f))) {
+                                if (ImGui::Button("重置触摸区", ImVec2(220.0f, 0.0f))) {
                                     settings->touchCenterX.store(0.75f, std::memory_order_relaxed);
                                     settings->touchCenterY.store(0.5f, std::memory_order_relaxed);
                                     settings->touchRadius.store(150.0f, std::memory_order_relaxed);
@@ -966,7 +990,6 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
                         ImGui::Text("%s: %.1f ms", T(Key::InfoInferenceMs), g_measuredInferenceMs);
                         ImGui::Text("%s: %d", T(Key::InfoDetections), static_cast<int>(latest.boxes.size()));
                         ImGui::Text("%s: %dx%d", T(Key::InfoScreen), g_screenWidth, g_screenHeight);
-                        ImGui::TextDisabled("github.com/1337XCode/AimBuddy");
                         ImGui::Separator();
                         ImGui::TextWrapped("%s", T(Key::InfoTip));
                         ImGui::EndTabItem();

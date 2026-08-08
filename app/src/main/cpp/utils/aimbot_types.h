@@ -15,7 +15,7 @@
 #include "../utils/vector2.h"
 
 struct UnifiedSettings {
-    uint32_t magic = 0xE5BA1005;  // Magic number for validation
+    uint32_t magic = 0xE5BA1006;  // Magic number for validation
     
     bool aimbotEnabled = false;
     bool espEnabled = true;
@@ -83,7 +83,7 @@ struct UnifiedSettings {
     bool streamerMode = false;
 
     // UI language: 0 = English, 1 = Chinese (中文). Drives ImGui menu text.
-    int32_t language = 0;
+    int32_t language = 1; // 默认中文
     
     int32_t screenWidth = 1080;
     int32_t screenHeight = 2400;
@@ -106,7 +106,7 @@ struct UnifiedSettings {
         UnifiedSettings temp;
         if (fread(&temp, sizeof(UnifiedSettings), 1, f) == 1) {
             // Verify magic number
-            if (temp.magic == 0xE5BA1005) {
+            if (temp.magic == 0xE5BA1006) {
                 *this = temp;
                 fclose(f);
                 return true;
