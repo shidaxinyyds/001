@@ -16,6 +16,7 @@
 #include <GLES3/gl3.h>
 #include <algorithm>
 #include <atomic>
+#include <cfloat>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -103,7 +104,9 @@ static float g_measuredOverlayFps = 0.0f;
 static float g_measuredInferenceMs = 0.0f;
 static ImVec2 g_menuSize = ImVec2(0.0f, 0.0f);
 static bool g_menuWasVisible = false;
-static bool g_streamerModeAppliedState = false;
+// Tri-state (-1 = never pushed) so the very first frame always syncs the real
+// streamer-mode value to the Java side, even when it matches the old default.
+static int g_streamerModeAppliedState = -1;
 
 extern "C" void NotifyStreamerModeChanged(bool enabled);
 
@@ -291,22 +294,45 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeInit(JNIEnv* env, jclass /* this */, jobj
     io.ConfigWindowsMoveFromTitleBarOnly = true;
     io.DisplaySize = ImVec2(static_cast<float>(g_screenWidth), static_cast<float>(g_screenHeight));
     
-    // Dark theme with accent colors
+    // Clean, minimal dark theme tuned for mobile overlay menus.
     ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = 8.0f;
-    style.FrameRounding = 4.0f;
-    style.GrabRounding = 4.0f;
-    
-    style.Colors[ImGuiCol_WindowBg] = ImVec4(0.08f, 0.08f, 0.12f, 0.95f);
-    style.Colors[ImGuiCol_TitleBg] = ImVec4(0.9f, 0.2f, 0.3f, 1.0f);
-    style.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.95f, 0.3f, 0.4f, 1.0f);
-    style.Colors[ImGuiCol_Button] = ImVec4(0.15f, 0.6f, 0.45f, 1.0f);
-    style.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.2f, 0.7f, 0.55f, 1.0f);
-    style.Colors[ImGuiCol_SliderGrab] = ImVec4(0.9f, 0.3f, 0.4f, 1.0f);
-    style.Colors[ImGuiCol_CheckMark] = ImVec4(0.2f, 0.9f, 0.5f, 1.0f);
-    style.Colors[ImGuiCol_Header] = ImVec4(0.2f, 0.2f, 0.3f, 1.0f);
-    style.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.3f, 0.3f, 0.4f, 1.0f);
-    
+
+    const ImVec4 bgDark      = ImVec4(0.045f, 0.055f, 0.075f, 0.96f);
+    const ImVec4 bgPanel    = ImVec4(0.085f, 0.105f, 0.140f, 1.00f);
+    const ImVec4 bgHover    = ImVec4(0.120f, 0.145f, 0.190f, 1.00f);
+    const ImVec4 bgActive   = ImVec4(0.155f, 0.185f, 0.240f, 1.00f);
+    const ImVec4 accent     = ImVec4(0.42f, 0.56f, 0.78f, 1.00f);
+    const ImVec4 accentHover= ImVec4(0.52f, 0.66f, 0.88f, 1.00f);
+
+    style.Colors[ImGuiCol_WindowBg]            = bgDark;
+    style.Colors[ImGuiCol_ChildBg]             = ImVec4(0.06f, 0.075f, 0.10f, 0.95f);
+    style.Colors[ImGuiCol_TitleBg]             = bgPanel;
+    style.Colors[ImGuiCol_TitleBgActive]       = bgActive;
+    style.Colors[ImGuiCol_TitleBgCollapsed]    = bgPanel;
+    style.Colors[ImGuiCol_Button]              = bgPanel;
+    style.Colors[ImGuiCol_ButtonHovered]       = bgHover;
+    style.Colors[ImGuiCol_ButtonActive]        = bgActive;
+    style.Colors[ImGuiCol_SliderGrab]          = accent;
+    style.Colors[ImGuiCol_SliderGrabActive]    = accentHover;
+    style.Colors[ImGuiCol_CheckMark]           = accent;
+    style.Colors[ImGuiCol_Header]              = bgPanel;
+    style.Colors[ImGuiCol_HeaderHovered]       = bgHover;
+    style.Colors[ImGuiCol_HeaderActive]        = bgActive;
+    style.Colors[ImGuiCol_FrameBg]             = ImVec4(0.065f, 0.080f, 0.110f, 1.00f);
+    style.Colors[ImGuiCol_FrameBgHovered]      = ImVec4(0.095f, 0.115f, 0.155f, 1.00f);
+    style.Colors[ImGuiCol_FrameBgActive]       = ImVec4(0.125f, 0.150f, 0.200f, 1.00f);
+    style.Colors[ImGuiCol_Tab]                 = ImVec4(0.075f, 0.095f, 0.125f, 1.00f);
+    style.Colors[ImGuiCol_TabHovered]          = bgHover;
+    style.Colors[ImGuiCol_TabActive]           = bgActive;
+    style.Colors[ImGuiCol_TabUnfocused]        = ImVec4(0.060f, 0.075f, 0.100f, 1.00f);
+    style.Colors[ImGuiCol_TabUnfocusedActive]  = ImVec4(0.110f, 0.135f, 0.180f, 1.00f);
+    style.Colors[ImGuiCol_ScrollbarBg]         = ImVec4(0.035f, 0.045f, 0.060f, 0.90f);
+    style.Colors[ImGuiCol_ScrollbarGrab]       = ImVec4(0.180f, 0.220f, 0.300f, 1.00f);
+    style.Colors[ImGuiCol_ScrollbarGrabHovered]= ImVec4(0.260f, 0.310f, 0.420f, 1.00f);
+    style.Colors[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.340f, 0.400f, 0.540f, 1.00f);
+    style.Colors[ImGuiCol_Separator]           = ImVec4(0.120f, 0.145f, 0.190f, 0.50f);
+    style.Colors[ImGuiCol_TextDisabled]        = ImVec4(0.45f, 0.50f, 0.58f, 1.00f);
+
     // Scale UI + font to the device's real DPI so the menu is readable on
     // high-resolution phones (the old fixed 18px font looked tiny).
     float densityScale = 1.0f;
@@ -333,12 +359,22 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeInit(JNIEnv* env, jclass /* this */, jobj
     io.FontGlobalScale = densityScale;
     style.ScaleAllSizes(1.0f + (densityScale - 1.0f) * 0.6f);
 
-    style.WindowPadding = ImVec2(16.0f, 14.0f);
-    style.FramePadding = ImVec2(10.0f, 8.0f);
-    style.ItemSpacing = ImVec2(10.0f, 8.0f);
-    style.ItemInnerSpacing = ImVec2(8.0f, 6.0f);
-    style.WindowBorderSize = 1.0f;
-    style.ScrollbarSize = 18.0f;
+    // Final sizes/overrides after scaling so the visual proportions stay crisp.
+    style.WindowRounding    = 12.0f;
+    style.FrameRounding     = 6.0f;
+    style.GrabRounding      = 6.0f;
+    style.ChildRounding     = 8.0f;
+    style.PopupRounding     = 8.0f;
+    style.TabRounding       = 6.0f;
+    style.ScrollbarRounding = 8.0f;
+    style.WindowPadding     = ImVec2(16.0f, 14.0f);
+    style.FramePadding      = ImVec2(10.0f, 7.0f);
+    style.ItemSpacing       = ImVec2(10.0f, 7.0f);
+    style.ItemInnerSpacing  = ImVec2(7.0f, 5.0f);
+    style.WindowBorderSize  = 1.0f;
+    style.ScrollbarSize     = 14.0f;
+    style.GrabMinSize       = 16.0f;
+    style.TabMinWidthForCloseButton = 0.0f;
 
     // Apply persisted language preference so the very first frame renders
     // in the user's chosen language without a one-frame English flash.
@@ -386,7 +422,7 @@ static void ProcessPendingTouchEvents() {
         // Menu closed between enqueue and drain: drop everything and reset.
         g_touchScrolling = false;
         g_pendingScrollPx = 0.0f;
-        ++g_framesSinceTouchDown;
+        g_framesSinceTouchDown = 0;
         return;
     }
 
@@ -394,11 +430,19 @@ static void ProcessPendingTouchEvents() {
 
     // A vertical swipe longer than this (and dominant over the horizontal
     // component) is treated as a scroll gesture instead of a widget drag.
-    constexpr float kScrollTriggerPx = 18.0f;
+    //
+    // Two thresholds: when the press did NOT land on a widget we engage very
+    // early (10px) so blank space / label text scrolls like a native list.
+    // When a widget DID grab the press we require a clearly deliberate swipe
+    // (24px) before stealing the gesture, so checkboxes and sliders still work.
+    // The previous build only allowed the first case, which is why dragging on
+    // the text/checkbox rows - i.e. most of the menu - refused to scroll.
+    constexpr float kScrollTriggerPx       = 10.0f;
+    constexpr float kScrollTriggerActivePx = 24.0f;
 
     for (const PendingTouch& e : events) {
         switch (e.action) {
-            case 0: // ACTION_DOWN
+            case 0: { // ACTION_DOWN
                 g_touchDownX = e.x;
                 g_touchDownY = e.y;
                 g_lastTouchY = e.y;
@@ -407,34 +451,46 @@ static void ProcessPendingTouchEvents() {
                 io.AddMousePosEvent(e.x, e.y);
                 io.AddMouseButtonEvent(0, true);
                 break;
+            }
 
-            case 2: // ACTION_MOVE
+            case 2: { // ACTION_MOVE
+                const float dx = e.x - g_touchDownX;
+                const float dy = e.y - g_touchDownY;
+
                 if (!g_touchScrolling) {
-                    const float dx = e.x - g_touchDownX;
-                    const float dy = e.y - g_touchDownY;
-                    // Only hijack the gesture as a scroll when no widget grabbed
-                    // the press (sliders / scrollbar / buttons keep working) and
-                    // the press has already been through one frame so ActiveId
-                    // is up to date.
-                    if (!g_anyItemActiveLastFrame &&
-                        g_framesSinceTouchDown >= 1 &&
-                        std::fabs(dy) > kScrollTriggerPx &&
-                        std::fabs(dy) > std::fabs(dx)) {
+                    // Decide whether this gesture is a vertical scroll. A widget
+                    // that grabbed the press gets a larger grace distance, but it
+                    // can no longer veto scrolling outright.
+                    const float trigger = g_anyItemActiveLastFrame
+                                              ? kScrollTriggerActivePx
+                                              : kScrollTriggerPx;
+                    if (std::fabs(dy) > trigger &&
+                        std::fabs(dy) > std::fabs(dx) * 1.5f) {
                         g_touchScrolling = true;
                         g_lastTouchY = e.y;
-                        // Release the press: this gesture is a scroll, not a tap.
+                        // Park the cursor outside the window BEFORE releasing so
+                        // the pending mouse-up lands on nothing. Without this, a
+                        // swipe that started on a checkbox would still toggle it
+                        // (ImGui trickles press/release across frames).
+                        io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
                         io.AddMouseButtonEvent(0, false);
+                        break;
                     }
                 }
+
                 if (g_touchScrolling) {
-                    g_pendingScrollPx += (e.y - g_lastTouchY);
+                    // Keep the gesture alive even if the finger drifts horizontally,
+                    // as long as it stays mostly vertical since scroll started.
+                    const float moveDy = e.y - g_lastTouchY;
+                    g_pendingScrollPx += moveDy;
+                    g_lastTouchY = e.y;
                 } else {
                     io.AddMousePosEvent(e.x, e.y);
                 }
-                g_lastTouchY = e.y;
                 break;
+            }
 
-            case 1: // ACTION_UP
+            case 1: { // ACTION_UP
                 if (g_touchScrolling) {
                     g_pendingScrollPx += (e.y - g_lastTouchY);
                     g_touchScrolling = false;
@@ -444,6 +500,7 @@ static void ProcessPendingTouchEvents() {
                 }
                 g_lastTouchY = e.y;
                 break;
+            }
 
             default:
                 break;
@@ -605,6 +662,14 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
                 if (right > displayW) right = displayW;
                 if (bottom > displayH) bottom = displayH;
 
+                // Final screen-space sanity filter: drop degenerate/ tiny boxes
+                // and boxes that cover almost the entire screen (common in lobby
+                // false positives caused by UI elements / full-screen panels).
+                const float boxWpx = right - left;
+                const float boxHpx = bottom - top;
+                if (boxWpx < 14.0f || boxHpx < 14.0f) continue;
+                if (boxWpx > displayW * 0.85f && boxHpx > displayH * 0.85f) continue;
+
                 // Draw box with shadow for depth
                 ESP::ImGuiHelper::DrawBox3D(
                     drawList,
@@ -760,7 +825,9 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
             ImGui::SetNextWindowSize(g_menuSize, ImGuiCond_Appearing);
             ImGui::SetNextWindowSizeConstraints(ImVec2(420.0f, 460.0f), ImVec2(displayW - 8.0f, displayH - 8.0f));
 
-            ImGuiWindowFlags windowFlags = ImGuiWindowFlags_NoCollapse;
+            ImGuiWindowFlags windowFlags = ImGuiWindowFlags_NoCollapse
+                                         | ImGuiWindowFlags_NoTitleBar
+                                         | ImGuiWindowFlags_NoResize;
             // Keep the language in sync every frame so a toggle takes
             // effect immediately, even before the next save.
             aimbuddy::i18n::SetLanguage(g_settings.language);
@@ -771,9 +838,12 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
                 const bool shizukuAvailable = g_shizukuAvailable.load(std::memory_order_relaxed);
                 if (!rootAvailable && !shizukuAvailable) {
                     ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s", T(Key::BannerRootMissing));
+                    // Only separate when there is actually something above it -
+                    // the title bar is gone, so an unconditional rule would just
+                    // draw a stray line at the very top of the panel.
+                    ImGui::Separator();
                 }
 
-                ImGui::Separator();
                 ImGui::BeginChild("##MenuScroll", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 6.0f), false, ImGuiWindowFlags_AlwaysVerticalScrollbar);
 
                 // Apply swipe-to-scroll accumulated from touch input. ImGui has
@@ -1172,9 +1242,10 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
         }
 
         // Push streamer-mode state across the JNI bridge whenever it changes.
-        if (g_settings.streamerMode != g_streamerModeAppliedState) {
-            g_streamerModeAppliedState = g_settings.streamerMode;
-            NotifyStreamerModeChanged(g_streamerModeAppliedState);
+        const int streamerNow = g_settings.streamerMode ? 1 : 0;
+        if (streamerNow != g_streamerModeAppliedState) {
+            g_streamerModeAppliedState = streamerNow;
+            NotifyStreamerModeChanged(streamerNow != 0);
         }
 
         // Latch widget-activity for the next frame's gesture classification

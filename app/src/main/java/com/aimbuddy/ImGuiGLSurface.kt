@@ -102,9 +102,12 @@ class ImGuiGLSurface @JvmOverloads constructor(
             MotionEvent.ACTION_DOWN -> 0
             MotionEvent.ACTION_UP -> 1
             MotionEvent.ACTION_MOVE -> 2
-            else -> return super.onTouchEvent(event)
+            else -> return false
         }
 
+        // Only consume the touch when the native menu is open. When the menu
+        // is closed we return false so the event falls through to the game
+        // underneath (works together with the overlay window's FLAG_NOT_TOUCHABLE).
         return nativeMotionEvent(action, event.x, event.y)
     }
 

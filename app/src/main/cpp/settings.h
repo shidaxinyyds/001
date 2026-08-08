@@ -64,13 +64,14 @@ namespace Config {
     constexpr const char* MODEL_BIN_FILE = "models/yolo26n-opt.bin";
     
     /// Default confidence threshold for detections.
-    /// Raised from 0.5 to 0.55 to reduce phantom detections on the
-    /// single-class YOLOv26n model while still catching distant enemies.
-    constexpr float DEFAULT_CONFIDENCE_THRESHOLD = 0.55f;
+    /// Raised from 0.55 to 0.60 to cut more phantom detections in lobby/UI
+    /// scenes while still catching in-game enemies.
+    constexpr float DEFAULT_CONFIDENCE_THRESHOLD = 0.60f;
     
-    /// NMS (Non-Maximum Suppression) IoU threshold
-    /// YOLOv26n is NMS-free, so we use a standard threshold to merge overlapping boxes
-    constexpr float NMS_IOU_THRESHOLD = 0.45f;
+    /// NMS (Non-Maximum Suppression) IoU threshold.
+    /// Lowered from 0.45 to 0.35 so overlapping duplicates merge tighter and
+    /// stray phantom boxes next to real detections are discarded.
+    constexpr float NMS_IOU_THRESHOLD = 0.35f;
     
     /// Maximum number of detections per frame (pre-allocated)
     constexpr int MAX_DETECTIONS = 50;

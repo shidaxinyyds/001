@@ -4,6 +4,35 @@ All notable changes to AimBuddy. Format inspired by [Keep a Changelog](https://k
 
 Dates are in ISO-8601 (YYYY-MM-DD).
 
+## [0.3.0-beta.8] - 2026-08-08
+
+针对 beta.7 后仍然存在的五项问题做彻底修复，重点解决「启动后屏幕完全无法点击」与「大厅里也误检测敌人」。
+
+### Fixed
+- **【严重】启动服务后屏幕完全无法点击/滑动**：根因是叠加层窗口在创建时机上有竞态——`setupOverlay()` 先于「隐藏菜单」执行，`nativeWantsCapture()` 在首个轮询周期内可能返回 true，导致 `FLAG_NOT_TOUCHABLE` 被移除且再没有恢复；同时 `FLAG_NOT_TOUCH_MODAL` 会让叠加层抢占窗口外的触摸分发。修复方式：
+  - `startESP()` 中先 `nativeSetMenuVisible(false)` 并复位 `menuVisible`，**再**创建屏幕采集与叠加层，最后显式 `applyOverlayTouchable(false)`，确保叠加层从诞生第一帧起就是纯穿透的。
+  - 叠加层 `LayoutParams` 移除 `FLAG_NOT_TOUCH_MODAL`，只保留 `FLAG_NOT_FOCUSABLE | FLAG_NOT_TOUCHABLE | FLAG_LAYOUT_IN_SCREEN | FLAG_LAYOUT_NO_LIMITS`。
+  - `ImGuiGLSurface.onTouchEvent()` 对非 DOWN/UP/MOVE 事件返回 `false`（原先返回 `super.onTouchEvent()` 会消费事件），保证多指、CANCEL 等事件干净地透传给游戏。
+- **误检测（大厅无人也报敌人）**：核心根因是**采集自反馈回路**——MediaProjection 会把 AimBuddy 自己绘制的 ESP 叠加层（准星、方框、触摸区）一并录进画面，模型再把这些图形识别成「敌人」，在大厅等空场景尤其明显。修复：
+  - **新增时序确认过滤**（`esp_jni.cpp` 的 `ApplyTemporalConfirmation`）：维护一张 IoU 关联的轻量轨迹表，一个框必须在**连续 2 个检测周期**内被稳定看到才会被发布；连续 2 周期未命中的轨迹被丢弃。幽灵框通常只闪现一帧，因此会被直接吃掉，而真实目标只延迟一个周期（约 30~60ms）。ESP 渲染与自瞄共用过滤后的结果。
+  - **默认开启主播模式**（`streamerMode = true`），叠加层带 `FLAG_SECURE`，被排除在采集帧之外，从物理上切断自反馈回路；Kotlin 侧 `streamerModeEnabled` 默认值同步改为 `true`，保证叠加层从 `addView` 的第一帧起就是 secure 的。
+  - 默认置信度阈值 0.55 → 0.60，NMS IoU 0.45 → 0.35（更激进地合并/丢弃真实框旁边的幽灵框）。
+  - 渲染层增加屏幕空间合理性过滤：丢弃宽或高小于 14px 的碎框，以及同时超过屏幕 85% 宽高的整屏框。
+- **主播模式首帧下发竞态**：`g_streamerModeAppliedState` 原为 `bool` 且初值 `false`，当已保存配置里 `streamerMode` 恰好也是 `false` 时，首帧不会触发下发，Java 侧状态可能与原生不一致。改为三态 `int`（初值 `-1`），保证第一帧一定把真实值同步过去。
+- **左侧弹窗无法直接下滑**：真正的原因是旧逻辑里「上一帧有控件被激活（`g_anyItemActiveLastFrame`）就完全禁止滚动」——而菜单里绝大部分区域都是复选框/滑块，手指一按下控件就被激活，于是拖内容区永远滚不动，只能去够那根细滚动条。现在改为：
+  - 控件未被激活时触发距离 10px（原 18px），被激活时给 24px 宽限但**不再拥有一票否决权**；
+  - 方向判定由 `|dy| > |dx|` 放宽为 `|dy| > |dx| * 1.5`；
+  - 判定为滚动的瞬间先把 ImGui 光标移到 `(-FLT_MAX, -FLT_MAX)` 再抬起按键，避免「从复选框上起手的滑动顺手把它勾上」（ImGui 会把按下/抬起分帧下发）；
+  - 进入滚动态后持续累计位移，滑动跟手。
+- **ESP / 瞄准 / 信息 切页响应慢**：菜单窗口移除多余标题栏（`ImGuiWindowFlags_NoTitleBar`），配合滚动手势判定的收紧，点击不再被误判为拖拽而延迟生效。
+
+### Changed
+- **启动器精简**：移除「启动服务」按钮下方的「触摸输入后端」标签、Root/Shizuku/无障碍 三个状态芯片，以及「由 1337XCode 打造」署名行；同步删除 `BackendChips` / `BackendChip` 组件与相关常量、跳转函数。
+- **ImGui 菜单换肤**：从原来的红/粉暗色主题改为干净的冷灰蓝极简主题（窗口 `rgba(0.045,0.055,0.075,0.96)`、面板 `0.085,0.105,0.140`、强调色 `0.42,0.56,0.78`），圆角统一（窗口 12 / 控件 6 / 子窗口 8 / 滚动条 8），且圆角与尺寸覆盖移动到 `ScaleAllSizes` 之后以免被 DPI 缩放冲掉。
+- 配置 magic 升级为 `0xE5BA1009`，旧 `settings.bin` 失效并回落到新默认值（0.60 阈值、主播模式默认开启）。
+
+---
+
 ## [0.3.0-beta.7] - 2026-08-08
 
 针对用户反馈的六项问题做修复，并精简为单一开箱即用模型。

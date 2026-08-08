@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstdarg>
 #include <cmath>
+#include <algorithm>
 
 // Fix for NDK compatibility issue usually caused by NCNN library mismatch
 // Defines the missing symbol __libcpp_verbose_abort.
@@ -133,6 +134,105 @@ namespace {
         g_renderConfig.aimDelay.store(g_settings.aimDelay, std::memory_order_relaxed);
     }
     
+    // ---------------------------------------------------------------------
+    // Temporal confirmation filter
+    //
+    // Single-cycle phantom boxes are the dominant cause of "it says there is
+    // an enemy but nothing is there" - the model occasionally fires on UI
+    // panels, lobby backdrops, HUD art, or (with streamer mode off) on the
+    // app's own ESP overlay that MediaProjection feeds back into the capture.
+    //
+    // A REAL target persists across consecutive detector cycles at roughly the
+    // same place; a phantom flickers for a single cycle and disappears. So we
+    // keep a tiny IoU-associated track table and only publish a box once its
+    // track has been seen kConfirmHits cycles in a row. Tracks that go unseen
+    // for kMaxMisses cycles are dropped so targets still vanish promptly.
+    // ---------------------------------------------------------------------
+    constexpr int   kTrackCapacity = Config::MAX_DETECTIONS;
+    constexpr int   kConfirmHits   = 2;      // sightings required before publishing
+    constexpr int   kMaxMisses     = 2;      // cycles a track survives unmatched
+    constexpr float kMatchIoU      = 0.25f;  // association threshold
+
+    struct DetTrack {
+        float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
+        int   hits = 0;
+        int   misses = 0;
+        bool  used = false;
+    };
+
+    DetTrack g_tracks[kTrackCapacity];
+    int      g_trackCount = 0;
+
+    inline float TrackIoU(const DetTrack& t, const ESP::BoundingBox& b) {
+        const float ix1 = std::max(t.x, b.x);
+        const float iy1 = std::max(t.y, b.y);
+        const float ix2 = std::min(t.x + t.w, b.x + b.width);
+        const float iy2 = std::min(t.y + t.h, b.y + b.height);
+        const float iw = ix2 - ix1;
+        const float ih = iy2 - iy1;
+        if (iw <= 0.0f || ih <= 0.0f) return 0.0f;
+        const float inter = iw * ih;
+        const float uni = t.w * t.h + b.width * b.height - inter;
+        return (uni > 0.0f) ? (inter / uni) : 0.0f;
+    }
+
+    void ResetDetectionTracks() {
+        g_trackCount = 0;
+    }
+
+    /// Filter `boxes` in place, keeping only temporally-confirmed detections.
+    void ApplyTemporalConfirmation(ESP::DetectionArray& boxes) {
+        for (int i = 0; i < g_trackCount; ++i) {
+            g_tracks[i].used = false;
+        }
+
+        ESP::DetectionArray confirmed;
+
+        for (int b = 0; b < boxes.size(); ++b) {
+            const ESP::BoundingBox& box = boxes[b];
+
+            int   best = -1;
+            float bestIoU = kMatchIoU;
+            for (int i = 0; i < g_trackCount; ++i) {
+                if (g_tracks[i].used) continue;
+                const float iou = TrackIoU(g_tracks[i], box);
+                if (iou > bestIoU) {
+                    bestIoU = iou;
+                    best = i;
+                }
+            }
+
+            if (best >= 0) {
+                DetTrack& t = g_tracks[best];
+                t.x = box.x; t.y = box.y; t.w = box.width; t.h = box.height;
+                if (t.hits < kConfirmHits) ++t.hits;
+                t.misses = 0;
+                t.used = true;
+                if (t.hits >= kConfirmHits) {
+                    confirmed.push(box);
+                }
+            } else if (g_trackCount < kTrackCapacity) {
+                DetTrack& t = g_tracks[g_trackCount++];
+                t.x = box.x; t.y = box.y; t.w = box.width; t.h = box.height;
+                t.hits = 1;
+                t.misses = 0;
+                t.used = true;
+                // First sighting: withheld until it is confirmed next cycle.
+            }
+        }
+
+        // Age out tracks that were not matched this cycle.
+        for (int i = g_trackCount - 1; i >= 0; --i) {
+            if (g_tracks[i].used) continue;
+            if (++g_tracks[i].misses > kMaxMisses) {
+                g_tracks[i] = g_tracks[g_trackCount - 1];
+                --g_trackCount;
+            }
+        }
+
+        boxes = confirmed;
+    }
+
     /**
      * @brief Inference thread main loop
      * 
@@ -141,6 +241,7 @@ namespace {
      */
     void inferenceLoop() {
         LOGI("=== Inference thread started ===");
+        ResetDetectionTracks();
         
         // Attach thread to JVM for JNI calls
         JNIEnv* env = nullptr;
@@ -267,6 +368,10 @@ namespace {
                         } else if (adaptiveCropSize < cachedCropSize) {
                             adaptiveCropSize = std::min(cachedCropSize, adaptiveCropSize + kUpscaleStep);
                         }
+
+                        // Drop single-cycle phantoms before anything consumes
+                        // the result (ESP rendering AND aimbot targeting).
+                        ApplyTemporalConfirmation(result.boxes);
 
                         // Copy result to shared state (Thread-Safe)
                         {

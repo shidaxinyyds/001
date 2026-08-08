@@ -15,11 +15,14 @@
 #include "../utils/vector2.h"
 
 struct UnifiedSettings {
-    // Bumped to 0xE5BA1008 so that settings.bin written by older builds is
-    // rejected and users get a clean slate with the new defaults (higher
-    // confidence threshold to cut phantom detections, accessibility backend,
-    // etc.).
-    uint32_t magic = 0xE5BA1008;  // Magic number for validation
+    // Bumped to 0xE5BA1009 so that settings.bin written by older builds is
+    // rejected and users get a clean slate with the new defaults:
+    //   - streamer mode ON by default (hides overlay from screen capture to
+    //     kill the self-detection feedback loop),
+    //   - confidence threshold raised to 0.60 to reduce lobby/UI phantom
+    //     detections,
+    //   - accessibility backend remains the out-of-box default.
+    uint32_t magic = 0xE5BA1009;  // Magic number for validation
     
     bool aimbotEnabled = false;
     bool espEnabled = true;
@@ -70,7 +73,7 @@ struct UnifiedSettings {
     float boxColorG = 0.0f;
     float boxColorB = 0.0f;
     int32_t boxThickness = 2;
-    float confidenceThreshold = 0.55f;
+    float confidenceThreshold = 0.60f;
     bool showFPS = false;
     bool showDetectionCount = false;
     bool showLabels = true;
@@ -84,7 +87,9 @@ struct UnifiedSettings {
 
     // Streamer mode: when enabled, overlay windows set FLAG_SECURE so the
     // ESP/menu are stripped from screen recordings and screenshots.
-    bool streamerMode = false;
+    // Default ON to prevent the overlay's own ESP boxes / crosshair / UI from
+    // being captured and re-detected as phantoms.
+    bool streamerMode = true;
 
     // UI language: 0 = English, 1 = Chinese (中文). Drives ImGui menu text.
     int32_t language = 1; // 默认中文
@@ -110,7 +115,7 @@ struct UnifiedSettings {
         UnifiedSettings temp;
         if (fread(&temp, sizeof(UnifiedSettings), 1, f) == 1) {
             // Verify magic number
-            if (temp.magic == 0xE5BA1008) {
+            if (temp.magic == 0xE5BA1009) {
                 *this = temp;
                 fclose(f);
                 return true;

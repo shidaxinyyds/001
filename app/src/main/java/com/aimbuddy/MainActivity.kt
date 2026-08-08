@@ -66,8 +66,6 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
@@ -163,8 +161,6 @@ class MainActivity : AppCompatActivity() {
         private const val CAPTURE_WIDTH = 1280
         private const val CAPTURE_HEIGHT = 720
         private const val OSS_GITHUB_URL = "https://github.com/1337XCode/AimBuddy"
-        private const val CREATOR_NAME = "1337XCode"
-        private const val CREATOR_URL = "https://www.darshanchheda.com"
         private const val PREFS_NAME = "aimbuddy_prefs"
         private const val PREF_MODEL_PARAM_PATH = "model_param_path"
         private const val PREF_MODEL_BIN_PATH = "model_bin_path"
@@ -287,9 +283,13 @@ class MainActivity : AppCompatActivity() {
         branch = STORE_BRANCH
     )
 
-    // Streamer mode (FLAG_SECURE on overlay windows)
+    // Streamer mode (FLAG_SECURE on overlay windows).
+    // Defaults to true to match UnifiedSettings::streamerMode so the overlay is
+    // already excluded from MediaProjection on its very first frame - otherwise
+    // the ESP boxes we draw get captured and re-detected as phantom enemies.
+    // Native pushes the authoritative value on the first rendered frame.
     @Volatile
-    private var streamerModeEnabled: Boolean = false
+    private var streamerModeEnabled: Boolean = true
 
     // Floating menu icon overlay
     private var floatingIconView: ImageView? = null
@@ -405,12 +405,9 @@ class MainActivity : AppCompatActivity() {
                     LauncherScreen(
                         isRunning = isRunningState,
                         statusText = statusTextState,
-                        rootReady = rootAvailable.get(),
-                        shizukuReady = shizukuAvailable.get(),
                         onStart = { onStartClicked() },
                         onStop = { onStopClicked() },
                         onOpenGithub = { openGithubUrl() },
-                        onOpenCreator = { openCreatorUrl() },
                     )
                 }
             }
@@ -858,14 +855,17 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
+            // Force the native menu state to hidden BEFORE adding the overlay so
+            // the very first touch-polling cycle sees a closed menu and keeps
+            // FLAG_NOT_TOUCHABLE set. Otherwise a stale/persisted menu-visible
+            // state can briefly make the overlay capture all screen touches.
+            ImGuiGLSurface.nativeSetMenuVisible(false)
+            menuVisible = false
+
             setupScreenCapture()
             setupOverlay()
             nativeStart()
 
-            // Start with the menu hidden so the game underneath stays fully
-            // touchable/clickable. The floating gear icon toggles the menu.
-            ImGuiGLSurface.nativeSetMenuVisible(false)
-            menuVisible = false
             applyOverlayTouchable(false)
 
             updateButtonStates(true)
@@ -1305,7 +1305,6 @@ class MainActivity : AppCompatActivity() {
             else
                 WindowManager.LayoutParams.TYPE_PHONE,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                     // Default to pass-through touch; enable only when menu needs input
                     WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
@@ -1533,11 +1532,6 @@ class MainActivity : AppCompatActivity() {
         }.show()
     }
 
-    private fun openCreatorUrl() {
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(CREATOR_URL))
-        startActivity(intent)
-    }
-
     private fun openGithubUrl() {
         val intent = Intent(Intent.ACTION_VIEW, Uri.parse(OSS_GITHUB_URL))
         startActivity(intent)
@@ -1548,12 +1542,9 @@ class MainActivity : AppCompatActivity() {
     private fun LauncherScreen(
         isRunning: Boolean,
         statusText: String,
-        rootReady: Boolean,
-        shizukuReady: Boolean,
         onStart: () -> Unit,
         onStop: () -> Unit,
         onOpenGithub: () -> Unit,
-        onOpenCreator: () -> Unit,
     ) {
         var menuOpen by remember { mutableStateOf(false) }
         val statusColor = statusAccentFor(statusText, isRunning)
@@ -1615,29 +1606,6 @@ class MainActivity : AppCompatActivity() {
                         PrimaryActionButton(
                             isRunning = isRunning,
                             onClick = if (isRunning) onStop else onStart
-                        )
-
-                        Spacer(Modifier.height(14.dp))
-
-                        Text(
-                            text = "触摸输入后端",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(bottom = 6.dp)
-                        )
-
-                        BackendChips(rootReady = rootReady, shizukuReady = shizukuReady, a11yReady = accessibilityAvailable.get())
-
-                        Spacer(Modifier.height(14.dp))
-
-                        Text(
-                            text = "由 $CREATOR_NAME 打造",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                            modifier = Modifier
-                                .clickable { onOpenCreator() }
-                                .padding(vertical = 4.dp)
                         )
                     }
                 }
@@ -1894,41 +1862,6 @@ class MainActivity : AppCompatActivity() {
                 )
             }
         }
-    }
-
-    @Composable
-    private fun BackendChips(rootReady: Boolean, shizukuReady: Boolean, a11yReady: Boolean) {
-        Row(
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            BackendChip(label = "Root", ready = rootReady)
-            Spacer(Modifier.width(12.dp))
-            BackendChip(label = "Shizuku", ready = shizukuReady)
-            Spacer(Modifier.width(12.dp))
-            BackendChip(label = "无障碍", ready = a11yReady)
-        }
-    }
-
-    @Composable
-    private fun BackendChip(label: String, ready: Boolean) {
-        val color = if (ready) StatusGreen else MaterialTheme.colorScheme.onSurfaceVariant
-        AssistChip(
-            onClick = {},
-            label = { Text(label, fontWeight = FontWeight.SemiBold, fontSize = 12.sp) },
-            leadingIcon = {
-                Box(
-                    modifier = Modifier
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .background(color),
-                )
-            },
-            colors = AssistChipDefaults.assistChipColors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f),
-            ),
-            shape = RoundedCornerShape(10.dp)
-        )
     }
 
     @Composable
