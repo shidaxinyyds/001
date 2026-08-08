@@ -374,7 +374,7 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeInit(JNIEnv* env, jclass /* this */, jobj
     style.WindowBorderSize  = 1.0f;
     style.ScrollbarSize     = 14.0f;
     style.GrabMinSize       = 16.0f;
-    style.TabMinWidthForCloseButton = 0.0f;
+    style.TabBarBorderSize  = 0.0f;
 
     // Apply persisted language preference so the very first frame renders
     // in the user's chosen language without a one-frame English flash.
