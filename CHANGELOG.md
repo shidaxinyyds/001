@@ -4,6 +4,16 @@ All notable changes to AimBuddy. Format inspired by [Keep a Changelog](https://k
 
 Dates are in ISO-8601 (YYYY-MM-DD).
 
+## [0.3.0-beta.20] - 2026-08-10
+
+修复 beta.19 CI 构建失败：NCNN Mat `void*` 指针算术错误。
+
+### Fixed
+- `yolo_detector.cpp:142`：将 `warmupInput.data` 强转为 `float*` 后再调用 `std::fill`，消除 NDK clang "arithmetic on a pointer to void" 编译错误。
+
+### 版本号
+- 因远程已存在 `v0.3.0-beta.19` 标签（指向 a2ec436），本次升到 beta.20 以触发新的 CI 构建与 tag，避免 detect-version 因标签已存在而跳过出包。
+
 ## [0.3.0-beta.19] - 2026-08-09
 
 C++ 检测流水线重构与误检抑制强化。

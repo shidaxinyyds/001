@@ -139,7 +139,8 @@ bool YoloDetector::initialize(AAssetManager* assetManager,
             // The actual content doesn't matter — we just need to trigger
             // Vulkan shader compilation for every layer in the network.
             const int total = warmupInput.cstep * warmupInput.c;
-            std::fill(warmupInput.data, warmupInput.data + total, 114.0f);
+            std::fill(static_cast<float*>(warmupInput.data),
+                      static_cast<float*>(warmupInput.data) + total, 114.0f);
 
             // Normalize [0,255] → [0,1], same as real preprocessing.
             const float meanVals[3] = {0.0f, 0.0f, 0.0f};
