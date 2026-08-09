@@ -16,6 +16,7 @@
 #include <cstring>
 #include <cmath>
 #include <signal.h>
+#include <execinfo.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <algorithm>
@@ -78,40 +79,81 @@ namespace {
     // Java (CrashReporter) so we write inside the app's external files dir.
     std::string g_nativeCrashPath;
 
-    // Minimal async-signal-safe crash handler: record the signal number to a
-    // file, then restore the default disposition and re-raise so Android still
-    // produces a tombstone and terminates the process normally.
-    void nativeCrashSignalHandler(int sig) {
+    // Crash handler that PRESERVES Android's own signal handlers. ART installs
+    // handlers for SIGSEGV/SIGBUS to implement implicit null checks, GC read
+    // barriers, stack-overflow guards, JIT, etc. Replacing those handlers
+    // (instead of chaining to them) makes the process terminate on the very
+    // first internal ART fault - which presents as a hard "direct crash" at
+    // startup with no useful stack. So we record the signal + a backtrace to
+    // disk, then forward to whatever handler was installed before us.
+    static std::atomic<bool> g_inNativeCrash{false};
+    static struct sigaction g_prevSa[64];
+
+    void nativeCrashSignalHandler(int sig, siginfo_t* info, void* ucontext) {
+        // Re-entrancy guard: if we crash while handling a crash, drop straight
+        // to the default disposition and re-raise so we always terminate.
+        if (g_inNativeCrash.exchange(true)) {
+            struct sigaction dfl;
+            memset(&dfl, 0, sizeof(dfl));
+            dfl.sa_handler = SIG_DFL;
+            sigaction(sig, &dfl, nullptr);
+            raise(sig);
+            return;
+        }
+
         if (!g_nativeCrashPath.empty()) {
             int fd = open(g_nativeCrashPath.c_str(),
                           O_WRONLY | O_CREAT | O_TRUNC, 0600);
             if (fd >= 0) {
-                const char* head = "AimBuddy native crash. signal=";
+                const char* head = "AimBuddy native crash\n";
                 write(fd, head, static_cast<size_t>(strlen(head)));
-                char buf[16];
-                int n = snprintf(buf, sizeof(buf), "%d", sig);
+                char buf[64];
+                int n = snprintf(buf, sizeof(buf), "signal=%d\n", sig);
                 if (n > 0) write(fd, buf, static_cast<size_t>(n));
-                const char* nl = "\n";
-                write(fd, nl, 1);
+                // Best-effort backtrace (addresses only; symbolise with
+                // ndk-stack + the unstripped lib). backtrace() is not strictly
+                // async-signal-safe but is safe enough here and far better than
+                // a bare signal number for diagnosis.
+                void* frames[24];
+                int fc = backtrace(frames, 24);
+                for (int i = 0; i < fc; ++i) {
+                    n = snprintf(buf, sizeof(buf), "0x%p\n", frames[i]);
+                    if (n > 0) write(fd, buf, static_cast<size_t>(n));
+                }
+                const char* nl = "[end]\n";
+                write(fd, nl, static_cast<size_t>(strlen(nl)));
                 close(fd);
             }
         }
-        struct sigaction sa;
-        memset(&sa, 0, sizeof(sa));
-        sa.sa_handler = SIG_DFL;
-        sigaction(sig, &sa, nullptr);
-        raise(sig);
+
+        // Forward to the previous handler (keeps ART alive).
+        struct sigaction* prev = &g_prevSa[sig];
+        if (prev->sa_flags & SA_SIGINFO) {
+            if (prev->sa_sigaction) prev->sa_sigaction(sig, info, ucontext);
+        } else if (prev->sa_handler == SIG_DFL) {
+            struct sigaction dfl;
+            memset(&dfl, 0, sizeof(dfl));
+            dfl.sa_handler = SIG_DFL;
+            sigaction(sig, &dfl, nullptr);
+            raise(sig);
+        } else if (prev->sa_handler != SIG_IGN && prev->sa_handler != nullptr) {
+            prev->sa_handler(sig);
+        }
+        // If the previous handler returned without terminating (rare), just
+        // leave; do not force-exit.
     }
 
     void installNativeCrashHandler() {
         struct sigaction sa;
         memset(&sa, 0, sizeof(sa));
-        sa.sa_handler = nativeCrashSignalHandler;
+        sa.sa_sigaction = nativeCrashSignalHandler;
+        sa.sa_flags = SA_SIGINFO;
         sigemptyset(&sa.sa_mask);
-        sa.sa_flags = 0;
-        const int signals[] = { SIGSEGV, SIGABRT, SIGFPE, SIGILL, SIGBUS };
+        const int signals[] = { SIGSEGV, SIGBUS, SIGABRT, SIGFPE, SIGILL };
         for (int sig : signals) {
-            sigaction(sig, &sa, nullptr);
+            if (sig > 0 && sig < 64) {
+                sigaction(sig, &sa, &g_prevSa[sig]);
+            }
         }
     }
 
@@ -589,12 +631,14 @@ JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {
     LOGI("Native library loaded");
     g_jvm = vm;
 
-    // Install a best-effort native crash handler so SIGSEGV/SIGABRT/etc. are
-    // recorded to disk and can be surfaced to the user on the next launch.
-    installNativeCrashHandler();
-
-    // Initialize NCNN for Vulkan
+    // Initialize NCNN for Vulkan FIRST so its internal signal usage still sees
+    // the system's default handlers, then install our crash handler which
+    // CHAINS to whatever was already installed (preserving Android/ART
+    // handlers). Replacing ART's SIGSEGV/SIGBUS handlers outright was the cause
+    // of the "launch -> instant crash" regression: ART relies on those signals
+    // for null checks, GC read barriers, etc., and losing them kills the app.
     ncnn::create_gpu_instance();
+    installNativeCrashHandler();
 
     return JNI_VERSION_1_6;
 }

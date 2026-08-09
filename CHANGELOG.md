@@ -4,6 +4,18 @@ All notable changes to AimBuddy. Format inspired by [Keep a Changelog](https://k
 
 Dates are in ISO-8601 (YYYY-MM-DD).
 
+## [0.3.0-beta.15] - 2026-08-09
+
+修复 beta.14 引入的「启动即闪退、无任何原因」回归——原生崩溃信号处理器错误地覆盖了 Android ART 运行时的 SIGSEGV/SIGBUS 处理器，导致进程在第一次内部故障时直接终止。改为链式转发以保留 ART，并捕获回溯地址便于诊断。
+
+### Fixed
+- **启动闪退根因**：`JNI_OnLoad` 中原生信号处理器用 `sigaction` 直接覆盖（而非链式调用）了 ART 的 SIGSEGV/SIGBUS 处理。ART 依赖这些信号做隐式空指针检查、GC 读屏障、栈溢出保护与 JIT，覆盖后进程在任意内部故障时立即终止，表现为「打开即崩、无堆栈」。现已改为保存并链式转发到上一个处理器，运行时恢复正常。
+- 原生崩溃处理器现在在崩溃时把信号号与回溯地址写入 `native_crash.log`（地址可由 ndk-stack + 未 strip 的 .so 还原），并保持防递归。
+- `ncnn::create_gpu_instance()` 在信号处理器安装之前调用，避免干扰其初始化期间的内部信号使用。
+
+### Note
+- beta.13 的触摸修复（齿轮不再拦截触摸、菜单改由通知栏进入）保持不变。
+
 ## [0.3.0-beta.14] - 2026-08-09
 
 新增崩溃自报告器，定位 beta.13 引入的「启动/使用即闪退」问题。
