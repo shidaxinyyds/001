@@ -404,6 +404,10 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         activityRef = WeakReference(this)
+
+        // Install crash reporter as early as possible so even onCreate crashes are
+        // captured and can be shown to the user on the next launch.
+        CrashReporter.install(this)
         
         // Force landscape orientation
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
@@ -428,6 +432,10 @@ class MainActivity : AppCompatActivity() {
         
         // Enable immersive fullscreen mode (hide nav bar & status bar)
         enableImmersiveMode()
+
+        // If the previous run crashed, surface the captured report so the user
+        // (and the developer) can see exactly what failed instead of guessing.
+        reportPendingCrashIfAny()
 
         Log.i(TAG, "onCreate")
 
@@ -573,6 +581,31 @@ class MainActivity : AppCompatActivity() {
             View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
             View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
         )
+    }
+
+    private fun reportPendingCrashIfAny() {
+        val report = CrashReporter.consumePendingCrash(this) ?: return
+        Log.e(TAG, "Previous run crashed:\n$report")
+        val scroll = android.widget.ScrollView(this).apply {
+            val tv = android.widget.TextView(this@MainActivity).apply {
+                text = report
+                setTextIsSelectable(true)
+                textSize = 11f
+                setPadding(24, 24, 24, 24)
+            }
+            addView(tv)
+        }
+        val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("上次运行崩溃报告")
+            .setView(scroll)
+            .setPositiveButton("复制并关闭") { _, _ ->
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                cm?.setPrimaryClip(android.content.ClipData.newPlainText("AimBuddy crash", report))
+                showAppToast("崩溃信息已复制到剪贴板", false)
+            }
+            .setNegativeButton("仅关闭", null)
+            .create()
+        dialog.show()
     }
 
     private fun onStartClicked() {

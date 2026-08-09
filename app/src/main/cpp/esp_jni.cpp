@@ -13,7 +13,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstdarg>
+#include <cstring>
 #include <cmath>
+#include <signal.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <algorithm>
 
 // Fix for NDK compatibility issue usually caused by NCNN library mismatch
@@ -69,6 +73,47 @@ namespace {
     std::unique_ptr<ESP::FrameBuffer> g_frameBuffer;
     std::unique_ptr<AimbotController> g_aimbot;
     std::unique_ptr<TouchHelper> g_touchHelper;
+
+    // Path where the native signal handler writes a crash marker. Pushed from
+    // Java (CrashReporter) so we write inside the app's external files dir.
+    std::string g_nativeCrashPath;
+
+    // Minimal async-signal-safe crash handler: record the signal number to a
+    // file, then restore the default disposition and re-raise so Android still
+    // produces a tombstone and terminates the process normally.
+    void nativeCrashSignalHandler(int sig) {
+        if (!g_nativeCrashPath.empty()) {
+            int fd = open(g_nativeCrashPath.c_str(),
+                          O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            if (fd >= 0) {
+                const char* head = "AimBuddy native crash. signal=";
+                write(fd, head, static_cast<size_t>(strlen(head)));
+                char buf[16];
+                int n = snprintf(buf, sizeof(buf), "%d", sig);
+                if (n > 0) write(fd, buf, static_cast<size_t>(n));
+                const char* nl = "\n";
+                write(fd, nl, 1);
+                close(fd);
+            }
+        }
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = SIG_DFL;
+        sigaction(sig, &sa, nullptr);
+        raise(sig);
+    }
+
+    void installNativeCrashHandler() {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = nativeCrashSignalHandler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;
+        const int signals[] = { SIGSEGV, SIGABRT, SIGFPE, SIGILL, SIGBUS };
+        for (int sig : signals) {
+            sigaction(sig, &sa, nullptr);
+        }
+    }
 
     // Bridge availability must outlive TouchHelper instances. Kotlin can report
     // availability BEFORE g_touchHelper exists (refreshAccessibilityState runs
@@ -528,13 +573,29 @@ void GetCaptureSize(int* outWidth, int* outHeight) {
 /**
  * @brief JNI_OnLoad - Called when native library is loaded
  */
+extern "C" JNIEXPORT void JNICALL
+Java_com_aimbuddy_ImGuiGLSurface_nativeSetCrashLogPath(JNIEnv* env, jclass,
+                                                       jstring path) {
+    if (path) {
+        const char* p = env->GetStringUTFChars(path, nullptr);
+        if (p) {
+            g_nativeCrashPath = p;
+            env->ReleaseStringUTFChars(path, p);
+        }
+    }
+}
+
 JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {
     LOGI("Native library loaded");
     g_jvm = vm;
-    
+
+    // Install a best-effort native crash handler so SIGSEGV/SIGABRT/etc. are
+    // recorded to disk and can be surfaced to the user on the next launch.
+    installNativeCrashHandler();
+
     // Initialize NCNN for Vulkan
     ncnn::create_gpu_instance();
-    
+
     return JNI_VERSION_1_6;
 }
 

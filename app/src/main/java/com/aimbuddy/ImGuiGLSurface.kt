@@ -64,6 +64,9 @@ class ImGuiGLSurface @JvmOverloads constructor(
 
         @JvmStatic
         external fun nativeSetAccessibilityAvailable(available: Boolean)
+
+        @JvmStatic
+        external fun nativeSetCrashLogPath(path: String)
     }
 
     private var screenWidth = 0

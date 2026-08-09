@@ -4,6 +4,22 @@ All notable changes to AimBuddy. Format inspired by [Keep a Changelog](https://k
 
 Dates are in ISO-8601 (YYYY-MM-DD).
 
+## [0.3.0-beta.14] - 2026-08-09
+
+新增崩溃自报告器，定位 beta.13 引入的「启动/使用即闪退」问题。
+
+### Added
+- `CrashReporter`：捕获 Java 未处理异常与 native 信号（SIGSEGV/SIGABRT/SIGFPE/SIGILL/SIGBUS），
+  写入 `getExternalFilesDir()/crashlog.txt` 与 `native_crash.log`。
+- 原生层 `JNI_OnLoad` 安装信号处理器，崩溃时把信号号写入文件（路径由
+  `ImGuiGLSurface.nativeSetCrashLogPath` 从 Java 注入）。
+- `MainActivity` 启动早期安装报告器；若上次运行崩溃，下次启动弹出对话框展示堆栈，
+  并可一键复制到剪贴板，便于无 adb 也能拿到崩溃原因。
+
+### Note
+- beta.13 的触摸修复（齿轮不再拦截触摸、菜单改由通知栏进入）保持不变。
+- 本版本目标：复现崩溃并拿到堆栈，而非盲目改动。下次启动的崩溃弹窗将指明真正成因。
+
 ## [0.3.0-beta.13] - 2026-08-09
 
 兜底修复：即使 `FLAG_NOT_TOUCH_MODAL` 在某些设备上仍不能让齿轮窗口外触摸正常穿透，也彻底消除屏幕冻结。
