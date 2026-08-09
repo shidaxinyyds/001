@@ -98,6 +98,20 @@ class ImGuiGLSurface @JvmOverloads constructor(
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        // Defense-in-depth: when the menu is NOT visible, never consume any
+        // touch event. Returning false here tells the View hierarchy "I did
+        // not handle this", which  —  combined with FLAG_NOT_TOUCHABLE on the
+        // window  —  ensures touches reach the app underneath.
+        //
+        // The primary touch pass-through mechanism is FLAG_NOT_TOUCHABLE on
+        // the overlay window (managed by the touch poller in MainActivity).
+        // This override is a secondary guard: if the window ever briefly
+        // becomes touchable (e.g. during the 50ms poll cycle, or after a
+        // failed updateViewLayout), we still avoid swallowing touches.
+        if (!nativeIsMenuVisible()) {
+            return false
+        }
+
         val action = when (event.action) {
             MotionEvent.ACTION_DOWN -> 0
             MotionEvent.ACTION_UP -> 1
