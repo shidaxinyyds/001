@@ -52,6 +52,12 @@ class ImGuiGLSurface @JvmOverloads constructor(
 
         @JvmStatic
         external fun nativeIsMenuVisible(): Boolean
+
+        /// Returns the epoch-millis timestamp of the most recent nativeTick()
+        /// call, or 0 if the render thread has never ticked. Used by the UI
+        /// thread poller to detect a stalled render thread.
+        @JvmStatic
+        external fun nativeGetLastTickMillis(): Long
         
         @JvmStatic
         external fun nativeSetIconPosition(x: Float, y: Float)
@@ -115,9 +121,12 @@ class ImGuiGLSurface @JvmOverloads constructor(
             return false
         }
 
-        val action = when (event.action) {
-            MotionEvent.ACTION_DOWN -> 0
-            MotionEvent.ACTION_UP -> 1
+        val action = when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN,
+            MotionEvent.ACTION_POINTER_DOWN -> 0
+            MotionEvent.ACTION_UP,
+            MotionEvent.ACTION_POINTER_UP,
+            MotionEvent.ACTION_CANCEL -> 1
             MotionEvent.ACTION_MOVE -> 2
             else -> return false
         }

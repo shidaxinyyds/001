@@ -20,7 +20,7 @@
 // AIMBUDDY_VERSION is injected by the Gradle CMake configuration (see
 // app/build.gradle). The fallback keeps standalone IDE indexing happy.
 #ifndef AIMBUDDY_VERSION
-#define AIMBUDDY_VERSION "0.3.0-beta.16"
+#define AIMBUDDY_VERSION "0.3.0-beta.17"
 #endif
 
 namespace aimbuddy::i18n {

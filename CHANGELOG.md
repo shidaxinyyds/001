@@ -4,6 +4,16 @@ All notable changes to AimBuddy. Format inspired by [Keep a Changelog](https://k
 
 Dates are in ISO-8601 (YYYY-MM-DD).
 
+## [0.3.0-beta.17] - 2026-08-09
+
+在 beta.16 架构基础上强化菜单输入链路的可靠性，修复「开菜单按钮点了没反应」「菜单内交互越用越卡」两类残留问题。
+
+### Fixed
+- **开菜单瞬间点击丢失**：`nativeTick()` 此前在 `ProcessPendingTouchEvents()` 之后才从 config 读取 `menuVisible`，导致 `openMenu()` 后第一帧仍按「菜单关闭」处理、把该帧排队的触摸样本全部丢弃，表现为「点了齿轮/通知栏菜单没反应」。现在把 `g_menuVisible` 的同步提前到处理触摸队列之前。
+- **多点触控与触摸取消**：`onTouchEvent` 与 `menuInputView` 的触摸监听改用 `event.actionMasked` 并显式处理 `ACTION_POINTER_DOWN/UP` 与 `ACTION_CANCEL`。修复指针索引高位导致多点事件被静默丢弃、以及系统取消触摸序列后 ImGui 卡在「鼠标按下」状态使后续菜单交互全部失效的问题。
+- **渲染线程卡死兜底**：新增 `nativeGetLastTickMillis()`，50ms 轮询检测「菜单宣称打开但渲染线程 >1.5s 无 tick」时自动 `forceRestoreTouch()`，防止渲染线程意外挂死导致 `menuInputView` 永久吞掉全屏触摸。
+- **`setSecure()` 后补钉 NOT_TOUCHABLE**：`MediaProjection` 的 `setSecure()` 会触发 `SurfaceView` 异步重建并可能悄悄剥离 `FLAG_NOT_TOUCHABLE`，现增加 100ms/500ms 延迟强制重设，配合每 ~2s 周期重设，杜绝 overlay 在屏幕共享瞬间变为可触摸。
+
 ## [0.3.0-beta.16] - 2026-08-09
 
 彻底重构触摸/菜单输入架构，从根上消除「开启服务后整屏触摸失效、菜单打不开/点了没反应」的故障模式。

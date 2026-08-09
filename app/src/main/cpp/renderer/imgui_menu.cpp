@@ -100,6 +100,11 @@ static bool g_settingsPendingSave = false;
 static double g_settingsDirtyAt = 0.0;
 static constexpr double SETTINGS_SAVE_DELAY_SEC = 0.35;
 static std::chrono::steady_clock::time_point g_lastOverlayTickTime{};
+// Wall-clock epoch-millis of the last successful nativeTick(). Read by the
+// UI-thread poller via nativeGetLastTickMillis() to detect a stalled render
+// thread (if this stops advancing while the menu is open, menuInputView would
+// trap all touches forever).
+static std::atomic<int64_t> g_lastTickEpochMs{0};
 static float g_measuredOverlayFps = 0.0f;
 static float g_measuredInferenceMs = 0.0f;
 static ImVec2 g_menuSize = ImVec2(0.0f, 0.0f);
@@ -543,17 +548,36 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
             }
         }
         g_lastOverlayTickTime = nowTick;
+        // Stamp the wall-clock time so the UI-thread poller can detect a stall.
+        g_lastTickEpochMs.store(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count(),
+            std::memory_order_relaxed);
+
+        // Access global settings EARLY so we can sync the menu-visible flag
+        // before draining the touch queue. Previously g_menuVisible was updated
+        // *after* ProcessPendingTouchEvents(), which meant the very first frame
+        // after openMenu() still saw the old (closed) state and silently dropped
+        // every touch sample queued during that frame — the primary cause of
+        // "menu open button does nothing" right after enabling screen capture.
+        ESP::RenderConfig* settings = GetRenderConfig();
 
         // Start ImGui frame
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplAndroid_NewFrame();
+
+        // Refresh the menu-visible latch from the authoritative config BEFORE
+        // draining touches so ProcessPendingTouchEvents() and the FPS cap below
+        // both see the current frame's value, not the previous frame's.
+        if (settings) {
+            g_menuVisible = settings->menuVisible.load(std::memory_order_relaxed);
+        }
+
         // Feed queued touches (thread-safe hand-off from the UI thread) before
         // NewFrame() consumes the ImGui input queue.
         ProcessPendingTouchEvents();
         ImGui::NewFrame();
 
-        // Access global settings
-        ESP::RenderConfig* settings = GetRenderConfig();
         if (!settings) {
             ImGui::EndFrame();
             ImGui::Render();
@@ -802,7 +826,8 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
         }
 
         // Menu window  -  display-proportional size with scrollable tab layout
-        g_menuVisible = settings->menuVisible.load(std::memory_order_relaxed);
+        // g_menuVisible is already synced from settings->menuVisible at the top
+        // of this frame (before ProcessPendingTouchEvents), so we just use it.
         if (g_menuVisible) {
             bool settingsDirty = false;
             const float defaultMenuWidth  = std::max(460.0f, std::min(displayW * 0.48f, 860.0f));
@@ -1354,6 +1379,16 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeSetMenuVisible(JNIEnv* /* env */, jclass 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_aimbuddy_ImGuiGLSurface_nativeIsMenuVisible(JNIEnv* /* env */, jclass /* this */) {
     return g_menuVisible ? JNI_TRUE : JNI_FALSE;
+}
+
+// Returns the epoch-millis timestamp of the most recent nativeTick() call, or 0
+// if the render thread has never ticked. Used by the UI-thread poller in
+// MainActivity to detect a stalled render thread: if the menu claims to be
+// open but this timestamp stops advancing for > 1.5 s, the poller force-closes
+// the menu to prevent a permanent touch deadlock.
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_aimbuddy_ImGuiGLSurface_nativeGetLastTickMillis(JNIEnv* /* env */, jclass /* this */) {
+    return static_cast<jlong>(g_lastTickEpochMs.load(std::memory_order_relaxed));
 }
 
 
