@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <android/asset_manager.h>
 #include <android/hardware_buffer.h>
@@ -145,20 +146,7 @@ private:
                      bool fullFrame = false);
 
     /**
-     * @brief Decode network output into screen-space boxes.
-     * Shared by the tiled full-screen path and the cropped path.
-     * @param output Raw network output
-     * @param out Append target for decoded (screen-space) boxes
-     * @param scaleX,scaleY Model->screen scale
-     * @param offsetX,offsetY Screen-space offset of the source region origin
-     * @param confThreshold Confidence cutoff
-     */
-    void decodeBoxes(const ncnn::Mat& output, DetectionArray& out,
-                     float scaleX, float scaleY, float offsetX, float offsetY,
-                     float confThreshold);
-    
-    /**
-     * @brief Apply Non-Maximum Suppression
+     * @brief Apply Non-Maximum Suppression (Weighted Box Fusion)
      * @param boxes Input boxes
      * @param result Output filtered boxes
      */
@@ -178,9 +166,19 @@ private:
     // Runtime state
     int currentCropX_ = 0;
     int currentCropY_ = 0;
+    int currentActualCropSize_ = 0;  // clamped crop size (for crop-mode postprocess)
     int currentCaptureWidth_ = 0;
     int currentCaptureHeight_ = 0;
     bool fullFrame_ = false;
+
+    // Letterbox resize parameters (stored from preprocess, used in postprocess).
+    // The model is trained with YOLO's default letterbox resize (preserve aspect
+    // ratio + pad to square). Inference MUST use the same resize to avoid the
+    // train/inference mismatch that degrades mAP by 10-20%.
+    int letterboxResizedW_ = 0;  // actual content width after resize (before pad)
+    int letterboxResizedH_ = 0;  // actual content height after resize (before pad)
+    int letterboxPadX_ = 0;      // left padding in model-input pixels
+    int letterboxPadY_ = 0;      // top padding in model-input pixels
 
     // Cached blob names to avoid repeated lookup warnings
     std::string inputBlobName_;

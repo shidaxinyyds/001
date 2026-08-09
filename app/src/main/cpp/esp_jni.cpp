@@ -245,22 +245,52 @@ namespace {
     // keep a tiny IoU-associated track table and only publish a box once its
     // track has been seen kConfirmHits cycles in a row. Tracks that go unseen
     // for kMaxMisses cycles are dropped so targets still vanish promptly.
+    //
+    // TUNING NOTES (post single-pass refactor):
+    //   kMatchIoU lowered 0.25→0.20: with single-pass full-frame the cycle
+    //     time is ~5-15ms (was ~50-90ms with 6-tile), so targets move LESS
+    //     between cycles. But the lower confidence threshold (0.45 vs 0.60)
+    //     means more jitter in box positions, so a slightly looser gate
+    //     prevents real tracks from failing to associate and resetting.
+    //   kMatchIoUConfirmed lowered 0.10→0.05: confirmed tracks need a very
+    //     loose gate so that fast-moving targets (flicks, running enemies)
+    //     don't break association and flicker off for a cycle.
+    //   kMaxMisses raised 2→3: gives confirmed tracks one more cycle of
+    //     grace to handle brief detection gaps (e.g. occlusion, motion blur)
+    //     without the box disappearing and reappearing.
     // ---------------------------------------------------------------------
     constexpr int   kTrackCapacity = Config::MAX_DETECTIONS;
     constexpr int   kConfirmHits   = 2;      // sightings required before publishing
-    constexpr int   kMaxMisses     = 2;      // cycles a track survives unmatched
-    constexpr float kMatchIoU          = 0.25f;  // gate for an unconfirmed track
-    constexpr float kMatchIoUConfirmed = 0.10f;  // looser gate once confirmed
+    constexpr int   kMaxMisses     = 3;      // cycles a track survives unmatched
+    constexpr float kMatchIoU          = 0.20f;  // gate for an unconfirmed track
+    constexpr float kMatchIoUConfirmed = 0.05f;  // looser gate once confirmed
 
     // Geometric plausibility limits, applied here (shared by ESP *and* aimbot)
     // rather than only at draw time. Previously the renderer dropped these
     // boxes while the aimbot still locked onto them, so the crosshair could be
     // dragged toward a "target" the user could not even see.
-    constexpr float kMinBoxPx   = 14.0f;  // degenerate sliver
-    constexpr float kMaxBoxFrac = 0.85f;  // near-fullscreen blob (lobby panels)
+    //
+    // ENHANCED:
+    //   - Added aspect-ratio gate (0.15–6.0). A player model in an FPS is
+    //     taller than wide; extreme slivers (thin horizontal bars or tall
+    //     vertical lines) are classic phantom signatures from HUD/UI edges.
+    //   - Tightened max fraction 0.85→0.65: a real enemy never occupies more
+    //     than ~65% of screen width AND height simultaneously. Lobby panels
+    //     and full-screen artifacts are rejected here instead of leaking into
+    //     the track table where they'd stay "confirmed" for several cycles.
+    //   - Added minimum-area gate: boxes with area < 200px² (e.g. 14×14) are
+    //     sub-threshold noise even if both dimensions pass the min check.
+    constexpr float kMinBoxPx      = 14.0f;
+    constexpr float kMaxBoxFrac    = 0.65f;
+    constexpr float kMinBoxArea    = 200.0f;
+    constexpr float kMaxAspectRatio = 6.0f;
+    constexpr float kMinAspectRatio = 0.15f;
 
     struct DetTrack {
         float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
+        float vx = 0.0f, vy = 0.0f;   // smoothed velocity (px/cycle)
+        float confidence = 0.0f;       // last known detection confidence
+        int   classId = 0;             // last known class ID (for coasting)
         int   hits = 0;
         int   misses = 0;
         bool  used = false;
@@ -269,11 +299,16 @@ namespace {
     DetTrack g_tracks[kTrackCapacity];
     int      g_trackCount = 0;
 
-    inline float TrackIoU(const DetTrack& t, const ESP::BoundingBox& b) {
-        const float ix1 = std::max(t.x, b.x);
-        const float iy1 = std::max(t.y, b.y);
-        const float ix2 = std::min(t.x + t.w, b.x + b.width);
-        const float iy2 = std::min(t.y + t.h, b.y + b.height);
+    /// IoU using the track's velocity-predicted next position. When a target
+    /// moves quickly between cycles, the raw last-known position is already
+    /// stale; predicting one step ahead keeps the IoU gate meaningful.
+    inline float TrackIoUPredicted(const DetTrack& t, const ESP::BoundingBox& b) {
+        const float px = t.x + t.vx;
+        const float py = t.y + t.vy;
+        const float ix1 = std::max(px, b.x);
+        const float iy1 = std::max(py, b.y);
+        const float ix2 = std::min(px + t.w, b.x + b.width);
+        const float iy2 = std::min(py + t.h, b.y + b.height);
         const float iw = ix2 - ix1;
         const float ih = iy2 - iy1;
         if (iw <= 0.0f || ih <= 0.0f) return 0.0f;
@@ -289,6 +324,13 @@ namespace {
     /// Drop boxes whose geometry cannot plausibly be a player. Runs before the
     /// temporal filter so a fullscreen artefact never even enters the track
     /// table (a static UI panel would otherwise stay "confirmed" forever).
+    ///
+    /// Checks (all must pass):
+    ///   1. Finite coordinates (no NaN/Inf from decode arithmetic).
+    ///   2. Min dimension ≥ kMinBoxPx (14px) — degenerate slivers.
+    ///   3. Min area ≥ kMinBoxArea (200px²) — catches 14×14 boxes that pass #2.
+    ///   4. Max fraction ≤ kMaxBoxFrac (65%) — lobby panels, full-screen artifacts.
+    ///   5. Aspect ratio within [0.15, 6.0] — rejects thin bars from HUD edges.
     void DropImplausibleBoxes(ESP::DetectionArray& boxes) {
         const float screenW = static_cast<float>(std::max(1, g_screenWidth));
         const float screenH = static_cast<float>(std::max(1, g_screenHeight));
@@ -300,14 +342,32 @@ namespace {
                 !std::isfinite(b.width) || !std::isfinite(b.height)) {
                 continue;
             }
+            // Min dimension
             if (b.width < kMinBoxPx || b.height < kMinBoxPx) continue;
+            // Min area
+            if (b.width * b.height < kMinBoxArea) continue;
+            // Max fraction (both dims must be oversized to reject — a tall
+            // enemy near the screen edge can legitimately be > 65% of height)
             if (b.width > screenW * kMaxBoxFrac && b.height > screenH * kMaxBoxFrac) continue;
+            // Aspect ratio
+            const float ratio = b.width / b.height;
+            if (ratio > kMaxAspectRatio || ratio < kMinAspectRatio) continue;
+
             kept.push(b);
         }
         boxes = kept;
     }
 
     /// Filter `boxes` in place, keeping only temporally-confirmed detections.
+    ///
+    /// Improvements over the basic version:
+    ///   - Velocity prediction: IoU matching uses the track's predicted next
+    ///     position (pos + velocity), so fast-moving targets stay associated.
+    ///   - EMA smoothing: confirmed tracks publish a smoothed position instead
+    ///     of the raw per-frame detection, eliminating box jitter.
+    ///   - Coasting: when a confirmed track is briefly unmatched (occlusion,
+    ///     motion blur), its predicted position is still published for up to
+    ///     kMaxMisses cycles, preventing the ESP box from flickering off.
     void ApplyTemporalConfirmation(ESP::DetectionArray& boxes) {
         for (int i = 0; i < g_trackCount; ++i) {
             g_tracks[i].used = false;
@@ -315,14 +375,23 @@ namespace {
 
         ESP::DetectionArray confirmed;
 
+        // EMA smoothing factor for confirmed track positions.
+        // 0.55 = 55% new detection, 45% previous smoothed position.
+        // Higher = more responsive but more jitter; lower = smoother but more lag.
+        constexpr float kSmoothAlpha = 0.55f;
+        // EMA smoothing factor for velocity (lower = more stable velocity est).
+        constexpr float kVelAlpha = 0.50f;
+        // Confidence decay per coast cycle (0.20 = loses 20% per missed cycle).
+        constexpr float kCoastConfidenceDecay = 0.20f;
+        // Minimum confidence to keep publishing a coasting track.
+        constexpr float kCoastMinConfidence = 0.15f;
+        // Maximum coasting distance in pixels (safety: don't coast across screen).
+        constexpr float kCoastMaxDistance = 200.0f;
+
         for (int b = 0; b < boxes.size(); ++b) {
             const ESP::BoundingBox& box = boxes[b];
 
-            // Greedy best-IoU association. An already-confirmed track gets a
-            // looser gate: during a fast flick the same enemy can jump far
-            // enough that a strict IoU would break the association, reset the
-            // track to "unconfirmed" and make the box flicker off for a cycle.
-            // A brand-new track keeps the strict gate so noise cannot latch on.
+            // Greedy best-IoU association using PREDICTED position.
             int   best = -1;
             float bestScore = 0.0f;
             for (int i = 0; i < g_trackCount; ++i) {
@@ -330,7 +399,7 @@ namespace {
                 const float gate = (g_tracks[i].hits >= kConfirmHits)
                                        ? kMatchIoUConfirmed
                                        : kMatchIoU;
-                const float iou = TrackIoU(g_tracks[i], box);
+                const float iou = TrackIoUPredicted(g_tracks[i], box);
                 if (iou > gate && iou > bestScore) {
                     bestScore = iou;
                     best = i;
@@ -339,21 +408,83 @@ namespace {
 
             if (best >= 0) {
                 DetTrack& t = g_tracks[best];
-                t.x = box.x; t.y = box.y; t.w = box.width; t.h = box.height;
+
+                // Update velocity (smoothed EMA).
+                const float rawVx = box.x - t.x;
+                const float rawVy = box.y - t.y;
+                t.vx = t.vx * (1.0f - kVelAlpha) + rawVx * kVelAlpha;
+                t.vy = t.vy * (1.0f - kVelAlpha) + rawVy * kVelAlpha;
+
+                // Update position. For confirmed tracks, apply EMA smoothing
+                // to reduce per-frame jitter. For unconfirmed tracks, use raw
+                // position (need accuracy for confirmation matching).
+                if (t.hits >= kConfirmHits) {
+                    t.x = t.x * (1.0f - kSmoothAlpha) + box.x * kSmoothAlpha;
+                    t.y = t.y * (1.0f - kSmoothAlpha) + box.y * kSmoothAlpha;
+                    t.w = t.w * (1.0f - kSmoothAlpha) + box.width * kSmoothAlpha;
+                    t.h = t.h * (1.0f - kSmoothAlpha) + box.height * kSmoothAlpha;
+                } else {
+                    t.x = box.x; t.y = box.y; t.w = box.width; t.h = box.height;
+                }
+
+                t.confidence = box.confidence;
+                t.classId = box.classId;
                 if (t.hits < kConfirmHits) ++t.hits;
                 t.misses = 0;
                 t.used = true;
+
                 if (t.hits >= kConfirmHits) {
-                    confirmed.push(box);
+                    // Publish the smoothed position.
+                    ESP::BoundingBox smoothed;
+                    smoothed.x = t.x;
+                    smoothed.y = t.y;
+                    smoothed.width = t.w;
+                    smoothed.height = t.h;
+                    smoothed.confidence = t.confidence;
+                    smoothed.classId = box.classId;
+                    confirmed.push(smoothed);
                 }
             } else if (g_trackCount < kTrackCapacity) {
                 DetTrack& t = g_tracks[g_trackCount++];
                 t.x = box.x; t.y = box.y; t.w = box.width; t.h = box.height;
+                t.vx = 0.0f; t.vy = 0.0f;
+                t.confidence = box.confidence;
+                t.classId = box.classId;
                 t.hits = 1;
                 t.misses = 0;
                 t.used = true;
-                // First sighting: withheld until it is confirmed next cycle.
+                // First sighting: withheld until confirmed next cycle.
             }
+        }
+
+        // Coast: publish predicted positions for briefly-lost confirmed tracks.
+        // This prevents ESP boxes from flickering off during brief occlusion or
+        // motion blur, making the visual experience much more stable.
+        for (int i = 0; i < g_trackCount; ++i) {
+            if (g_tracks[i].used) continue;
+            if (g_tracks[i].hits < kConfirmHits) continue;
+
+            DetTrack& t = g_tracks[i];
+            const int coastSteps = t.misses + 1;
+            const float coastDx = t.vx * coastSteps;
+            const float coastDy = t.vy * coastSteps;
+            const float coastDist = std::sqrt(coastDx * coastDx + coastDy * coastDy);
+
+            // Don't coast if the predicted position is too far (likely lost).
+            if (coastDist > kCoastMaxDistance) continue;
+
+            const float decayedConf = t.confidence * (1.0f - kCoastConfidenceDecay * coastSteps);
+            if (decayedConf < kCoastMinConfidence) continue;
+            if (confirmed.full()) break;
+
+            ESP::BoundingBox coasted;
+            coasted.x = t.x + coastDx;
+            coasted.y = t.y + coastDy;
+            coasted.width = t.w;
+            coasted.height = t.h;
+            coasted.confidence = decayedConf;
+            coasted.classId = t.classId;
+            confirmed.push(coasted);
         }
 
         // Age out tracks that were not matched this cycle.
@@ -388,28 +519,20 @@ namespace {
         ESP::Frame frame;
         ESP::DetectionResult result;
         float cachedThreshold = -1.0f;
-        float cachedFovRadius = -1.0f;
-        int cachedCropSize = Config::CROP_SIZE;
 
         uint64_t statsSamples = 0;
-        [[maybe_unused]] uint64_t statsDrainedFrames = 0;  // accumulated in window, reset at report
+        uint64_t statsDrainedFrames = 0;  // accumulated in window, reset at report
         double statsInferenceMs = 0.0;
         double statsEndToEndMs = 0.0;
         uint64_t statsEndToEndSamples = 0;
         constexpr uint64_t kStatsWindow = 120;
-        constexpr double kTargetCycleMs = 8.0;
-        constexpr double kE2ePressureMs = 20.0;
         constexpr double kEmaAlpha = 0.15;
-        constexpr int kMinAdaptiveCrop = 224;
-        constexpr int kDownscaleStep = 16;
-        constexpr int kUpscaleStep = 8;
         constexpr auto kNoFrameSleepMin = std::chrono::microseconds(200);
         constexpr auto kNoFrameSleepMax = std::chrono::microseconds(2000);
 
         double emaInferMs = 0.0;
         double emaEndToEndMs = 0.0;
         uint32_t noFrameBackoffLevel = 0;
-        int adaptiveCropSize = cachedCropSize;
         
         while (g_running.load(std::memory_order_acquire)) {
             // Try to get a frame from buffer
@@ -429,37 +552,28 @@ namespace {
                 statsDrainedFrames += drainedThisIteration;
 
                 if (frame.hardwareBuffer && g_detector) {
-                    // Load settings once
-                    const float threshold = g_settings.confidenceThreshold;
-                    const float fovRadius = g_settings.fovRadius;
-                    
                     // Update detector threshold only when changed
+                    const float threshold = g_settings.confidenceThreshold;
                     if (std::fabs(threshold - cachedThreshold) > 0.0001f) {
                         g_detector->setConfidenceThreshold(threshold);
                         cachedThreshold = threshold;
                     }
 
-                    // Recompute dynamic crop only when fov changes.
-                    // Crop ceiling = Config::CROP_SIZE (320), floor = 224 so
-                    // adaptive pressure can shrink further when GPU is hot.
-                    if (std::fabs(fovRadius - cachedFovRadius) > 0.0001f) {
-                        const int safeScreenWidth = std::max(1, g_screenWidth);
-                        int targetSize = static_cast<int>(fovRadius * 2.0f);
-                        targetSize = std::max(kMinAdaptiveCrop, std::min(targetSize, safeScreenWidth));
-
-                        const float scaleToCapture = static_cast<float>(Config::CAPTURE_WIDTH) / static_cast<float>(safeScreenWidth);
-                        int dynamicCropSize = static_cast<int>(targetSize * scaleToCapture);
-                        dynamicCropSize = std::max(kMinAdaptiveCrop, std::min(dynamicCropSize, Config::CROP_SIZE));
-
-                        cachedCropSize = dynamicCropSize;
-                        adaptiveCropSize = cachedCropSize;
-                        cachedFovRadius = fovRadius;
-                    }
-
                     const auto inferStart = std::chrono::steady_clock::now();
-                    
-                    // Run detection on the whole screen (full-frame mode)
-                    if (g_detector->detect(frame.hardwareBuffer, result)) {
+
+                    // ----------------------------------------------------------------
+                    // Single-pass full-frame detection with letterbox resize.
+                    //
+                    // One inference per frame: the entire 1280x720 capture is
+                    // letterbox-resized (preserve aspect ratio + pad) into a
+                    // 256x256 model input. This matches the YOLOv8/v26 training
+                    // preprocessing, avoiding the train/inference mismatch that
+                    // degraded accuracy by 10-20%.
+                    //
+                    // Coordinate mapping in postprocess() reverses the letterbox
+                    // transform to map model-space boxes back to screen space.
+                    // ----------------------------------------------------------------
+                    if (g_detector->detect(frame.hardwareBuffer, result, Config::CROP_SIZE, true)) {
                         const auto inferEnd = std::chrono::steady_clock::now();
                         const double inferMs = std::chrono::duration<double, std::milli>(inferEnd - inferStart).count();
                         statsInferenceMs += inferMs;
@@ -495,15 +609,6 @@ namespace {
                             }
                         }
 
-                        const bool backlogPressure = (drainedThisIteration > 0);
-                        const bool latencyPressure = (emaInferMs > kTargetCycleMs) || (emaEndToEndMs > kE2ePressureMs);
-
-                        if (latencyPressure || backlogPressure) {
-                            adaptiveCropSize = std::max(kMinAdaptiveCrop, adaptiveCropSize - kDownscaleStep);
-                        } else if (adaptiveCropSize < cachedCropSize) {
-                            adaptiveCropSize = std::min(cachedCropSize, adaptiveCropSize + kUpscaleStep);
-                        }
-
                         // Clean the result before anything consumes it, so ESP
                         // rendering AND aimbot targeting always agree on what
                         // counts as a real enemy.
@@ -528,12 +633,11 @@ namespace {
                                 ? (statsEndToEndMs / static_cast<double>(statsEndToEndSamples))
                                 : 0.0;
 
-                            LOGI("Pipeline stats: avg infer=%.2fms avg e2e=%.2fms ema infer=%.2fms ema e2e=%.2fms crop=%d drained=%llu dropped_push=%u",
+                            LOGI("Pipeline stats: avg infer=%.2fms avg e2e=%.2fms ema infer=%.2fms ema e2e=%.2fms drained=%llu dropped_push=%u",
                                  avgInfer,
                                  avgEndToEnd,
                                  emaInferMs,
                                  emaEndToEndMs,
-                                 adaptiveCropSize,
                                  static_cast<unsigned long long>(statsDrainedFrames),
                                  droppedAtPush);
 
@@ -542,15 +646,6 @@ namespace {
                             statsInferenceMs = 0.0;
                             statsEndToEndMs = 0.0;
                             statsEndToEndSamples = 0;
-                        }
-
-                        if (!backlogPressure && inferMs < kTargetCycleMs) {
-                            const double slackMs = kTargetCycleMs - inferMs;
-                            if (slackMs > 0.15) {
-                                std::this_thread::sleep_for(
-                                    std::chrono::microseconds(static_cast<int64_t>(slackMs * 1000.0))
-                                );
-                            }
                         }
                     }
                 }

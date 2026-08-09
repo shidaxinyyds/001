@@ -30,19 +30,6 @@ namespace Config {
     /// this down under pressure; this cap is the maximum.
     constexpr int CROP_SIZE = 320;
 
-    /// Full-screen detection tile size (square region sent to the model).
-    /// Each tile is resized into MODEL_INPUT_SIZE (256). 512 -> 256 = 2.0x
-    /// downscale, far gentler than stretching the whole 1280x720 frame into a
-    /// single 256x256 square (~5x distorting downscale that misses distant enemies).
-    /// On a 1280x720 capture this yields 8 tiles (step = 512-128 = 384):
-    /// 4 columns x 2 rows. For higher accuracy at the cost of FPS, lower this
-    /// value (e.g. 384 -> 12 tiles, ~1.5x downscale). For higher FPS, raise it.
-    constexpr int FULL_FRAME_TILE_SIZE = 512;
-
-    /// Overlap between adjacent full-screen tiles (px) so targets near tile
-    /// boundaries are neither split nor missed. step = TILE_SIZE - OVERLAP.
-    constexpr int FULL_FRAME_TILE_OVERLAP = 128;
-
     /// ImageReader buffer depth. 3 is the minimum for triple buffering
     /// (one being captured, one queued, one being consumed by inference).
     constexpr int IMAGE_READER_MAX_IMAGES = 3;
@@ -64,9 +51,12 @@ namespace Config {
     constexpr const char* MODEL_BIN_FILE = "models/yolo26n-opt.bin";
     
     /// Default confidence threshold for detections.
-    /// Raised from 0.55 to 0.60 to cut more phantom detections in lobby/UI
-    /// scenes while still catching in-game enemies.
-    constexpr float DEFAULT_CONFIDENCE_THRESHOLD = 0.60f;
+    /// Lowered from 0.60 to 0.45: 0.60 was far too high for a nano model
+    /// (yolo26n) and caused the majority of false negatives — real targets
+    /// with confidence 0.45-0.59 were silently discarded. The temporal
+    /// confirmation filter (kConfirmHits=2) handles the resulting increase
+    /// in raw detections by suppressing single-cycle phantom boxes.
+    constexpr float DEFAULT_CONFIDENCE_THRESHOLD = 0.45f;
     
     /// NMS (Non-Maximum Suppression) IoU threshold.
     /// Lowered from 0.45 to 0.35 so overlapping duplicates merge tighter and

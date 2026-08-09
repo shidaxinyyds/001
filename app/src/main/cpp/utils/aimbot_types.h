@@ -15,14 +15,13 @@
 #include "../utils/vector2.h"
 
 struct UnifiedSettings {
-    // Bumped to 0xE5BA1009 so that settings.bin written by older builds is
+    // Bumped to 0xE5BA100A so that settings.bin written by older builds is
     // rejected and users get a clean slate with the new defaults:
-    //   - streamer mode ON by default (hides overlay from screen capture to
-    //     kill the self-detection feedback loop),
-    //   - confidence threshold raised to 0.60 to reduce lobby/UI phantom
-    //     detections,
-    //   - accessibility backend remains the out-of-box default.
-    uint32_t magic = 0xE5BA1009;  // Magic number for validation
+    //   - confidence threshold lowered to 0.45 (was 0.60, which caused
+    //     massive false negatives on the yolo26n nano model),
+    //   - single-pass full-frame detection replaces 6-tile detection,
+    //   - temporal filter IoU gates loosened for fast-cycle matching.
+    uint32_t magic = 0xE5BA100A;  // Magic number for validation
     
     bool aimbotEnabled = false;
     bool espEnabled = true;
@@ -73,7 +72,7 @@ struct UnifiedSettings {
     float boxColorG = 0.0f;
     float boxColorB = 0.0f;
     int32_t boxThickness = 2;
-    float confidenceThreshold = 0.60f;
+    float confidenceThreshold = 0.45f;
     bool showFPS = false;
     bool showDetectionCount = false;
     bool showLabels = true;
@@ -115,7 +114,7 @@ struct UnifiedSettings {
         UnifiedSettings temp;
         if (fread(&temp, sizeof(UnifiedSettings), 1, f) == 1) {
             // Verify magic number
-            if (temp.magic == 0xE5BA1009) {
+            if (temp.magic == 0xE5BA100A) {
                 *this = temp;
                 fclose(f);
                 return true;

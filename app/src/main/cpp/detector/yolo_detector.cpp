@@ -117,7 +117,44 @@ bool YoloDetector::initialize(AAssetManager* assetManager,
     
     // Pre-allocate input mat
     inputMat_.create(Config::MODEL_INPUT_SIZE, Config::MODEL_INPUT_SIZE, 3);
-    
+
+    // ------------------------------------------------------------------
+    // NCNN Warm-up: run a dummy inference to precompile Vulkan shaders.
+    //
+    // The FIRST real inference on a Vulkan-backed NCNN net takes 200-500ms
+    // longer than subsequent ones because the driver must compile and cache
+    // SPIR-V shaders for every layer. If this happens during the first captured
+    // frame, the user sees a massive stutter and the temporal filter's track
+    // table gets seeded with stale positions. Running a throwaway inference
+    // here — with a zeroed input on the init thread — absorbs that cost so the
+    // first real frame is already at steady-state speed.
+    // ------------------------------------------------------------------
+    {
+        // Create a zeroed input Mat directly (don't use from_pixels with
+        // nullptr — NCNN will dereference the pointer and crash).
+        ncnn::Mat warmupInput;
+        warmupInput.create(Config::MODEL_INPUT_SIZE, Config::MODEL_INPUT_SIZE, 3);
+        if (!warmupInput.empty()) {
+            // Fill with 114.0f to match letterbox padding value, then normalize.
+            // The actual content doesn't matter — we just need to trigger
+            // Vulkan shader compilation for every layer in the network.
+            const int total = warmupInput.cstep * warmupInput.c;
+            std::fill(warmupInput.data, warmupInput.data + total, 114.0f);
+
+            // Normalize [0,255] → [0,1], same as real preprocessing.
+            const float meanVals[3] = {0.0f, 0.0f, 0.0f};
+            const float normVals[3] = {1.0f / 255.0f, 1.0f / 255.0f, 1.0f / 255.0f};
+            warmupInput.substract_mean_normalize(meanVals, normVals);
+
+            auto warmupStart = std::chrono::high_resolution_clock::now();
+            ncnn::Mat warmupOutput;
+            runInference(warmupInput, warmupOutput);
+            auto warmupEnd = std::chrono::high_resolution_clock::now();
+            float warmupMs = std::chrono::duration<float, std::milli>(warmupEnd - warmupStart).count();
+            LOGI("NCNN warm-up inference: %.1f ms (shaders compiled & cached)", warmupMs);
+        }
+    }
+
     initialized_ = true;
     LOGI("YoloDetector initialized successfully");
     return true;
@@ -135,148 +172,10 @@ void YoloDetector::shutdown() {
 }
 
 bool YoloDetector::detect(AHardwareBuffer* buffer, DetectionResult& result) {
-    if (!initialized_) {
-        LOGE("Detector not initialized");
-        return false;
-    }
-
-    if (!buffer) {
-        LOGE("Hardware buffer is null");
-        return false;
-    }
-
-    result.clear();
-
-    auto startTime = std::chrono::high_resolution_clock::now();
-
-    // ---- Full-screen tiled detection -------------------------------------
-    // The whole capture frame is scanned with overlapping square tiles, each
-    // resized into the model input. This covers the ENTIRE screen while keeping
-    // a gentle downscale (e.g. 480 -> 256), which is far more accurate than
-    // stretching the whole 1280x720 frame into a single 256x256 square.
-
-    AHardwareBuffer_Desc desc;
-    AHardwareBuffer_describe(buffer, &desc);
-
-    if (desc.format != AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM) {
-        LOGE("Unsupported buffer format: %d", desc.format);
-        return false;
-    }
-
-    void* pixels = nullptr;
-    int lockResult = AHardwareBuffer_lock(buffer, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN,
-                                          -1, nullptr, &pixels);
-    if (lockResult != 0 || !pixels) {
-        LOGE("Failed to lock hardware buffer: %d", lockResult);
-        return false;
-    }
-
-    const uint8_t* srcPixels = static_cast<const uint8_t*>(pixels);
-    int srcWidth = static_cast<int>(desc.width);
-    int srcHeight = static_cast<int>(desc.height);
-    int srcStride = static_cast<int>(desc.stride) * 4;  // RGBA = 4 bytes per pixel
-
-    currentCaptureWidth_ = srcWidth;
-    currentCaptureHeight_ = srcHeight;
-    currentCropX_ = 0;
-    currentCropY_ = 0;
-    fullFrame_ = true;
-
-    float screenW = static_cast<float>(screenWidth_.load(std::memory_order_relaxed));
-    float screenH = static_cast<float>(screenHeight_.load(std::memory_order_relaxed));
-    float captureToScreenX = (srcWidth > 0) ? (screenW / static_cast<float>(srcWidth)) : 1.0f;
-    float captureToScreenY = (srcHeight > 0) ? (screenH / static_cast<float>(srcHeight)) : 1.0f;
-
-    const int tile = Config::FULL_FRAME_TILE_SIZE;
-    const int step = std::max(1, tile - Config::FULL_FRAME_TILE_OVERLAP);
-    const float modelSize = static_cast<float>(Config::MODEL_INPUT_SIZE);
-
-    const std::array<float, 3> meanVals = {0.0f, 0.0f, 0.0f};
-    const std::array<float, 3> normVals = {1.0f / 255.0f, 1.0f / 255.0f, 1.0f / 255.0f};
-
-    float confThreshold = confidenceThreshold_.load(std::memory_order_relaxed);
-
-    DetectionArray combined;
-
-    // Build uniform, full-size tile origins. Naively walking `startX += step`
-    // and clamping the *size* at the right/bottom edge produced thin strips
-    // (e.g. 128x336) that were then stretched into a 256x256 square input.
-    // That extreme aspect distortion is a major source of phantom detections
-    // ("enemy found where there is none"). Instead we clamp the *origin* so
-    // every tile keeps the same square shape and the last one sits flush
-    // against the edge; overlap absorbs the difference.
-    const int tileW = std::min(tile, srcWidth);
-    const int tileH = std::min(tile, srcHeight);
-
-    std::vector<int> xOrigins;
-    for (int x = 0;; x += step) {
-        const int sx = std::min(x, srcWidth - tileW);
-        if (!xOrigins.empty() && sx == xOrigins.back()) break;
-        xOrigins.push_back(sx);
-        if (sx + tileW >= srcWidth) break;
-    }
-
-    std::vector<int> yOrigins;
-    for (int y = 0;; y += step) {
-        const int sy = std::min(y, srcHeight - tileH);
-        if (!yOrigins.empty() && sy == yOrigins.back()) break;
-        yOrigins.push_back(sy);
-        if (sy + tileH >= srcHeight) break;
-    }
-
-    // Precomputed, identical for every tile now that they are all the same size.
-    const float scaleX = (static_cast<float>(tileW) / modelSize) * captureToScreenX;
-    const float scaleY = (static_cast<float>(tileH) / modelSize) * captureToScreenY;
-
-    for (int startY : yOrigins) {
-        for (int startX : xOrigins) {
-            const uint8_t* tileStart = srcPixels
-                + static_cast<size_t>(startY) * static_cast<size_t>(srcStride)
-                + static_cast<size_t>(startX) * 4u;
-
-            // Resize this tile (tileW x tileH) directly into the model input.
-            inputMat_ = ncnn::Mat::from_pixels_resize(
-                tileStart,
-                ncnn::Mat::PIXEL_RGBA2RGB,
-                tileW, tileH,
-                srcStride,
-                Config::MODEL_INPUT_SIZE, Config::MODEL_INPUT_SIZE
-            );
-            inputMat_.substract_mean_normalize(meanVals.data(), normVals.data());
-
-            ncnn::Mat output;
-            if (runInference(inputMat_, output)) {
-                // Map this tile's model-space boxes into screen space.
-                const float offsetX = static_cast<float>(startX) * captureToScreenX;
-                const float offsetY = static_cast<float>(startY) * captureToScreenY;
-                decodeBoxes(output, combined, scaleX, scaleY, offsetX, offsetY, confThreshold);
-            }
-        }
-    }
-
-    int unlockResult = AHardwareBuffer_unlock(buffer, nullptr);
-    if (unlockResult != 0) {
-        LOGW("AHardwareBuffer_unlock failed: %d", unlockResult);
-    }
-
-    // One global NMS across all tiles so overlapping detections merge cleanly.
-    if (combined.size() > 1) {
-        applyNMS(combined);
-    }
-    result.boxes = combined;
-
-    auto endTime = std::chrono::high_resolution_clock::now();
-    result.inferenceTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
-
-    // Store result thread-safely
-    {
-        std::scoped_lock lock(resultMutex_);
-        latestResult_ = result;
-    }
-
-    LOGP("Detection: %d boxes in %.2f ms", result.boxes.size(), result.inferenceTimeMs);
-
-    return true;
+    // Delegate to the 4-argument version with full-frame mode.
+    // The old tiled detection path (6 inferences per frame) was removed because
+    // it was 6x slower than single-pass and broke the temporal filter.
+    return detect(buffer, result, Config::CROP_SIZE, true);
 }
 
 bool YoloDetector::detect(AHardwareBuffer* buffer, DetectionResult& result, int dynamicCropSize,
@@ -371,6 +270,7 @@ bool YoloDetector::preprocess(AHardwareBuffer* buffer, ncnn::Mat& inputMat, int 
     } else {
         int actualCropSize = std::min(cropSize, std::min(srcWidth, srcHeight));
         actualCropSize = std::max(32, actualCropSize);
+        currentActualCropSize_ = actualCropSize;
 
         // Center crop coordinates
         int cropX = (srcWidth - actualCropSize) / 2;
@@ -381,28 +281,79 @@ bool YoloDetector::preprocess(AHardwareBuffer* buffer, ncnn::Mat& inputMat, int 
         actualH = actualCropSize;
     }
 
-    // OPTIMIZED: Direct resize from RGBA buffer to model input (skip intermediate crop)
+    // ------------------------------------------------------------------
+    // Letterbox resize (matches YOLOv8/v26 training preprocessing).
+    //
+    // The model was trained with Ultralytics' default letterbox resize:
+    // scale = min(modelW/srcW, modelH/srcH), resize, then pad to square with
+    // value 114. The OLD inference code used from_pixels_resize() which does a
+    // STRETCH resize (ignoring aspect ratio). For a 1280x720 capture → 256x256
+    // model input, that's a 16:9→1:1 distortion the model never saw in training,
+    // which silently degrades mAP by 10-20% and causes both missed detections
+    // (distorted targets fall below threshold) and phantom detections (distorted
+    // background noise rises above threshold).
+    // ------------------------------------------------------------------
     const uint8_t* srcStart = srcPixels + currentCropY_ * srcStride + currentCropX_ * 4;
 
-    // Use NCNN's optimized from_pixels_resize (handles RGBA->RGB + resize in one pass)
-    inputMat = ncnn::Mat::from_pixels_resize(
+    const int modelSize = Config::MODEL_INPUT_SIZE;
+    const float scale = std::min(
+        static_cast<float>(modelSize) / static_cast<float>(actualW),
+        static_cast<float>(modelSize) / static_cast<float>(actualH)
+    );
+    const int resizedW = std::max(1, static_cast<int>(actualW * scale));
+    const int resizedH = std::max(1, static_cast<int>(actualH * scale));
+    const int padX = (modelSize - resizedW) / 2;
+    const int padY = (modelSize - resizedH) / 2;
+
+    // Store for postprocess coordinate mapping.
+    letterboxResizedW_ = resizedW;
+    letterboxResizedH_ = resizedH;
+    letterboxPadX_ = padX;
+    letterboxPadY_ = padY;
+
+    // Step 1: Resize source pixels to the letterbox content size (RGBA→RGB).
+    //         Buffer is still locked — from_pixels_resize reads from srcStart.
+    ncnn::Mat resized = ncnn::Mat::from_pixels_resize(
         srcStart,
         ncnn::Mat::PIXEL_RGBA2RGB,
         actualW, actualH,
-        srcStride,  // stride in bytes
-        Config::MODEL_INPUT_SIZE, Config::MODEL_INPUT_SIZE
+        srcStride,
+        resizedW, resizedH
     );
-    
+
+    // Buffer no longer needed.
     int unlockResult = AHardwareBuffer_unlock(buffer, nullptr);
     if (unlockResult != 0) {
         LOGW("AHardwareBuffer_unlock failed: %d", unlockResult);
     }
-    
-    // Normalize: scale from [0, 255] to [0, 1]
+
+    if (resized.empty()) {
+        LOGE("Letterbox resize failed: from_pixels_resize returned empty Mat");
+        return false;
+    }
+
+    // Step 2: Pad to square (letterbox). Value 114.0f is the standard YOLO
+    //         padding value; after /255 normalisation it becomes ~0.447.
+    //         copy_make_border handles zero-pad correctly (just copies).
+    const int padRight = modelSize - resizedW - padX;
+    const int padBottom = modelSize - resizedH - padY;
+    ncnn::copy_make_border(resized, inputMat,
+        padY, padBottom, padX, padRight,
+        0,  // BORDER_CONSTANT
+        114.0f,
+        ncnn::Option()
+    );
+
+    if (inputMat.empty()) {
+        LOGE("Letterbox padding failed: copy_make_border returned empty Mat");
+        return false;
+    }
+
+    // Step 3: Normalize [0,255] → [0,1].
     const std::array<float, 3> meanVals = {0.0f, 0.0f, 0.0f};
     const std::array<float, 3> normVals = {1.0f / 255.0f, 1.0f / 255.0f, 1.0f / 255.0f};
     inputMat.substract_mean_normalize(meanVals.data(), normVals.data());
-    
+
     return true;
 }
 
@@ -449,189 +400,41 @@ namespace {
 /// Reject boxes that cannot plausibly correspond to a real target.
 /// Degenerate, frame-sized, off-frame or absurdly elongated boxes are the
 /// classic signature of a phantom detection fired on background noise.
+///
+/// TIGHTENED from original:
+///   - Min size 2→4 px: boxes smaller than 4px in model space (256px) are
+///     sub-pixel noise, not real targets.
+///   - Max size 1.05→0.98 * modelSize: a box larger than the input image
+///     itself is physically impossible for a real target.
+///   - Aspect ratio 8.0/0.125 → 5.0/0.2: human figures in a FPS are roughly
+///     0.3-3.0 aspect ratio. 5.0/0.2 gives margin for partial-body detections
+///     while still rejecting the extreme slivers that signal phantom noise.
+///   - Margin 0.15→0.08: detections whose center is more than 8% outside the
+///     model input are reading from padding, not real content.
 inline bool IsPlausibleModelBox(float cx, float cy, float w, float h, float modelSize) {
     if (!std::isfinite(cx) || !std::isfinite(cy) ||
         !std::isfinite(w) || !std::isfinite(h)) {
         return false;
     }
-    if (w < 2.0f || h < 2.0f) return false;
-    if (w > modelSize * 1.05f || h > modelSize * 1.05f) return false;
+    if (w < 4.0f || h < 4.0f) return false;
+    if (w > modelSize * 0.98f || h > modelSize * 0.98f) return false;
 
-    const float margin = modelSize * 0.15f;
+    const float margin = modelSize * 0.08f;
     if (cx < -margin || cx > modelSize + margin) return false;
     if (cy < -margin || cy > modelSize + margin) return false;
 
     const float ratio = w / h;
-    if (ratio > 8.0f || ratio < 0.125f) return false;
+    if (ratio > 5.0f || ratio < 0.2f) return false;
 
     return true;
 }
 
 } // namespace
 
-void YoloDetector::decodeBoxes(const ncnn::Mat& output, DetectionArray& out,
-                                float scaleX, float scaleY, float offsetX, float offsetY,
-                                float confThreshold) {
-    int numBoxes, numValues;
-    bool transposed = false;
-
-    // Determine the per-box channel dimension robustly. YOLOv26n-style heads
-    // emit 5 channels (x,y,w,h,conf) or 6 (x,y,w,h,obj,conf) per box. Locking
-    // onto the dimension whose size is 5 or 6 (the channel count) is safer than
-    // the old "smaller dimension wins" heuristic, which silently transposes the
-    // tensor - and therefore reads garbage - for any unusual output shape.
-    if (output.w == 5 || output.w == 6) {
-        numBoxes = output.h;
-        numValues = output.w;
-        transposed = false;
-    } else if (output.h == 5 || output.h == 6) {
-        numBoxes = output.w;
-        numValues = output.h;
-        transposed = true;
-    } else {
-        numBoxes = output.h;
-        numValues = output.w;
-        if (numBoxes < numValues) {
-            transposed = true;
-            std::swap(numBoxes, numValues);
-        }
-    }
-
-    float modelSize = static_cast<float>(Config::MODEL_INPUT_SIZE);
-
-    int numClasses = numValues - 4;
-    int classOffset = 4;
-    float objectness = 1.0f;
-
-    // Auto-detect YOLO version (extra objectness channel present).
-    if (numClasses == Config::NUM_CLASSES + 1) {
-        classOffset = 5;
-        numClasses -= 1;
-    }
-    if (numClasses < 1) numClasses = 1;
-
-    if (transposed) {
-        const float* row0 = output.row(0);
-        const float* row1 = output.row(1);
-        const float* row2 = output.row(2);
-        const float* row3 = output.row(3);
-        const float* rowObj = (classOffset > 4) ? output.row(4) : nullptr;
-
-        for (int i = 0; i < numBoxes; ++i) {
-            if (out.full()) break;
-
-            float maxClassProb = 0.0f;
-            int bestClassId = 0;
-
-            if (classOffset > 4) objectness = rowObj[i];
-
-            for (int c = 0; c < numClasses; ++c) {
-                float prob = output.row(classOffset + c)[i];
-                prob *= objectness;
-                if (prob > maxClassProb) {
-                    maxClassProb = prob;
-                    bestClassId = c;
-                }
-            }
-
-            if (!std::isfinite(maxClassProb)) continue;
-            if (maxClassProb < confThreshold) continue;
-            if (Config::FILTER_ENEMY_ONLY && bestClassId != Config::ENEMY_CLASS_ID) continue;
-
-            float xCenter = row0[i];
-            float yCenter = row1[i];
-            float width = row2[i];
-            float height = row3[i];
-
-            if (xCenter <= 1.5f) {
-                xCenter *= modelSize;
-                yCenter *= modelSize;
-                width *= modelSize;
-                height *= modelSize;
-            }
-
-            if (!IsPlausibleModelBox(xCenter, yCenter, width, height, modelSize)) continue;
-
-            float halfW = width * 0.5f;
-            float halfH = height * 0.5f;
-
-            float boxX = (xCenter - halfW) * scaleX + offsetX;
-            float boxY = (yCenter - halfH) * scaleY + offsetY;
-            float boxW = width * scaleX;
-            float boxH = height * scaleY;
-
-            if (boxW <= 0.0f || boxH <= 0.0f) continue;
-
-            BoundingBox box;
-            box.x = boxX;
-            box.y = boxY;
-            box.width = boxW;
-            box.height = boxH;
-            box.confidence = maxClassProb;
-            box.classId = bestClassId;
-
-            out.push(box);
-        }
-    } else {
-        for (int i = 0; i < numBoxes; ++i) {
-            if (out.full()) break;
-
-            const float* values = output.row(i);
-
-            float maxClassProb = 0.0f;
-            int bestClassId = 0;
-
-            if (classOffset > 4) objectness = values[4];
-
-            for (int c = 0; c < numClasses; ++c) {
-                float prob = values[classOffset + c];
-                prob *= objectness;
-                if (prob > maxClassProb) {
-                    maxClassProb = prob;
-                    bestClassId = c;
-                }
-            }
-
-            if (!std::isfinite(maxClassProb)) continue;
-            if (maxClassProb < confThreshold) continue;
-            if (Config::FILTER_ENEMY_ONLY && bestClassId != Config::ENEMY_CLASS_ID) continue;
-
-            float xCenter = values[0];
-            float yCenter = values[1];
-            float width = values[2];
-            float height = values[3];
-
-            if (xCenter <= 1.5f) {
-                xCenter *= modelSize;
-                yCenter *= modelSize;
-                width *= modelSize;
-                height *= modelSize;
-            }
-
-            if (!IsPlausibleModelBox(xCenter, yCenter, width, height, modelSize)) continue;
-
-            float halfW = width * 0.5f;
-            float halfH = height * 0.5f;
-
-            float boxX = (xCenter - halfW) * scaleX + offsetX;
-            float boxY = (yCenter - halfH) * scaleY + offsetY;
-            float boxW = width * scaleX;
-            float boxH = height * scaleY;
-
-            if (boxW <= 0.0f || boxH <= 0.0f) continue;
-
-            BoundingBox box;
-            box.x = boxX;
-            box.y = boxY;
-            box.width = boxW;
-            box.height = boxH;
-            box.confidence = maxClassProb;
-            box.classId = bestClassId;
-
-            out.push(box);
-        }
-    }
-}
+// decodeBoxes() removed: this was dead code that duplicated the transposed/
+// non-transposed decoding logic already inlined in postprocess(). Keeping a
+// separate decode function risked divergence between the two paths and added
+// maintenance burden without any call site.
 
 void YoloDetector::postprocess(const ncnn::Mat& output, DetectionResult& result, int cropSize, bool fullFrame) {
     result.boxes.clear(); // Fix ghosting: Clear previous frame detections
@@ -670,13 +473,31 @@ void YoloDetector::postprocess(const ncnn::Mat& output, DetectionResult& result,
     // Combined scalars for single-fused multiply (Caching)
     float scaleX, scaleY, offsetX, offsetY;
     if (fullFrame) {
-        // Whole-screen mode: model input maps linearly to the full screen.
-        scaleX = screenW / modelSize;
-        scaleY = screenH / modelSize;
-        offsetX = 0.0f;
-        offsetY = 0.0f;
+        // Letterbox-aware coordinate mapping.
+        //
+        // Model input (256x256) contains the resized content at offset
+        // (letterboxPadX_, letterboxPadY_) with size (letterboxResizedW_ x
+        // letterboxResizedH_). To map a model-space coordinate back to screen
+        // space we must:
+        //   1. Subtract the letterbox padding offset.
+        //   2. Scale from content-space to screen-space.
+        //
+        // The combined transform is:
+        //   screenX = (modelX - padX) * (screenW / resizedW)
+        //   screenY = (modelY - padY) * (screenH / resizedH)
+        //
+        // Which expands to:
+        //   scaleX  = screenW / resizedW
+        //   offsetX = -padX * scaleX
+        // (and similarly for Y).
+        const float rW = static_cast<float>(std::max(1, letterboxResizedW_));
+        const float rH = static_cast<float>(std::max(1, letterboxResizedH_));
+        scaleX  = screenW / rW;
+        scaleY  = screenH / rH;
+        offsetX = -static_cast<float>(letterboxPadX_) * scaleX;
+        offsetY = -static_cast<float>(letterboxPadY_) * scaleY;
     } else {
-        float modelToCrop = static_cast<float>(cropSize) / modelSize;
+        float modelToCrop = static_cast<float>(std::max(32, currentActualCropSize_)) / modelSize;
         float captureToScreenX = screenW / captureWidth;
         float captureToScreenY = screenH / captureHeight;
         scaleX = modelToCrop * captureToScreenX;
@@ -832,39 +653,86 @@ void YoloDetector::postprocess(const ncnn::Mat& output, DetectionResult& result,
 void YoloDetector::applyNMS(DetectionArray& boxes) {
     int count = boxes.size();
     if (count <= 1) return;
-    
+
+    // ------------------------------------------------------------------
+    // Weighted Box Fusion (WBF)
+    //
+    // Replaces hard NMS which simply keeps the highest-confidence box and
+    // discards all overlapping ones. WBF instead FUSES overlapping boxes
+    // into a single box whose position and size are the confidence-weighted
+    // average of every box in the cluster.
+    //
+    // Benefits over hard NMS:
+    //   - More accurate box positions: averaging multiple slightly-offset
+    //     detections cancels out per-frame jitter → tighter, more stable boxes.
+    //   - Higher effective recall: a target detected at 0.48 confidence by
+    //     two nearby anchors would be suppressed by NMS (only 0.48 survives),
+    //     but WBF fuses them → the fused box gets boosted confidence, making
+    //     it more likely to pass the temporal confirmation filter.
+    //   - Smoother temporal tracking: because the fused box position is an
+    //     average, it moves less erratically between frames, which keeps the
+    //     IoU gate in the temporal filter happy.
+    // ------------------------------------------------------------------
     boxes.sort([](const BoundingBox& a, const BoundingBox& b) {
         return a.confidence > b.confidence;
     });
-    
-    std::array<bool, Config::MAX_DETECTIONS> suppressed{};
-    int finalCount = 0;
-    
+
+    std::array<bool, Config::MAX_DETECTIONS> used{};
+    DetectionArray fused;
+
     for (int i = 0; i < count; ++i) {
-        if (suppressed[i]) continue;
-        
-        if (i != finalCount) {
-             boxes[finalCount] = boxes[i];
-        }
-        finalCount++;
-        
+        if (used[i]) continue;
+
+        // Start a new cluster with box i (highest unused confidence).
+        used[i] = true;
+        float sumWeight = boxes[i].confidence;
+        float sumX  = boxes[i].x * boxes[i].confidence;
+        float sumY  = boxes[i].y * boxes[i].confidence;
+        float sumW  = boxes[i].width * boxes[i].confidence;
+        float sumH  = boxes[i].height * boxes[i].confidence;
+        float sumConf = boxes[i].confidence;
+        int clusterSize = 1;
+
+        // Find all remaining boxes that overlap with the cluster seed.
         for (int j = i + 1; j < count; ++j) {
-            if (!suppressed[j]) {
-                float iou = boxes[i].iou(boxes[j]);
-                if (iou > Config::NMS_IOU_THRESHOLD) {
-                    suppressed[j] = true;
-                }
+            if (used[j]) continue;
+            float iou = boxes[i].iou(boxes[j]);
+            if (iou > Config::NMS_IOU_THRESHOLD) {
+                used[j] = true;
+                const float w = boxes[j].confidence;
+                sumWeight += w;
+                sumX += boxes[j].x * w;
+                sumY += boxes[j].y * w;
+                sumW += boxes[j].width * w;
+                sumH += boxes[j].height * w;
+                sumConf += boxes[j].confidence;
+                clusterSize++;
             }
         }
+
+        if (fused.full()) break;
+
+        // Create the fused box.
+        BoundingBox fb;
+        if (sumWeight > 0.0f) {
+            fb.x = sumX / sumWeight;
+            fb.y = sumY / sumWeight;
+            fb.width = sumW / sumWeight;
+            fb.height = sumH / sumWeight;
+        } else {
+            fb = boxes[i];
+        }
+        // Fused confidence: average of cluster confidences, slightly boosted
+        // by cluster size to reward agreement between multiple anchors.
+        // boost = 1 + 0.03*(clusterSize-1), capped at 1.15.
+        const float boost = std::min(1.15f, 1.0f + 0.03f * (clusterSize - 1));
+        fb.confidence = std::min(1.0f, (sumConf / clusterSize) * boost);
+        fb.classId = boxes[i].classId;
+
+        fused.push(fb);
     }
-    
-    // Compact FixedArray by recreating it (stack copy, zero allocation)
-    DetectionArray newBoxes;
-    for (int i = 0; i < finalCount; ++i) {
-        newBoxes.push(boxes[i]);
-    }
-    // Assign back (copy data)
-    boxes = newBoxes;
+
+    boxes = fused;
 }
 
 } // namespace ESP

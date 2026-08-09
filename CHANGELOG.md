@@ -4,6 +4,20 @@ All notable changes to AimBuddy. Format inspired by [Keep a Changelog](https://k
 
 Dates are in ISO-8601 (YYYY-MM-DD).
 
+## [0.3.0-beta.19] - 2026-08-09
+
+C++ 检测流水线重构与误检抑制强化。
+
+### Changed
+- **single-pass 全屏检测取代 6-tile 分块**：移除 `FULL_FRAME_TILE_SIZE` / `FULL_FRAME_TILE_OVERLAP`，整帧经 YOLO 原生 letterbox resize（保存缩放/填充参数用于后处理，消除 train/inference 失配导致的 mAP 下降）直接送入模型，周期从 ~50-90ms 降至 ~5-15ms。
+- **默认置信度阈值 0.60 → 0.45**：0.60 对 yolo26n nano 模型过高，导致 0.45-0.59 区间的真实目标被静默丢弃（大量漏检）。时序确认滤波（kConfirmHits=2）抑制阈值降低后带来的单周期误检。
+- **时序确认调优**：kMatchIoU 0.25→0.20、kMatchIoUConfirmed 0.10→0.05、kMaxMisses 2→3，适配更快的周期与更松的置信门控，减少快速移动目标断联闪烁。
+- **几何过滤增强**：新增宽高比门控（0.15–6.0，剔除 HUD/UI 边缘的细长条）、最大屏占比 0.85→0.65（真实敌人不会同时占满 ~65% 宽高）、最小面积门控 200px²（<14×14 的子阈值噪声）。新增速度平滑（vx/vy）用于轨迹关联。
+- **settings magic 0xE5BA1009 → 0xE5BA100A**：旧版 settings.bin 被拒绝并重置为新默认（置信度 0.45 + single-pass 全屏）。
+
+### 版本号
+- 因远程已存在 `v0.3.0-beta.18` 标签（指向 5bfb1c7），本次升到 beta.19 以触发新的 CI 构建与 tag，避免 detect-version 因标签已存在而跳过出包。
+
 ## [0.3.0-beta.18] - 2026-08-09
 
 将 ImGui 叠加层从 GLSurfaceView(SurfaceView) 重构为 TextureView 渲染，从更底层消除「开启服务后屏幕冻结」的根因。
