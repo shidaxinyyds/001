@@ -6,7 +6,7 @@ name: Build and Release APK
 #  - Manual dispatch (useful for re-running a failed publish).
 on:
   push:
-    branches: [master]
+    branches: [main]
     paths:
       - 'CHANGELOG.md'
   workflow_dispatch:

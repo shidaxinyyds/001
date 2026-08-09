@@ -4,9 +4,22 @@ All notable changes to AimBuddy. Format inspired by [Keep a Changelog](https://k
 
 Dates are in ISO-8601 (YYYY-MM-DD).
 
+## [0.3.0-beta.12] - 2026-08-09
+
+真正根因修复 + CI 自动触发修正。
+
+### Fixed
+- **启动服务后整屏无法点击/滑动的真正根因**：悬浮齿轮图标窗口（`setupFloatingIcon`）的
+  `WindowManager.LayoutParams` 缺少 `FLAG_NOT_TOUCH_MODAL`。该窗口虽小（44x44），但在服务
+  启动时以 modal 方式 `addView`，会吞掉整屏所有触摸事件。补上 `FLAG_NOT_TOUCH_MODAL` 后，
+  齿轮只接收自身区域内触摸，其余事件全部穿透到下层游戏/桌面。
+- **CI 自动触发分支错误**：`release.yml` 监听的是 `master` 分支 push，但仓库主分支是 `main`，
+  导致每次 push 后不会自动构建。已改为 `branches: [main]`。
+
 ## [0.3.0-beta.11] - 2026-08-09
 
-紧急重发：修复 **齿轮窗口缺 `FLAG_NOT_TOUCH_MODAL`** 的真根因修复（`80abcea`）未能进入 `v0.3.0-beta.10` 的发布产物——因为之前的 beta.10 标签在推送该修复之前就已创建并发布，导致 `release.yml` 的 `detect-version` 检测到标签已存在而跳过构建。本版本重新触发工作流，把齿轮 `FLAG_NOT_TOUCH_MODAL` 修复包含进 APK。
+内部重发尝试：修正 beta.10 标签已存在导致修复未进包的问题。因 push 后未触发自动构建且
+标签随即被创建，未产生可用 APK。
 
 ### Fixed
 - 包含 `0.3.0-beta.10` 的全部修复：
