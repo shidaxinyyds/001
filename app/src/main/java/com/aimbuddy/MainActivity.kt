@@ -1469,7 +1469,7 @@ class MainActivity : AppCompatActivity() {
             removeFloatingIcon()
             isOverlayVisible = false
             menuVisible = false
-            menuOpenedAtMs = 0
+            menuOpenedAtMs = 0L
             Log.i(TAG, "Overlay removed")
         }
     }
@@ -1584,7 +1584,7 @@ class MainActivity : AppCompatActivity() {
     private fun closeMenu() {
         ImGuiGLSurface.nativeSetMenuVisible(false)
         menuVisible = false
-        menuOpenedAtMs = 0
+        menuOpenedAtMs = 0L
         applyOverlayTouchable(false)
     }
 
@@ -1652,7 +1652,7 @@ class MainActivity : AppCompatActivity() {
         Log.i(TAG, "forceRestoreTouch() called")
         ImGuiGLSurface.nativeSetMenuVisible(false)
         menuVisible = false
-        menuOpenedAtMs = 0
+        menuOpenedAtMs = 0L
         removeMenuInputWindow()
         applyOverlayTouchable(false)
         runOnUiThread {
@@ -1735,7 +1735,7 @@ class MainActivity : AppCompatActivity() {
                         if (lastRenderTickMs > 0 && nowMs - lastRenderTickMs > 1500) {
                             Log.e(TAG, "Render thread stall detected (no tick for ${nowMs - lastRenderTickMs}ms), force-closing menu")
                             forceRestoreTouch()
-                        } else if (tickMs == 0 && menuOpenedAtMs > 0 && nowMs - menuOpenedAtMs > 3000) {
+                        } else if (tickMs == 0L && menuOpenedAtMs > 0 && nowMs - menuOpenedAtMs > 3000) {
                             // Render thread has never ticked since the menu was
                             // opened — ImGui likely failed to initialise (e.g.
                             // EGL or ANativeWindow error). Force-close to prevent
