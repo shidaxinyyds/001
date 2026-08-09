@@ -1420,6 +1420,14 @@ class MainActivity : AppCompatActivity() {
             else
                 WindowManager.LayoutParams.TYPE_PHONE,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    // CRITICAL: without FLAG_NOT_TOUCH_MODAL a touchable
+                    // window consumes ALL touch events on the entire screen,
+                    // even those outside its 44x44 bounds — which is exactly
+                    // why the device froze after starting the service. With
+                    // this flag, touches outside the gear pass through to the
+                    // game underneath (the imguiOverlay is FLAG_NOT_TOUCHABLE
+                    // so it never competes for them).
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT

@@ -6,7 +6,11 @@ Dates are in ISO-8601 (YYYY-MM-DD).
 
 ## [0.3.0-beta.10] - 2026-08-09
 
-针对「启动服务后屏幕无法点击/滑动」做最终一轮加固，全面堵死叠加层卡在可触摸态的任何可能。在 beta.9 的「菜单内 X」「通知栏恢复触摸」逃生路径基础上，补充底层可靠性保障。
+彻底定位并修复「启动服务后屏幕完全无法点击/滑动」的**真正根因**，并补充底层可靠性加固。
+
+### Fixed
+- **【根因】悬浮齿轮窗口缺少 `FLAG_NOT_TOUCH_MODAL`，吞掉整屏触摸**：这是该故障自 beta.5 起反复出现的真正元凶。齿轮图标是一个 44×44 的可触摸窗口（需接收点击以切换菜单），但其 `WindowManager.LayoutParams` 从未设置 `FLAG_NOT_TOUCH_MODAL`。按 Android 官方文档，一个可触摸窗口若缺少该标志，会以 modal 方式**消费整屏所有触摸事件**——不论触摸是否落在窗口范围内。齿轮在 `setupOverlay → setupFloatingIcon` 时 `addView`，于是服务一启动，整屏点击与滑动全部被齿轮吞掉，设备表现完全冻结。此前 beta.8/beta.9 的所有修复（菜单内 X、通知栏恢复触摸、`forceOverlayNotTouchable`、`ImGuiGLSurface.onTouchEvent` 穿透）都针对 `imguiOverlay`，而 `imguiOverlay` 在齿轮**之下**且本就带 `FLAG_NOT_TOUCHABLE`，根本不是问题源头——齿轮窗口一直被遗漏。本次给齿轮补上 `FLAG_NOT_TOUCH_MODAL`，使其只接收落在自身 44×44 区域内的触摸，其余触摸穿透到下层游戏。
+- 保留 beta.9 的「菜单内 X」「通知栏恢复触摸」逃生路径作为二级保险。
 
 ### Changed
 - **叠加层触摸穿透可靠性（防卡死兜底）**：
