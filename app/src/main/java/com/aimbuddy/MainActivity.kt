@@ -488,7 +488,7 @@ class MainActivity : AppCompatActivity() {
         // Register the "restore touch" escape-hatch receiver so the persistent
         // notification's action button can always free the screen, even when
         // the menu is stuck open and the overlay is capturing all touches.
-        restoreTouchReceiver = object : BroadcastReceiver() {
+        val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 if (intent?.action == ScreenCaptureService.ACTION_RESTORE_TOUCH) {
                     Log.i(TAG, "Restore-touch broadcast received")
@@ -496,10 +496,11 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+        restoreTouchReceiver = receiver
         val filter = IntentFilter(ScreenCaptureService.ACTION_RESTORE_TOUCH)
         ContextCompat.registerReceiver(
             this,
-            restoreTouchReceiver,
+            receiver,
             filter,
             Context.RECEIVER_NOT_EXPORTED
         )
@@ -902,7 +903,18 @@ class MainActivity : AppCompatActivity() {
             setupOverlay()
             nativeStart()
 
-            applyOverlayTouchable(false)
+            // Use the hard-reset variant (always writes FLAG_NOT_TOUCHABLE
+            // regardless of in-memory state) to guarantee the overlay starts
+            // in pass-through mode. The lighter applyOverlayTouchable(false)
+            // is a no-op when flags already appear correct, which masks any
+            // hidden desync from the addView path.
+            forceOverlayNotTouchable()
+
+            // Schedule a delayed second enforcement ~500ms later. The GL
+            // surface creation (onSurfaceCreated → nativeInit) happens
+            // asynchronously after addView; if anything in that path nudges
+            // the window flags, this delayed call catches and corrects it.
+            touchHandler.postDelayed({ forceOverlayNotTouchable() }, 500)
 
             updateButtonStates(true)
             showAppToast("ESP 已启动", false)
@@ -1446,7 +1458,16 @@ class MainActivity : AppCompatActivity() {
                         val newVisible = !ImGuiGLSurface.nativeIsMenuVisible()
                         ImGuiGLSurface.nativeSetMenuVisible(newVisible)
                         menuVisible = newVisible
-                        applyOverlayTouchable(newVisible)
+                        if (newVisible) {
+                            applyOverlayTouchable(true)
+                        } else {
+                            // Use the hard-reset when CLOSING the menu so
+                            // FLAG_NOT_TOUCHABLE is unconditionally re-applied.
+                            // This is the critical direction: if the flag
+                            // isn't set, the full-screen overlay swallows all
+                            // touches and the device appears frozen.
+                            forceOverlayNotTouchable()
+                        }
                     }
                     true
                 }
@@ -1495,11 +1516,28 @@ class MainActivity : AppCompatActivity() {
         val params = view.layoutParams as? WindowManager.LayoutParams ?: return
         val isTouchable = (params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0
         if (touchable && !isTouchable) {
+            val oldFlags = params.flags
             params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
-            windowManager?.updateViewLayout(view, params)
+            try {
+                windowManager?.updateViewLayout(view, params)
+            } catch (t: Throwable) {
+                // CRITICAL: revert in-memory flags so they stay in sync with
+                // the actual window state. Without this, a failed update would
+                // leave params.flags saying "touchable" while the real window
+                // is still NOT_TOUCHABLE, causing the poller to skip future
+                // corrections and the overlay to get stuck in the wrong state.
+                params.flags = oldFlags
+                Log.w(TAG, "applyOverlayTouchable(true) failed: ${t.message}")
+            }
         } else if (!touchable && isTouchable) {
+            val oldFlags = params.flags
             params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-            windowManager?.updateViewLayout(view, params)
+            try {
+                windowManager?.updateViewLayout(view, params)
+            } catch (t: Throwable) {
+                params.flags = oldFlags
+                Log.w(TAG, "applyOverlayTouchable(false) failed: ${t.message}")
+            }
         }
     }
 
@@ -1514,15 +1552,45 @@ class MainActivity : AppCompatActivity() {
         Log.i(TAG, "forceRestoreTouch() called")
         ImGuiGLSurface.nativeSetMenuVisible(false)
         menuVisible = false
-        applyOverlayTouchable(false)
+        forceOverlayNotTouchable()
         runOnUiThread {
             showAppToast("已恢复触摸，菜单已关闭", false)
+        }
+    }
+
+    /**
+     * Unconditionally force FLAG_NOT_TOUCHABLE onto the overlay window.
+     *
+     * Unlike [applyOverlayTouchable] which only updates the window when the
+     * in-memory flags *appear* to differ, this method always writes the flag
+     * and catches any WindowManager exception. It is the hard reset for touch
+     * passthrough  —  used by [forceRestoreTouch], after startup, and as the
+     * ultimate recovery when the poller detects a persistent mismatch.
+     */
+    private fun forceOverlayNotTouchable() {
+        val view = imguiOverlay ?: return
+        val params = view.layoutParams as? WindowManager.LayoutParams ?: return
+        val oldFlags = params.flags
+        params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        try {
+            windowManager?.updateViewLayout(view, params)
+            Log.i(TAG, "forceOverlayNotTouchable: FLAG_NOT_TOUCHABLE applied")
+        } catch (t: Throwable) {
+            params.flags = oldFlags
+            Log.e(TAG, "forceOverlayNotTouchable failed: ${t.message}")
         }
     }
 
     private fun startTouchPolling() {
         if (touchPolling) return
         touchPolling = true
+        // Counter for periodic forced re-application of flags. Every ~2s (40
+        // cycles at 50ms) we bypass the "no change needed" optimisation and
+        // force-update the window flags. This is the safety net that catches
+        // any desync between the in-memory params.flags and the actual window
+        // manager state  -  e.g. if a previous updateViewLayout() threw and
+        // the revert wasn't perfect, or an OEM ROM mangled the flags.
+        var forceSyncCounter = 0
         touchHandler.post(object : Runnable {
             override fun run() {
                 if (!touchPolling) return
@@ -1541,19 +1609,45 @@ class MainActivity : AppCompatActivity() {
                         val isTouchable =
                             (params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0
 
-                        if (wantsCapture && !isTouchable) {
-                            params.flags =
-                                params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
-                            windowManager?.updateViewLayout(view, params)
-                        } else if (!wantsCapture && isTouchable) {
-                            params.flags =
-                                params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                            windowManager?.updateViewLayout(view, params)
+                        // Determine whether the overlay's touchable state
+                        // matches what the menu needs. The periodic force-sync
+                        // (every 40 cycles ≈ 2s) re-applies the flags even when
+                        // they *appear* correct, guarding against hidden
+                        // desync.
+                        val needsTouchable = wantsCapture
+                        val needsUpdate = (needsTouchable != isTouchable) ||
+                            (forceSyncCounter % 40 == 0)
+
+                        if (needsUpdate) {
+                            val oldFlags = params.flags
+                            if (needsTouchable) {
+                                params.flags =
+                                    params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                            } else {
+                                params.flags =
+                                    params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                            }
+                            try {
+                                windowManager?.updateViewLayout(view, params)
+                            } catch (t: Throwable) {
+                                // CRITICAL: revert in-memory flags on failure.
+                                // If we don't, the next cycle will see the
+                                // modified (but never applied) flags and skip
+                                // the correction, leaving the overlay stuck in
+                                // the wrong touch state  -  which is the root
+                                // cause of "screen unresponsive after starting
+                                // service": the overlay became touchable (flag
+                                // removed in memory) but the WM call failed, so
+                                // the real window still intercepts every touch.
+                                params.flags = oldFlags
+                                Log.w(TAG, "Touch polling updateViewLayout failed: ${t.message}")
+                            }
                         }
                     }
                 } catch (t: Throwable) {
                     Log.w(TAG, "Touch polling cycle failed: ${t.message}")
                 } finally {
+                    forceSyncCounter++
                     if (touchPolling) {
                         touchHandler.postDelayed(this, 50)
                     }
