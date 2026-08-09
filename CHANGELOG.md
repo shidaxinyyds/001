@@ -4,6 +4,17 @@ All notable changes to AimBuddy. Format inspired by [Keep a Changelog](https://k
 
 Dates are in ISO-8601 (YYYY-MM-DD).
 
+## [0.3.0-beta.18] - 2026-08-09
+
+将 ImGui 叠加层从 GLSurfaceView(SurfaceView) 重构为 TextureView 渲染，从更底层消除「开启服务后屏幕冻结」的根因。
+
+### Changed
+- **ImGuiGLSurface 改用 TextureView + 手动 EGL**（由 GLSurfaceView 渲染重构）：GLSurfaceView 本质是一个 SurfaceView，其拥有独立合成表面，在部分 Android 版本/机型上不会继承父窗口的 `FLAG_NOT_TOUCHABLE`，导致叠加层静默吞掉整屏触摸——这正是「开启服务后屏幕冻结」的底层来源之一。TextureView 渲染在普通 View 层级内，父窗口的 `FLAG_NOT_TOUCHABLE` 行为可靠、不会出现独立表面脱离窗口 flag 的情况。EGL 上下文与渲染线程改为在 Java 层手动管理（initEGL/destroyEGL + ImGuiRenderThread 循环），与 native 侧只持有 ANativeWindow 引用、依赖当前 GL 上下文渲染的方式互补，无双重 EGL 冲突。
+- **菜单输入改回「叠加层本身切换触摸」**：因 TextureView 不再有独立合成表面的 flag 脱离问题，beta.16/17 引入的独立菜单输入窗口方案作废，改回直接在 `imguiOverlay` 上按菜单可见性切换 `FLAG_NOT_TOUCHABLE`（打开时移除、关闭时加回）。逻辑更简单，且不再依赖易出错的跨窗口输入转发。
+- **悬浮齿轮改为开关菜单**：点一下开、再点一下关；齿轮窗口带 `FLAG_NOT_TOUCH_MODAL` 且位于叠加层之上，始终可点击。
+- `setSecure()` 在 TextureView 下为 no-op（FLAG_SECURE 作用于窗口本身即已保护内容），去掉了原先针对 SurfaceView 重建的延迟补钉逻辑。
+- 轮询新增「菜单打开后渲染线程 3s 内从未 tick → 强制关闭」的兜底，防止 ImGui 初始化失败时菜单永久卡死触摸。
+
 ## [0.3.0-beta.17] - 2026-08-09
 
 在 beta.16 架构基础上强化菜单输入链路的可靠性，修复「开菜单按钮点了没反应」「菜单内交互越用越卡」两类残留问题。
