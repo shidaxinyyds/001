@@ -4,6 +4,19 @@ All notable changes to AimBuddy. Format inspired by [Keep a Changelog](https://k
 
 Dates are in ISO-8601 (YYYY-MM-DD).
 
+## [0.3.0-beta.21] - 2026-08-10
+
+训练/推理预处理对齐：中心裁剪 → 全帧 letterbox，并重导出匹配模型。
+
+### Changed
+- **训练脚本 `extract_frames.py` 改为全帧 letterbox**：`_preprocess_frame` 不再对 1280×720 做中心裁剪（source_crop=320），而是整体 letterbox 缩放到目标尺寸（与运行时 `yolo_detector.cpp::preprocess(fullFrame=true)` 完全一致），消除训练/推理分布失配，使模型在 FOV 上看到 100% 游戏画面（游戏为全屏运行，中心裁剪会漏掉屏幕边缘的敌人）。`automate.py` 同步移除 `source_crop` 参数。
+- **推理默认值统一为 full-frame**：`yolo_detector.h` 中 `detect()` / `preprocess()` 的 `fullFrame` 默认参数由 `false` 改为 `true`，`fullFrame_` 成员初值改为 `true`。`esp_jni.cpp`、`settings.h` 注释同步说明 CROP_SIZE 已不再用于全帧模式。
+- **重新导出 `yolo26n-opt.bin`**：基于全帧 letterbox 训练在新数据集上重新训练的权重（4.7MB，含于仓库，无 LFS）。`.gitkeep` 占位文件已删除（目录现已有真实模型文件）。
+- `training/config/config.ini`：`batch` 16 → 4（降低训练显存占用）。
+
+### 版本号
+- 因远程已存在 `v0.3.0-beta.20` 标签（指向 f5a262b），本次升到 beta.21 以触发新的 CI 构建与 tag，避免 detect-version 因标签已存在而跳过出包。
+
 ## [0.3.0-beta.20] - 2026-08-10
 
 修复 beta.19 CI 构建失败：NCNN Mat `void*` 指针算术错误。

@@ -79,7 +79,7 @@ public:
      */
     bool detect(AHardwareBuffer* buffer, DetectionResult& result);
     bool detect(AHardwareBuffer* buffer, DetectionResult& result, int dynamicCropSize,
-                bool fullFrame = false);
+                bool fullFrame = true);
 
     /**
      * @brief Update screen size for coordinate mapping
@@ -121,13 +121,13 @@ public:
 
 private:
     /**
-     * @brief Preprocess image: center crop and resize
+     * @brief Preprocess image: full-frame letterbox resize (or center crop fallback)
      * @param buffer Input hardware buffer
      * @param inputMat Output NCNN mat ready for inference
      * @return true if preprocessing successful
      */
     bool preprocess(AHardwareBuffer* buffer, ncnn::Mat& inputMat, int cropSize = Config::CROP_SIZE,
-                    bool fullFrame = false);
+                    bool fullFrame = true);
     
     /**
      * @brief Run NCNN inference
@@ -169,7 +169,7 @@ private:
     int currentActualCropSize_ = 0;  // clamped crop size (for crop-mode postprocess)
     int currentCaptureWidth_ = 0;
     int currentCaptureHeight_ = 0;
-    bool fullFrame_ = false;
+    bool fullFrame_ = true;
 
     // Letterbox resize parameters (stored from preprocess, used in postprocess).
     // The model is trained with YOLO's default letterbox resize (preserve aspect

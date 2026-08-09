@@ -84,7 +84,6 @@ def _step_extract(cfg, fps: float) -> int:
     return extract(
         config_path=None,
         fps_extract=fps,
-        source_crop=320,        # matches runtime CROP_SIZE
         capture_height=720,     # matches runtime CAPTURE_HEIGHT
         target_imgsz=cfg.training.imgsz,
     )

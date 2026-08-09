@@ -22,12 +22,12 @@ namespace Config {
     /// Capture resolution height
     constexpr int CAPTURE_HEIGHT = 720;
     
-    /// Center crop size for inference (square region).
-    /// Reduced from 480 to 320: smaller resize ratio into the model
-    /// (320 -> 256 = 1.25x vs 480 -> 256 = 1.875x), less per-frame CPU
-    /// in NCNN's resize, and a tighter FOV that matches what the runtime
-    /// model can reliably detect at imgsz=256. Adaptive crop still scales
-    /// this down under pressure; this cap is the maximum.
+    /// Center crop size (legacy, no longer used in full-frame mode).
+    /// Kept for compatibility with the 4-argument detect() overload.
+    /// Runtime now uses fullFrame=true: the entire 1280×720 capture is
+    /// letterboxed to the model input square, matching the training pipeline
+    /// (extract_frames.py: full-frame letterbox → resize to model input).
+    /// Both training and inference see 100% of the game screen.
     constexpr int CROP_SIZE = 320;
 
     /// ImageReader buffer depth. 3 is the minimum for triple buffering

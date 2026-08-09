@@ -173,9 +173,14 @@ void YoloDetector::shutdown() {
 }
 
 bool YoloDetector::detect(AHardwareBuffer* buffer, DetectionResult& result) {
-    // Delegate to the 4-argument version with full-frame mode.
-    // The old tiled detection path (6 inferences per frame) was removed because
-    // it was 6x slower than single-pass and broke the temporal filter.
+    // Delegate to the 4-argument version with FULL-FRAME mode.
+    //
+    // CRITICAL: fullFrame=true matches the training pipeline
+    // (extract_frames.py: full-frame letterbox → resize to model input).
+    // Both training and inference use 100% of the game screen (1280×720)
+    // letterboxed to the model input square, because games run fullscreen.
+    // Using fullFrame=false (center crop) would only see the central 320×320
+    // region, missing enemies at screen edges that the model was trained to detect.
     return detect(buffer, result, Config::CROP_SIZE, true);
 }
 
@@ -195,7 +200,7 @@ bool YoloDetector::detect(AHardwareBuffer* buffer, DetectionResult& result, int 
     
     auto startTime = std::chrono::high_resolution_clock::now();
     
-    // Preprocess: extract pixels, center crop, resize into persistent buffer
+    // Preprocess: extract pixels, letterbox resize into persistent buffer
     if (!preprocess(buffer, inputMat_, dynamicCropSize, fullFrame)) {
         LOGE("Preprocessing failed");
         return false;

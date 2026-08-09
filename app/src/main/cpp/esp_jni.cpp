@@ -562,16 +562,22 @@ namespace {
                     const auto inferStart = std::chrono::steady_clock::now();
 
                     // ----------------------------------------------------------------
-                    // Single-pass full-frame detection with letterbox resize.
+                    // Single-pass FULL-FRAME detection (matches training pipeline).
                     //
-                    // One inference per frame: the entire 1280x720 capture is
-                    // letterbox-resized (preserve aspect ratio + pad) into a
-                    // 256x256 model input. This matches the YOLOv8/v26 training
-                    // preprocessing, avoiding the train/inference mismatch that
-                    // degraded accuracy by 10-20%.
+                    // CRITICAL: The model is trained on full-screen frames
+                    // extracted from 1280×720 gameplay footage (see
+                    // training/src/extract_frames.py: _preprocess_frame does
+                    // scale-to-720p → full-frame letterbox → resize-to-640).
                     //
-                    // Coordinate mapping in postprocess() reverses the letterbox
-                    // transform to map model-space boxes back to screen space.
+                    // The runtime MUST use the same FOV: letterbox the entire
+                    // 1280×720 capture into the 256×256 model input. Both
+                    // training and inference see 100% of the game screen
+                    // because games run fullscreen. Using center-crop mode
+                    // (fullFrame=false) would only see the central 320×320
+                    // region, missing edge enemies the model was trained on.
+                    //
+                    // Full-frame mode (fullFrame=true) matches training exactly:
+                    //   1280×720 → letterbox 256×256 → infer
                     // ----------------------------------------------------------------
                     if (g_detector->detect(frame.hardwareBuffer, result, Config::CROP_SIZE, true)) {
                         const auto inferEnd = std::chrono::steady_clock::now();
