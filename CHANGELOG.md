@@ -4,6 +4,19 @@ All notable changes to AimBuddy. Format inspired by [Keep a Changelog](https://k
 
 Dates are in ISO-8601 (YYYY-MM-DD).
 
+## [0.3.0-beta.10] - 2026-08-09
+
+针对「启动服务后屏幕无法点击/滑动」做最终一轮加固，全面堵死叠加层卡在可触摸态的任何可能。在 beta.9 的「菜单内 X」「通知栏恢复触摸」逃生路径基础上，补充底层可靠性保障。
+
+### Changed
+- **叠加层触摸穿透可靠性（防卡死兜底）**：
+  - 新增 `forceOverlayNotTouchable()` 硬重置：无条件给叠加层补上 `FLAG_NOT_TOUCHABLE`，且 `updateViewLayout` 失败时回滚内存 flags，避免「内存 flag 已改、实际窗口未改」导致轮询后续跳过纠正。
+  - 启动 ESP 时立即 + 延迟 500ms 各强制穿透一次，抵消 `addView` / GL _surface 创建路径可能引入的标志错位。
+  - 齿轮关闭菜单、通知「恢复触摸」逃生口、启动兜底均走 `forceOverlayNotTouchable()`（关菜单方向不能含糊）。
+  - `applyOverlayTouchable()` 与触摸轮询的 `updateViewLayout` 均加 `try/catch` + flags 回滚。
+  - 触摸轮询每 ~2s 强制重同步一次，作为内存态与真实窗口态可能脱节的最后兜底。
+  - `ImGuiGLSurface.onTouchEvent` 在菜单不可见时直接返回 `false`（深度防御：即使窗口标志在 50ms 轮询间隙短暂可触摸，也不会吞掉触摸）。
+
 ## [0.3.0-beta.9] - 2026-08-08
 
 针对 beta.8 之后用户反馈「启动服务后屏幕依旧完全无法点击/滑动」的遗留问题做彻底修复。beta.8 已修掉首帧竞态与 `FLAG_NOT_TOUCH_MODAL` 抢占，但遗漏了另一条同样致命的根因，本次从三个层面堵死该路径。
