@@ -1,14 +1,18 @@
 name: Build and Release APK
 
 # Trigger conditions:
-#  - Any push to master that touches CHANGELOG.md (the workflow then checks
-#    whether the top non-Unreleased version differs from the latest tag).
+#  - Any push to main that touches the app sources, version files, or this
+#    workflow (the detect-version job then checks whether the changelog's top
+#    released version already has a tag; if not, it builds and releases it).
 #  - Manual dispatch (useful for re-running a failed publish).
 on:
   push:
     branches: [main]
     paths:
       - 'CHANGELOG.md'
+      - 'gradle.properties'
+      - 'app/**'
+      - '.github/workflows/**'
   workflow_dispatch:
 
 permissions:
