@@ -834,6 +834,23 @@ Java_com_aimbuddy_ImGuiGLSurface_nativeTick(JNIEnv* /* env */, jclass /* this */
 
             if (ImGui::Begin(T(Key::AppTitle), nullptr, windowFlags)) {
                 g_menuSize = ImGui::GetWindowSize();
+
+                // Close (X) button pinned to the top-right corner. While the
+                // menu is open the overlay window is touchable, so this button
+                // is always tappable and lets the user dismiss the menu and
+                // restore screen touch passthrough - even if the floating gear
+                // is momentarily unreachable. The 50ms touch poller then flips
+                // the overlay back to FLAG_NOT_TOUCHABLE on the next cycle.
+                {
+                    const float closeBtn = 32.0f;
+                    ImGui::SetCursorPosX(ImGui::GetWindowWidth() - closeBtn - 10.0f);
+                    if (ImGui::Button("X", ImVec2(closeBtn, closeBtn))) {
+                        settings->menuVisible.store(false, std::memory_order_relaxed);
+                        g_menuVisible = false;
+                    }
+                    ImGui::NewLine();
+                }
+
                 const bool rootAvailable = g_rootAvailable.load(std::memory_order_relaxed);
                 const bool shizukuAvailable = g_shizukuAvailable.load(std::memory_order_relaxed);
                 if (!rootAvailable && !shizukuAvailable) {

@@ -6,6 +6,9 @@ import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.ComponentName
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
+import androidx.core.content.ContextCompat
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -301,6 +304,12 @@ class MainActivity : AppCompatActivity() {
     private var iconMoved = false
     private var menuVisible = false
 
+    // Escape hatch: the persistent notification's "恢复触摸" action broadcasts
+    // this intent so the screen can always be freed even if the menu gets
+    // stuck open (the only close affordance was the floating gear, which can
+    // become unreachable while the overlay is touchable).
+    private var restoreTouchReceiver: BroadcastReceiver? = null
+
     // MediaProjection components
     private var mediaProjectionManager: MediaProjectionManager? = null
     private var mediaProjection: MediaProjection? = null
@@ -475,10 +484,37 @@ class MainActivity : AppCompatActivity() {
         Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
         Shizuku.addBinderReceivedListenerSticky(shizukuBinderReceivedListener)
         Shizuku.addBinderDeadListener(shizukuBinderDeadListener)
+
+        // Register the "restore touch" escape-hatch receiver so the persistent
+        // notification's action button can always free the screen, even when
+        // the menu is stuck open and the overlay is capturing all touches.
+        restoreTouchReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == ScreenCaptureService.ACTION_RESTORE_TOUCH) {
+                    Log.i(TAG, "Restore-touch broadcast received")
+                    forceRestoreTouch()
+                }
+            }
+        }
+        val filter = IntentFilter(ScreenCaptureService.ACTION_RESTORE_TOUCH)
+        ContextCompat.registerReceiver(
+            this,
+            restoreTouchReceiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
     }
     
     override fun onDestroy() {
         Log.i(TAG, "onDestroy")
+
+        // Unregister the escape-hatch receiver to avoid leaks.
+        try {
+            restoreTouchReceiver?.let { unregisterReceiver(it) }
+        } catch (ignored: IllegalArgumentException) {
+            Log.w(TAG, "restoreTouchReceiver already unregistered")
+        }
+        restoreTouchReceiver = null
         stopESP()
         Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener)
         Shizuku.removeBinderReceivedListener(shizukuBinderReceivedListener)
@@ -1464,6 +1500,23 @@ class MainActivity : AppCompatActivity() {
         } else if (!touchable && isTouchable) {
             params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
             windowManager?.updateViewLayout(view, params)
+        }
+    }
+
+    /**
+     * Force the overlay back to passthrough (NOT_TOUCHABLE), closing the menu in
+     * both the Kotlin state and the native renderer so the 50ms poller keeps it
+     * transparent to touches. This is the universal escape hatch triggered by
+     * the persistent notification's "恢复触摸" action — it works even when the
+     * menu is stuck open and the floating gear is unreachable.
+     */
+    private fun forceRestoreTouch() {
+        Log.i(TAG, "forceRestoreTouch() called")
+        ImGuiGLSurface.nativeSetMenuVisible(false)
+        menuVisible = false
+        applyOverlayTouchable(false)
+        runOnUiThread {
+            showAppToast("已恢复触摸，菜单已关闭", false)
         }
     }
 

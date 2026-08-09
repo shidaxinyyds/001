@@ -4,6 +4,16 @@ All notable changes to AimBuddy. Format inspired by [Keep a Changelog](https://k
 
 Dates are in ISO-8601 (YYYY-MM-DD).
 
+## [0.3.0-beta.9] - 2026-08-08
+
+针对 beta.8 之后用户反馈「启动服务后屏幕依旧完全无法点击/滑动」的遗留问题做彻底修复。beta.8 已修掉首帧竞态与 `FLAG_NOT_TOUCH_MODAL` 抢占，但遗漏了另一条同样致命的根因，本次从三个层面堵死该路径。
+
+### Fixed
+- **【严重】菜单卡死导致屏幕被锁（彻底解决）**：真正遗漏的根因是**菜单唯一的关闭入口是悬浮齿轮，而齿轮的「点按 vs 拖拽」判定阈值为 6px**——手指正常点按的抖动往往大于 6px，被误判为拖拽，于是齿轮只移动、不切换菜单；菜单便一直开着 → 叠加层保持可触摸 → 整屏被拦截、无法点击也无法滑动。并且菜单打开时叠加层 `setZOrderOnTop(true)` 可能盖在齿轮之上，使齿轮本身就点不到。本次修复：
+  - **菜单内新增关闭按钮（X）**：固定在菜单右上角。菜单打开时叠加层本身可触摸，X 按钮属于叠加层 UI，永远可点；点击即把 `menuVisible`/`g_menuVisible` 置 false，下一帧菜单消失、50ms 触摸轮询将叠加层恢复为 `FLAG_NOT_TOUCHABLE`，触摸即刻穿透给游戏。
+  - **通知栏「恢复触摸」终极逃生口**：`ScreenCaptureService` 常驻通知新增「恢复触摸」操作（`ACTION_RESTORE_TOUCH`）。无论菜单是否卡死、齿轮是否可达，下拉通知栏点该按钮即经广播触发 `MainActivity.forceRestoreTouch()`，强制 `nativeSetMenuVisible(false)` + `applyOverlayTouchable(false)`，屏幕必定恢复。
+  - 未改动核心 `FLAG_NOT_TOUCHABLE` / `g_menuVisible` 触摸穿透机制本身（它是正确的），只补上可靠的「关闭 / 逃生」路径，确保任何情况下都能把触摸交还给游戏。
+
 ## [0.3.0-beta.8] - 2026-08-08
 
 针对 beta.7 后仍然存在的五项问题做彻底修复，重点解决「启动后屏幕完全无法点击」与「大厅里也误检测敌人」。
