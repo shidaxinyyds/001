@@ -304,6 +304,13 @@ class MainActivity : AppCompatActivity() {
     private var iconMoved = false
     private var menuVisible = false
 
+    // Dedicated transparent input window for the ImGui menu. It is added ONLY
+    // while the menu is open and removed the moment it closes. The full-screen
+    // imguiOverlay stays FLAG_NOT_TOUCHABLE forever, so the screen can never be
+    // blocked by a stuck/pass-through flag on the persistent overlay.
+    private var menuInputView: View? = null
+    private var menuInputParams: WindowManager.LayoutParams? = null
+
     // Escape hatch: the persistent notification's "恢复触摸" action broadcasts
     // this intent so the screen can always be freed even if the menu gets
     // stuck open (the only close affordance was the floating gear, which can
@@ -509,11 +516,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     ScreenCaptureService.ACTION_OPEN_MENU -> {
                         Log.i(TAG, "Open-menu broadcast received")
-                        if (!ImGuiGLSurface.nativeIsMenuVisible()) {
-                            ImGuiGLSurface.nativeSetMenuVisible(true)
-                            menuVisible = true
-                            applyOverlayTouchable(true)
-                        }
+                        openMenu()
                     }
                 }
             }
@@ -1437,6 +1440,7 @@ class MainActivity : AppCompatActivity() {
     private fun removeOverlay() {
         if (isOverlayVisible) {
             stopTouchPolling()
+            removeMenuInputWindow()
             imguiOverlay?.let {
                 try {
                     windowManager?.removeView(it)
@@ -1489,11 +1493,17 @@ class MainActivity : AppCompatActivity() {
             y = 120
         }
 
-        // Gear icon is now purely visual. On some devices the 44x44 floating
-        // window still interferes with screen touches even with
-        // FLAG_NOT_TOUCH_MODAL, so we stop it from consuming any touch event.
-        // Use the persistent notification's "打开菜单" action instead.
-        iconView.setOnTouchListener { _, _ -> false }
+        // Tapping the gear toggles the settings menu. The gear window has
+        // FLAG_NOT_TOUCH_MODAL, so a tap here is consumed only within its 44x44
+        // bounds and NEVER freezes the rest of the screen. The menu's input is
+        // handled by a separate full-screen window that exists only while the
+        // menu is open (see applyOverlayTouchable / addMenuInputWindow).
+        iconView.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_UP) {
+                openMenu()
+            }
+            true
+        }
 
         if (streamerModeEnabled) {
             params.flags = params.flags or WindowManager.LayoutParams.FLAG_SECURE
@@ -1531,34 +1541,104 @@ class MainActivity : AppCompatActivity() {
         floatingIconParams = null
     }
 
+    /**
+     * Open the ImGui settings menu. The full-screen [imguiOverlay] stays
+     * FLAG_NOT_TOUCHABLE at all times; menu input is served by a dedicated
+     * transparent full-screen window ([menuInputView]) that is added now and
+     * removed automatically when the menu closes. This guarantees the screen
+     * can never be blocked by the persistent overlay.
+     */
+    private fun openMenu() {
+        if (!ImGuiGLSurface.nativeIsMenuVisible()) {
+            ImGuiGLSurface.nativeSetMenuVisible(true)
+            menuVisible = true
+        }
+        addMenuInputWindow()
+    }
+
+    /**
+     * Show/hide the dedicated menu input window. When [touchable] is true the
+     * menu needs input, so we make sure the input window exists; when false we
+     * remove it so all touches fall through to the app underneath.
+     *
+     * The persistent [imguiOverlay] is NEVER made touchable — it only renders.
+     * Keeping it NOT_TOUCHABLE permanently is what makes the "screen frozen
+     * after starting the service" failure mode impossible: there is no
+     * full-screen window left that can intercept touches.
+     */
     private fun applyOverlayTouchable(touchable: Boolean) {
-        val view = imguiOverlay ?: return
-        val params = view.layoutParams as? WindowManager.LayoutParams ?: return
-        val isTouchable = (params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0
-        if (touchable && !isTouchable) {
-            val oldFlags = params.flags
-            params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
-            try {
-                windowManager?.updateViewLayout(view, params)
-            } catch (t: Throwable) {
-                // CRITICAL: revert in-memory flags so they stay in sync with
-                // the actual window state. Without this, a failed update would
-                // leave params.flags saying "touchable" while the real window
-                // is still NOT_TOUCHABLE, causing the poller to skip future
-                // corrections and the overlay to get stuck in the wrong state.
-                params.flags = oldFlags
-                Log.w(TAG, "applyOverlayTouchable(true) failed: ${t.message}")
-            }
-        } else if (!touchable && isTouchable) {
-            val oldFlags = params.flags
-            params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-            try {
-                windowManager?.updateViewLayout(view, params)
-            } catch (t: Throwable) {
-                params.flags = oldFlags
-                Log.w(TAG, "applyOverlayTouchable(false) failed: ${t.message}")
+        if (touchable) {
+            addMenuInputWindow()
+        } else {
+            removeMenuInputWindow()
+        }
+    }
+
+    private fun addMenuInputWindow() {
+        val wm = windowManager ?: return
+        if (menuInputView != null) return
+        val view = View(this)
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            else
+                WindowManager.LayoutParams.TYPE_PHONE,
+            // Touchable (no FLAG_NOT_TOUCHABLE) but not focusable, so it captures
+            // menu input without stealing soft-keyboard focus. Covers the screen
+            // only while the menu is open; removed on close.
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             }
         }
+
+        view.setOnTouchListener { _, event ->
+            if (!ImGuiGLSurface.nativeIsMenuVisible()) return@setOnTouchListener false
+            val action = when (event.action) {
+                MotionEvent.ACTION_DOWN -> 0
+                MotionEvent.ACTION_UP -> 1
+                MotionEvent.ACTION_MOVE -> 2
+                else -> return@setOnTouchListener false
+            }
+            ImGuiGLSurface.nativeMotionEvent(action, event.x, event.y)
+            true
+        }
+
+        if (streamerModeEnabled) {
+            params.flags = params.flags or WindowManager.LayoutParams.FLAG_SECURE
+        }
+
+        try {
+            wm.addView(view, params)
+            menuInputView = view
+            menuInputParams = params
+            Log.i(TAG, "Menu input window added")
+        } catch (t: Throwable) {
+            Log.e(TAG, "addMenuInputWindow failed: ${t.message}")
+        }
+    }
+
+    private fun removeMenuInputWindow() {
+        val wm = windowManager ?: return
+        menuInputView?.let {
+            try {
+                wm.removeView(it)
+            } catch (ignored: IllegalArgumentException) {
+                Log.w(TAG, "Menu input window already removed")
+            }
+        }
+        menuInputView = null
+        menuInputParams = null
+        Log.i(TAG, "Menu input window removed")
     }
 
     /**
@@ -1572,6 +1652,7 @@ class MainActivity : AppCompatActivity() {
         Log.i(TAG, "forceRestoreTouch() called")
         ImGuiGLSurface.nativeSetMenuVisible(false)
         menuVisible = false
+        removeMenuInputWindow()
         forceOverlayNotTouchable()
         runOnUiThread {
             showAppToast("已恢复触摸，菜单已关闭", false)
@@ -1610,64 +1691,39 @@ class MainActivity : AppCompatActivity() {
         // any desync between the in-memory params.flags and the actual window
         // manager state  -  e.g. if a previous updateViewLayout() threw and
         // the revert wasn't perfect, or an OEM ROM mangled the flags.
-        var forceSyncCounter = 0
         touchHandler.post(object : Runnable {
             override fun run() {
                 if (!touchPolling) return
 
                 // Everything below is best-effort: the loop MUST reschedule
-                // itself no matter what. An early `return` here (null view,
-                // unexpected params type, WindowManager throwing) would kill
-                // the poller permanently while `touchPolling` stayed true, so
-                // startTouchPolling() could never restart it and the overlay
-                // would be stuck in whatever touch state it had.
+                // itself no matter what. An early failure must never kill the
+                // poller permanently, or the menu input window could get stuck.
                 try {
+                    // The full-screen overlay must ALWAYS stay NOT_TOUCHABLE.
+                    // Periodically re-affirm it as a guard against OEM ROMs that
+                    // mangle window flags. This never blocks the screen because
+                    // the overlay is not the input window.
                     val view = imguiOverlay
                     val params = view?.layoutParams as? WindowManager.LayoutParams
                     if (view != null && params != null) {
-                        val wantsCapture = ImGuiGLSurface.nativeWantsCapture()
-                        val isTouchable =
-                            (params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0
-
-                        // Determine whether the overlay's touchable state
-                        // matches what the menu needs. The periodic force-sync
-                        // (every 40 cycles ≈ 2s) re-applies the flags even when
-                        // they *appear* correct, guarding against hidden
-                        // desync.
-                        val needsTouchable = wantsCapture
-                        val needsUpdate = (needsTouchable != isTouchable) ||
-                            (forceSyncCounter % 40 == 0)
-
-                        if (needsUpdate) {
-                            val oldFlags = params.flags
-                            if (needsTouchable) {
-                                params.flags =
-                                    params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
-                            } else {
-                                params.flags =
-                                    params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                            }
-                            try {
-                                windowManager?.updateViewLayout(view, params)
-                            } catch (t: Throwable) {
-                                // CRITICAL: revert in-memory flags on failure.
-                                // If we don't, the next cycle will see the
-                                // modified (but never applied) flags and skip
-                                // the correction, leaving the overlay stuck in
-                                // the wrong touch state  -  which is the root
-                                // cause of "screen unresponsive after starting
-                                // service": the overlay became touchable (flag
-                                // removed in memory) but the WM call failed, so
-                                // the real window still intercepts every touch.
-                                params.flags = oldFlags
-                                Log.w(TAG, "Touch polling updateViewLayout failed: ${t.message}")
-                            }
+                        if ((params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0) {
+                            forceOverlayNotTouchable()
                         }
+                    }
+
+                    // The menu's input window exists only while the menu is open.
+                    // When the menu closes (e.g. via its X button in native code)
+                    // we remove the window entirely so every touch falls through
+                    // to the app underneath — guaranteed, no flag toggling.
+                    val menuOpen = ImGuiGLSurface.nativeIsMenuVisible()
+                    if (menuOpen && menuInputView == null) {
+                        addMenuInputWindow()
+                    } else if (!menuOpen && menuInputView != null) {
+                        removeMenuInputWindow()
                     }
                 } catch (t: Throwable) {
                     Log.w(TAG, "Touch polling cycle failed: ${t.message}")
                 } finally {
-                    forceSyncCounter++
                     if (touchPolling) {
                         touchHandler.postDelayed(this, 50)
                     }
