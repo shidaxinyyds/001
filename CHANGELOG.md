@@ -4,6 +4,15 @@ All notable changes to AimBuddy. Format inspired by [Keep a Changelog](https://k
 
 Dates are in ISO-8601 (YYYY-MM-DD).
 
+## [0.3.0-beta.11] - 2026-08-09
+
+紧急重发：修复 **齿轮窗口缺 `FLAG_NOT_TOUCH_MODAL`** 的真根因修复（`80abcea`）未能进入 `v0.3.0-beta.10` 的发布产物——因为之前的 beta.10 标签在推送该修复之前就已创建并发布，导致 `release.yml` 的 `detect-version` 检测到标签已存在而跳过构建。本版本重新触发工作流，把齿轮 `FLAG_NOT_TOUCH_MODAL` 修复包含进 APK。
+
+### Fixed
+- 包含 `0.3.0-beta.10` 的全部修复：
+  - 悬浮齿轮窗口补 `FLAG_NOT_TOUCH_MODAL`（真根因：齿轮 modal 吞掉整屏触摸 → 设备冻结）。
+  - `forceOverlayNotTouchable()` 硬重置、500ms 启动兜底、`onTouchEvent` 穿透防御、轮询强制重同步。
+
 ## [0.3.0-beta.10] - 2026-08-09
 
 彻底定位并修复「启动服务后屏幕完全无法点击/滑动」的**真正根因**，并补充底层可靠性加固。
