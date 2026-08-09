@@ -16,8 +16,17 @@
 #include <cstring>
 #include <cmath>
 #include <signal.h>
-#include <execinfo.h>
 #include <fcntl.h>
+
+// backtrace() lives in <execinfo.h> which is not available / not declared on
+// all Android NDK versions. On Android we rely on Java CrashReporter + the
+// system tombstone; on hosts that provide it we record a best-effort backtrace.
+#if !defined(__ANDROID__)
+#include <execinfo.h>
+#define HAS_NATIVE_BACKTRACE 1
+#else
+#define HAS_NATIVE_BACKTRACE 0
+#endif
 #include <unistd.h>
 #include <algorithm>
 
@@ -111,15 +120,17 @@ namespace {
                 int n = snprintf(buf, sizeof(buf), "signal=%d\n", sig);
                 if (n > 0) write(fd, buf, static_cast<size_t>(n));
                 // Best-effort backtrace (addresses only; symbolise with
-                // ndk-stack + the unstripped lib). backtrace() is not strictly
-                // async-signal-safe but is safe enough here and far better than
-                // a bare signal number for diagnosis.
+                // ndk-stack + the unstripped lib). Disabled on Android because
+                // <execinfo.h>/backtrace() is not reliably available across
+                // NDK/API levels; we still have Java CrashReporter + tombstones.
+#if HAS_NATIVE_BACKTRACE
                 void* frames[24];
                 int fc = backtrace(frames, 24);
                 for (int i = 0; i < fc; ++i) {
                     n = snprintf(buf, sizeof(buf), "0x%p\n", frames[i]);
                     if (n > 0) write(fd, buf, static_cast<size_t>(n));
                 }
+#endif
                 const char* nl = "[end]\n";
                 write(fd, nl, static_cast<size_t>(strlen(nl)));
                 close(fd);
