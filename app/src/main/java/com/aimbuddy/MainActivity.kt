@@ -501,7 +501,7 @@ class MainActivity : AppCompatActivity() {
             this,
             restoreTouchReceiver,
             filter,
-            ContextCompat.RECEIVER_NOT_EXPORTED
+            Context.RECEIVER_NOT_EXPORTED
         )
     }
     
