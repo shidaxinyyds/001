@@ -27,6 +27,11 @@ class ScreenCaptureService : Service() {
          *  passthrough (dismiss the menu and re-enable FLAG_NOT_TOUCHABLE). */
         const val ACTION_RESTORE_TOUCH = "com.aimbuddy.action.RESTORE_TOUCH"
 
+        /** Broadcast action that asks MainActivity to open the settings menu.
+         *  Used as a replacement for tapping the floating gear when the gear icon
+         *  itself must stay touch-transparent to avoid freezing the screen. */
+        const val ACTION_OPEN_MENU = "com.aimbuddy.action.OPEN_MENU"
+
         // JNI bridge method
         @JvmStatic
         external fun nativeOnFrame(hardwareBuffer: HardwareBuffer, timestamp: Long)
@@ -63,6 +68,14 @@ class ScreenCaptureService : Service() {
         // "Restore touch" action: broadcast to MainActivity, which force-closes
         // the menu and re-enables FLAG_NOT_TOUCHABLE. This is the ultimate
         // escape hatch if the menu ever traps screen input.
+        val openMenuIntent = Intent(ACTION_OPEN_MENU).apply { setPackage(packageName) }
+        val openMenuPending = PendingIntent.getBroadcast(
+            this,
+            1,
+            openMenuIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
         val restoreIntent = Intent(ACTION_RESTORE_TOUCH).apply { setPackage(packageName) }
         val restorePending = PendingIntent.getBroadcast(
             this,
@@ -73,8 +86,13 @@ class ScreenCaptureService : Service() {
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("AimBuddy ESP 运行中")
-            .setContentText("点击「恢复触摸」可解除菜单对屏幕的拦截")
+            .setContentText("点击「打开菜单」设置；点击「恢复触摸」解锁")
             .setSmallIcon(R.mipmap.ic_launcher)
+            .addAction(
+                android.R.drawable.ic_menu_preferences,
+                "打开菜单",
+                openMenuPending
+            )
             .addAction(
                 android.R.drawable.ic_menu_close_clear_cancel,
                 "恢复触摸",

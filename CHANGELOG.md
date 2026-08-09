@@ -4,6 +4,16 @@ All notable changes to AimBuddy. Format inspired by [Keep a Changelog](https://k
 
 Dates are in ISO-8601 (YYYY-MM-DD).
 
+## [0.3.0-beta.13] - 2026-08-09
+
+兜底修复：即使 `FLAG_NOT_TOUCH_MODAL` 在某些设备上仍不能让齿轮窗口外触摸正常穿透，也彻底消除屏幕冻结。
+
+### Changed
+- 悬浮齿轮图标改为**纯视觉指示器**，不再消费任何触摸事件；菜单改从通知栏「打开菜单」按钮进入。
+- 通知栏新增「打开菜单」动作（`ACTION_OPEN_MENU`），对应广播由 `MainActivity` 接收并打开菜单。
+- 移除 `imguiOverlay` 的 `FLAG_FULLSCREEN`，避免覆盖系统手势区域。
+- 启动时 Toast 显示当前版本号（`BuildConfig.AIMBUDDY_VERSION`），方便确认安装是否生效。
+
 ## [0.3.0-beta.12] - 2026-08-09
 
 真正根因修复 + CI 自动触发修正。

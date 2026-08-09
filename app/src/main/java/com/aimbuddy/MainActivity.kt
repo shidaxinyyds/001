@@ -422,6 +422,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
         
+        // Show the running version immediately so the user can verify whether
+        // the APK they just installed actually matched the release label.
+        showAppToast("AimBuddy ${BuildConfig.AIMBUDDY_VERSION}", false)
+        
         // Enable immersive fullscreen mode (hide nav bar & status bar)
         enableImmersiveMode()
 
@@ -490,14 +494,27 @@ class MainActivity : AppCompatActivity() {
         // the menu is stuck open and the overlay is capturing all touches.
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
-                if (intent?.action == ScreenCaptureService.ACTION_RESTORE_TOUCH) {
-                    Log.i(TAG, "Restore-touch broadcast received")
-                    forceRestoreTouch()
+                when (intent?.action) {
+                    ScreenCaptureService.ACTION_RESTORE_TOUCH -> {
+                        Log.i(TAG, "Restore-touch broadcast received")
+                        forceRestoreTouch()
+                    }
+                    ScreenCaptureService.ACTION_OPEN_MENU -> {
+                        Log.i(TAG, "Open-menu broadcast received")
+                        if (!ImGuiGLSurface.nativeIsMenuVisible()) {
+                            ImGuiGLSurface.nativeSetMenuVisible(true)
+                            menuVisible = true
+                            applyOverlayTouchable(true)
+                        }
+                    }
                 }
             }
         }
         restoreTouchReceiver = receiver
-        val filter = IntentFilter(ScreenCaptureService.ACTION_RESTORE_TOUCH)
+        val filter = IntentFilter().apply {
+            addAction(ScreenCaptureService.ACTION_RESTORE_TOUCH)
+            addAction(ScreenCaptureService.ACTION_OPEN_MENU)
+        }
         ContextCompat.registerReceiver(
             this,
             receiver,
@@ -1352,12 +1369,14 @@ class MainActivity : AppCompatActivity() {
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
             else
                 WindowManager.LayoutParams.TYPE_PHONE,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     // Default to pass-through touch; enable only when menu needs input
                     WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                    WindowManager.LayoutParams.FLAG_FULLSCREEN or
+                    // NOTE: FLAG_FULLSCREEN was removed because it can place the
+                    // overlay over system gesture areas and interfere with normal
+                    // touch navigation on some devices.
                     WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
             PixelFormat.TRANSLUCENT
         ).apply {
@@ -1437,51 +1456,11 @@ class MainActivity : AppCompatActivity() {
             y = 120
         }
 
-        iconView.setOnTouchListener { _, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    iconDownRawX = event.rawX
-                    iconDownRawY = event.rawY
-                    iconStartX = params.x
-                    iconStartY = params.y
-                    iconMoved = false
-                    true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val dx = (event.rawX - iconDownRawX).toInt()
-                    val dy = (event.rawY - iconDownRawY).toInt()
-                    if (kotlin.math.abs(dx) > 6 || kotlin.math.abs(dy) > 6) {
-                        iconMoved = true
-                    }
-                    params.x = iconStartX + dx
-                    params.y = iconStartY + dy
-                    wm.updateViewLayout(iconView, params)
-                    
-                    // Sync icon position to native code for menu positioning
-                    ImGuiGLSurface.nativeSetIconPosition(params.x.toFloat(), params.y.toFloat())
-                    true
-                }
-                MotionEvent.ACTION_UP -> {
-                    if (!iconMoved) {
-                        val newVisible = !ImGuiGLSurface.nativeIsMenuVisible()
-                        ImGuiGLSurface.nativeSetMenuVisible(newVisible)
-                        menuVisible = newVisible
-                        if (newVisible) {
-                            applyOverlayTouchable(true)
-                        } else {
-                            // Use the hard-reset when CLOSING the menu so
-                            // FLAG_NOT_TOUCHABLE is unconditionally re-applied.
-                            // This is the critical direction: if the flag
-                            // isn't set, the full-screen overlay swallows all
-                            // touches and the device appears frozen.
-                            forceOverlayNotTouchable()
-                        }
-                    }
-                    true
-                }
-                else -> false
-            }
-        }
+        // Gear icon is now purely visual. On some devices the 44x44 floating
+        // window still interferes with screen touches even with
+        // FLAG_NOT_TOUCH_MODAL, so we stop it from consuming any touch event.
+        // Use the persistent notification's "打开菜单" action instead.
+        iconView.setOnTouchListener { _, _ -> false }
 
         if (streamerModeEnabled) {
             params.flags = params.flags or WindowManager.LayoutParams.FLAG_SECURE
