@@ -129,7 +129,50 @@ jobs:
         run: echo "sdk.dir=$ANDROID_HOME" > local.properties
 
       - name: Build Debug APK
-        run: gradle assembleDebug --no-daemon --stacktrace
+        id: gradle-build
+        continue-on-error: true
+        run: |
+          set +e
+          gradle assembleDebug --no-daemon --stacktrace > gradle-build.log 2>&1
+          GRADLE_EXIT=$?
+          echo "=== Gradle exit code: $GRADLE_EXIT ==="
+          echo "=== Gradle output (last 200 lines) ==="
+          tail -200 gradle-build.log
+          exit $GRADLE_EXIT
+
+      - name: Post Gradle log as commit comment
+        if: always()
+        continue-on-error: true
+        run: |
+          if [ -f gradle-build.log ]; then
+            python3 -c "
+          import json
+          with open('gradle-build.log', 'r') as f:
+              log = f.read()
+          # Truncate to 50000 chars to avoid GitHub API limits
+          if len(log) > 50000:
+              log = log[-50000:]
+          body = '## Gradle build log (run #${{ github.run_id }})\n\n\`\`\`\n' + log + '\n\`\`\`'
+          print(json.dumps({'body': body}))
+          " > /tmp/gradle-comment.json
+            curl -s -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${{ github.token }}" \
+              "https://api.github.com/repos/${{ github.repository }}/commits/${{ github.sha }}/comments" \
+              -d @/tmp/gradle-comment.json
+          fi
+
+      - name: Upload Gradle build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-build-log
+          path: gradle-build.log
+          retention-days: 7
+
+      - name: Fail if Gradle build failed
+        if: steps.gradle-build.outcome == 'failure'
+        run: exit 1
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
