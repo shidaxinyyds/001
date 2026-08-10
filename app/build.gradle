@@ -5,7 +5,6 @@ plugins {
 android {
     namespace 'com.berry.kernel'
     compileSdk 34
-    ndkVersion '25.2.9519653'
 
     defaultConfig {
         applicationId "com.berry.kernel"
@@ -39,79 +38,3 @@ dependencies {
     implementation 'com.google.android.material:material:1.9.0'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
 }
-
-// ===== NDK Build Integration =====
-// 查找 ndk-build 可执行文件路径
-def getNdkBuildPath() {
-    def ndkDir = android.ndkDirectory
-    if (ndkDir != null) {
-        def isWindows = System.getProperty('os.name').toLowerCase().contains('windows')
-        def ndkBuildName = isWindows ? 'ndk-build.cmd' : 'ndk-build'
-        def ndkBuildFile = new File(ndkDir, ndkBuildName)
-        if (ndkBuildFile.exists()) {
-            return ndkBuildFile.absolutePath
-        }
-    }
-    return null
-}
-
-// 编译原生代码
-task buildNative {
-    doLast {
-        def ndkBuildPath = getNdkBuildPath()
-        if (ndkBuildPath == null) {
-            throw new GradleException("ndk-build not found! Install NDK ${android.ndkVersion} via SDK Manager.")
-        }
-        def isWindows = System.getProperty('os.name').toLowerCase().contains('windows')
-        def rootDir = rootProject.projectDir.absolutePath
-
-        def ndkArgs = [
-            "NDK_PROJECT_PATH=${rootDir}",
-            "APP_BUILD_SCRIPT=${rootDir}${File.separator}jni${File.separator}Android.mk",
-            "NDK_APPLICATION_MK=${rootDir}${File.separator}jni${File.separator}Application.mk",
-            "NDK_OUT=${rootDir}${File.separator}build${File.separator}ndk${File.separator}obj",
-            "NDK_LIBS_OUT=${rootDir}${File.separator}build${File.separator}ndk${File.separator}libs"
-        ]
-
-        def pb = new ProcessBuilder()
-        if (isWindows) {
-            pb.command('cmd', '/c', ndkBuildPath)
-        } else {
-            pb.command(ndkBuildPath)
-        }
-        for (arg in ndkArgs) {
-            pb.command().add(arg)
-        }
-        pb.directory(rootProject.projectDir)
-        pb.redirectErrorStream(true)
-        def proc = pb.start()
-        def reader = new BufferedReader(new InputStreamReader(proc.inputStream))
-        String line
-        while ((line = reader.readLine()) != null) {
-            println line
-        }
-        def exitCode = proc.waitFor()
-        if (exitCode != 0) {
-            throw new GradleException("ndk-build failed with exit code ${exitCode}")
-        }
-    }
-}
-
-// 拷贝编译产物到 jniLibs (重命名为 .so 以便 Android 自动解压)
-task copyNativeLib(dependsOn: 'buildNative') {
-    doLast {
-        def srcFile = file("${rootProject.projectDir}/build/ndk/libs/arm64-v8a/m")
-        def destDir = file("src/main/jniLibs/arm64-v8a")
-        destDir.mkdirs()
-        def destFile = new File(destDir, "libberry.so")
-        if (srcFile.exists()) {
-            destFile.bytes = srcFile.bytes
-            destFile.setExecutable(true, false)
-            println "Copied native binary to ${destFile.absolutePath}"
-        } else {
-            throw new GradleException("Native binary not found at ${srcFile.absolutePath}. Run buildNative first.")
-        }
-    }
-}
-
-preBuild.dependsOn copyNativeLib

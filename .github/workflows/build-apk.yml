@@ -22,8 +22,32 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install NDK
-        run: yes | sdkmanager --licenses && yes | sdkmanager "ndk;25.2.9519653"
+      - name: Install SDK components and NDK
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          yes | sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;25.2.9519653"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
+
+      - name: Build native code with ndk-build
+        run: |
+          echo "NDK path: $ANDROID_NDK_HOME"
+          ls -la "$ANDROID_NDK_HOME/ndk-build"
+          chmod +x "$ANDROID_NDK_HOME/ndk-build"
+          "$ANDROID_NDK_HOME/ndk-build" \
+            NDK_PROJECT_PATH=. \
+            APP_BUILD_SCRIPT=jni/Android.mk \
+            NDK_APPLICATION_MK=jni/Application.mk \
+            NDK_OUT=build/ndk/obj \
+            NDK_LIBS_OUT=build/ndk/libs
+
+      - name: Copy native binary to jniLibs
+        run: |
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          cp build/ndk/libs/arm64-v8a/m app/src/main/jniLibs/arm64-v8a/libberry.so
+          chmod +x app/src/main/jniLibs/arm64-v8a/libberry.so
+          echo "Binary copied:"
+          ls -la app/src/main/jniLibs/arm64-v8a/
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
@@ -41,14 +65,4 @@ jobs:
         with:
           name: BerryKernel-debug
           path: app/build/outputs/apk/debug/*.apk
-          retention-days: 30
-
-      - name: Build Release APK
-        run: gradle assembleRelease --no-daemon --stacktrace
-
-      - name: Upload Release APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: BerryKernel-release
-          path: app/build/outputs/apk/release/*.apk
           retention-days: 30
