@@ -15,13 +15,14 @@
 #include "../utils/vector2.h"
 
 struct UnifiedSettings {
-    // Bumped to 0xE5BA100A so that settings.bin written by older builds is
+    // Bumped to 0xE5BA100B so that settings.bin written by older builds is
     // rejected and users get a clean slate with the new defaults:
-    //   - confidence threshold lowered to 0.45 (was 0.60, which caused
-    //     massive false negatives on the yolo26n nano model),
+    //   - confidence threshold lowered to 0.38 for YOLO26s (mAP50=0.892),
+    //   - NMS IoU threshold adjusted to 0.40 for better WBF merging,
+    //   - temporal filter EMA smoothing and coasting parameters tuned,
     //   - single-pass full-frame detection replaces 6-tile detection,
     //   - temporal filter IoU gates loosened for fast-cycle matching.
-    uint32_t magic = 0xE5BA100A;  // Magic number for validation
+    uint32_t magic = 0xE5BA100B;  // Magic number for validation
     
     bool aimbotEnabled = false;
     bool espEnabled = true;
@@ -72,7 +73,7 @@ struct UnifiedSettings {
     float boxColorG = 0.0f;
     float boxColorB = 0.0f;
     int32_t boxThickness = 2;
-    float confidenceThreshold = 0.45f;
+    float confidenceThreshold = 0.38f;
     bool showFPS = false;
     bool showDetectionCount = false;
     bool showLabels = true;
@@ -114,7 +115,7 @@ struct UnifiedSettings {
         UnifiedSettings temp;
         if (fread(&temp, sizeof(UnifiedSettings), 1, f) == 1) {
             // Verify magic number
-            if (temp.magic == 0xE5BA100A) {
+            if (temp.magic == 0xE5BA100B) {
                 *this = temp;
                 fclose(f);
                 return true;

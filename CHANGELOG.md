@@ -4,6 +4,23 @@ All notable changes to AimBuddy. Format inspired by [Keep a Changelog](https://k
 
 Dates are in ISO-8601 (YYYY-MM-DD).
 
+## [0.3.0-beta.22] - 2026-08-10
+
+切换检测模型：YOLOv26n (256) → YOLOv26s (320)，并相应调参。
+
+### Changed
+- **模型升级 YOLOv26s**：输入 256→320（`MODEL_INPUT_SIZE`），更好的小目标检测能力（mAP50=0.892）。模型文件由 `yolo26n-opt.{bin,param}` 切换为 `yolo26s-opt.{bin,param}`（`settings.h` 与 `MainActivity.kt` 资源路径同步，`yolo26n-opt.*` 已从仓库删除）。
+- **置信度阈值 0.45→0.38**：YOLOv26s 精度足够，更宽松的原始阈值可捕获 0.38–0.44 区间的真实目标；时序确认 + WBF 融合抑制误检。
+- **NMS IoU 0.35→0.40**：更好的重叠检测合并，同时保持相邻敌人独立。
+- **后处理归一化判定加固**：坐标归一化检测从「仅 xCenter≤1.5」改为「xCenter/yCenter/width/height 四值全部 ≤1.5」，避免原点附近真实检测被误判为归一化坐标。
+- **屏幕边界裁剪**：越界检测框改为裁剪而非丢弃（保留边缘目标可见性）。
+- **时序滤波调优（esp_jni.cpp 内 constexpr）**：EMA alpha 0.55→0.45、vel alpha 0.50→0.40、coast decay 0.20→0.15、coast min conf 0.15→0.20、coast max dist 200→300，适配 YOLOv26s 更稳定的原始检测。
+- **settings magic 0xE5BA100A→0xE5BA100B**：旧 `settings.bin` 被拒并重置为新默认。
+- **训练配置**：`base_model=yolo26s.pt`、`runtime_imgsz=320`、`epochs=200`、`batch=8`；`train.py` 接受任意 YOLO26 变体；`export_to_ncnn.py` 输出文件名改 `yolo26s`。
+
+### 版本号
+- 因远程已存在 `v0.3.0-beta.21` 标签（指向 fb39adc），本次升到 beta.22 以触发新的 CI 构建与 tag，避免 detect-version 因标签已存在而跳过出包。
+
 ## [0.3.0-beta.21] - 2026-08-10
 
 训练/推理预处理对齐：中心裁剪 → 全帧 letterbox，并重导出匹配模型。

@@ -62,8 +62,8 @@ def run_export(config_path: Path | None = None, weights: Path | None = None) -> 
     param_src = param_files[0]
     bin_src = bin_files[0]
 
-    param_dst = export_dir / "yolo26n-opt.param"
-    bin_dst = export_dir / "yolo26n-opt.bin"
+    param_dst = export_dir / "yolo26s-opt.param"
+    bin_dst = export_dir / "yolo26s-opt.bin"
 
     shutil.copy2(param_src, param_dst)
     shutil.copy2(bin_src, bin_dst)

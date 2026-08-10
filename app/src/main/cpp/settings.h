@@ -41,27 +41,30 @@ namespace Config {
     // Model Configuration
     // ============================================================================
     
-    /// YOLOv26n input size (optimized for 120 FPS target)
-    constexpr int MODEL_INPUT_SIZE = 256;
+    /// YOLOv26s input size (320 for better small-target detection)
+    constexpr int MODEL_INPUT_SIZE = 320;
     
     /// Model parameter file name
-    constexpr const char* MODEL_PARAM_FILE = "models/yolo26n-opt.param";
-    
+    constexpr const char* MODEL_PARAM_FILE = "models/yolo26s-opt.param";
+
     /// Model binary file name
-    constexpr const char* MODEL_BIN_FILE = "models/yolo26n-opt.bin";
+    constexpr const char* MODEL_BIN_FILE = "models/yolo26s-opt.bin";
     
     /// Default confidence threshold for detections.
-    /// Lowered from 0.60 to 0.45: 0.60 was far too high for a nano model
-    /// (yolo26n) and caused the majority of false negatives — real targets
-    /// with confidence 0.45-0.59 were silently discarded. The temporal
-    /// confirmation filter (kConfirmHits=2) handles the resulting increase
-    /// in raw detections by suppressing single-cycle phantom boxes.
-    constexpr float DEFAULT_CONFIDENCE_THRESHOLD = 0.45f;
-    
-    /// NMS (Non-Maximum Suppression) IoU threshold.
-    /// Lowered from 0.45 to 0.35 so overlapping duplicates merge tighter and
-    /// stray phantom boxes next to real detections are discarded.
-    constexpr float NMS_IOU_THRESHOLD = 0.35f;
+    /// Set to 0.38 for YOLO26s (mAP50=0.892): the small model is accurate
+    /// enough that lowering the threshold catches real targets at 0.38-0.44
+    /// confidence without flooding the pipeline with false positives. The
+    /// temporal confirmation filter (kConfirmHits=2) suppresses single-cycle
+    /// phantom boxes, and WBF fuses overlapping low-confidence detections
+    /// into higher-confidence ones, so the effective false-positive rate
+    /// stays low even with a permissive raw threshold.
+    constexpr float DEFAULT_CONFIDENCE_THRESHOLD = 0.38f;
+
+    /// NMS (Non-Maximum Suppression) IoU threshold for Weighted Box Fusion.
+    /// 0.40 balances merging of overlapping detections of the same target
+    /// (improves recall for partially-overlapping anchor boxes) while still
+    /// keeping distinct nearby enemies as separate detections.
+    constexpr float NMS_IOU_THRESHOLD = 0.40f;
     
     /// Maximum number of detections per frame (pre-allocated)
     constexpr int MAX_DETECTIONS = 50;

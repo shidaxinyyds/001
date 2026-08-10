@@ -293,7 +293,7 @@ bool YoloDetector::preprocess(AHardwareBuffer* buffer, ncnn::Mat& inputMat, int 
     // The model was trained with Ultralytics' default letterbox resize:
     // scale = min(modelW/srcW, modelH/srcH), resize, then pad to square with
     // value 114. The OLD inference code used from_pixels_resize() which does a
-    // STRETCH resize (ignoring aspect ratio). For a 1280x720 capture → 256x256
+    // STRETCH resize (ignoring aspect ratio). For a 1280x720 capture → 320x320
     // model input, that's a 16:9→1:1 distortion the model never saw in training,
     // which silently degrades mAP by 10-20% and causes both missed detections
     // (distorted targets fall below threshold) and phantom detections (distorted
@@ -408,7 +408,7 @@ namespace {
 /// classic signature of a phantom detection fired on background noise.
 ///
 /// TIGHTENED from original:
-///   - Min size 2→4 px: boxes smaller than 4px in model space (256px) are
+///   - Min size 2→4 px: boxes smaller than 4px in model space (320px) are
 ///     sub-pixel noise, not real targets.
 ///   - Max size 1.05→0.98 * modelSize: a box larger than the input image
 ///     itself is physically impossible for a real target.
@@ -481,7 +481,7 @@ void YoloDetector::postprocess(const ncnn::Mat& output, DetectionResult& result,
     if (fullFrame) {
         // Letterbox-aware coordinate mapping.
         //
-        // Model input (256x256) contains the resized content at offset
+        // Model input (320x320) contains the resized content at offset
         // (letterboxPadX_, letterboxPadY_) with size (letterboxResizedW_ x
         // letterboxResizedH_). To map a model-space coordinate back to screen
         // space we must:
@@ -557,8 +557,13 @@ void YoloDetector::postprocess(const ncnn::Mat& output, DetectionResult& result,
             float width = row2[i];
             float height = row3[i];
 
-            // Normalize if needed (heuristic based on value range)
-            if (xCenter <= 1.5f) {
+            // Normalize if ALL values are in [0, 1] range (some export
+            // pipelines output normalized coordinates). Checking all four
+            // prevents false scaling of real detections near the origin
+            // (e.g., xCenter=1.2 in 320px space is a valid position, not a
+            // normalized value).
+            if (xCenter <= 1.5f && yCenter <= 1.5f &&
+                width <= 1.5f && height <= 1.5f) {
                 xCenter *= modelSize;
                 yCenter *= modelSize;
                 width *= modelSize;
@@ -572,11 +577,18 @@ void YoloDetector::postprocess(const ncnn::Mat& output, DetectionResult& result,
             // box.x = (xCenter - width/2) * scaleX + offsetX
             float halfW = width * 0.5f;
             float halfH = height * 0.5f;
-            
+
             float boxX = (xCenter - halfW) * scaleX + offsetX;
             float boxY = (yCenter - halfH) * scaleY + offsetY;
             float boxW = width * scaleX;
             float boxH = height * scaleY;
+
+            // Clamp to screen bounds: boxes partially off-screen are trimmed
+            // rather than discarded, preserving detection of edge targets.
+            if (boxX < 0.0f) { boxW += boxX; boxX = 0.0f; }
+            if (boxY < 0.0f) { boxH += boxY; boxY = 0.0f; }
+            if (boxX + boxW > screenW) { boxW = screenW - boxX; }
+            if (boxY + boxH > screenH) { boxH = screenH - boxY; }
 
             if (boxW <= 0.0f || boxH <= 0.0f) continue;
             
@@ -620,7 +632,10 @@ void YoloDetector::postprocess(const ncnn::Mat& output, DetectionResult& result,
             float width = values[2];
             float height = values[3];
 
-            if (xCenter <= 1.5f) {
+            // Normalize if ALL values are in [0, 1] range (see transposed
+            // path for rationale).
+            if (xCenter <= 1.5f && yCenter <= 1.5f &&
+                width <= 1.5f && height <= 1.5f) {
                 xCenter *= modelSize;
                 yCenter *= modelSize;
                 width *= modelSize;
@@ -636,6 +651,12 @@ void YoloDetector::postprocess(const ncnn::Mat& output, DetectionResult& result,
             float boxY = (yCenter - halfH) * scaleY + offsetY;
             float boxW = width * scaleX;
             float boxH = height * scaleY;
+
+            // Clamp to screen bounds (see transposed path for rationale).
+            if (boxX < 0.0f) { boxW += boxX; boxX = 0.0f; }
+            if (boxY < 0.0f) { boxH += boxY; boxY = 0.0f; }
+            if (boxX + boxW > screenW) { boxW = screenW - boxX; }
+            if (boxY + boxH > screenH) { boxH = screenH - boxY; }
 
             if (boxW <= 0.0f || boxH <= 0.0f) continue;
 

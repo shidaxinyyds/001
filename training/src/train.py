@@ -21,8 +21,10 @@ def run_training(config_path: Path | None = None, adaptive_override: bool | None
     ensure_workspace_structure(cfg)
     params = resolve_training_params(cfg, adaptive_override)
 
-    if cfg.paths.base_model.name.lower() != "yolo26n.pt":
-        print("ERROR: base_model must be yolo26n.pt for this repository contract")
+    # Accept any YOLO26 variant (n/s/m/l/x) — the export pipeline handles all.
+    valid_models = {"yolo26n.pt", "yolo26s.pt", "yolo26m.pt", "yolo26l.pt", "yolo26x.pt"}
+    if cfg.paths.base_model.name.lower() not in valid_models:
+        print(f"ERROR: base_model must be one of {valid_models}")
         return 2
 
     if not cfg.paths.base_model.exists():

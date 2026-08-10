@@ -16,7 +16,7 @@
 
 /**
  * @file yolo_detector.h
- * @brief NCNN-based YOLOv26n inference engine with Vulkan acceleration
+ * @brief NCNN-based YOLOv26s inference engine with Vulkan acceleration
  * 
  * Handles model loading, preprocessing, inference, and post-processing.
  * Optimized for Adreno 660 GPU with FP16 storage.
@@ -42,7 +42,7 @@ struct DetectionResult {
 
 /**
  * @class YoloDetector
- * @brief YOLOv26n detector with NCNN Vulkan backend
+ * @brief YOLOv26s detector with NCNN Vulkan backend
  */
 class YoloDetector {
 public:

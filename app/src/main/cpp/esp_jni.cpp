@@ -246,18 +246,26 @@ namespace {
     // track has been seen kConfirmHits cycles in a row. Tracks that go unseen
     // for kMaxMisses cycles are dropped so targets still vanish promptly.
     //
-    // TUNING NOTES (post single-pass refactor):
-    //   kMatchIoU lowered 0.25→0.20: with single-pass full-frame the cycle
-    //     time is ~5-15ms (was ~50-90ms with 6-tile), so targets move LESS
-    //     between cycles. But the lower confidence threshold (0.45 vs 0.60)
-    //     means more jitter in box positions, so a slightly looser gate
-    //     prevents real tracks from failing to associate and resetting.
-    //   kMatchIoUConfirmed lowered 0.10→0.05: confirmed tracks need a very
-    //     loose gate so that fast-moving targets (flicks, running enemies)
-    //     don't break association and flicker off for a cycle.
-    //   kMaxMisses raised 2→3: gives confirmed tracks one more cycle of
-    //     grace to handle brief detection gaps (e.g. occlusion, motion blur)
-    //     without the box disappearing and reappearing.
+    // TUNING NOTES (YOLO26s, 320×320, mAP50=0.892):
+    //   kMatchIoU kept at 0.20: with single-pass full-frame the cycle time is
+    //     ~5-15ms, so targets move less between cycles. The lower confidence
+    //     threshold (0.38) means more jitter in box positions, so a loose
+    //     gate prevents real tracks from failing to associate and resetting.
+    //   kMatchIoUConfirmed kept at 0.05: confirmed tracks need a very loose
+    //     gate so that fast-moving targets don't break association.
+    //   kMaxMisses kept at 3: gives confirmed tracks enough grace to handle
+    //     brief detection gaps (occlusion, motion blur) without flickering.
+    //   EMA smoothing alpha lowered 0.55→0.45: the YOLO26s model produces
+    //     more stable raw detections, so we can afford more smoothing to
+    //     eliminate residual per-frame jitter without adding noticeable lag.
+    //   Velocity alpha lowered 0.50→0.40: more stable velocity estimation
+    //     improves both IoU matching and coasting accuracy.
+    //   Coast decay lowered 0.20→0.15: slower confidence decay during brief
+    //     occlusion keeps the ESP box visible longer without being misleading.
+    //   Coast min confidence raised 0.15→0.20: don't publish very faded
+    //     coasting boxes that could confuse the aimbot.
+    //   Coast max distance raised 200→300: allows coasting for faster-moving
+    //     targets that briefly get occluded.
     // ---------------------------------------------------------------------
     constexpr int   kTrackCapacity = Config::MAX_DETECTIONS;
     constexpr int   kConfirmHits   = 2;      // sightings required before publishing
@@ -376,17 +384,18 @@ namespace {
         ESP::DetectionArray confirmed;
 
         // EMA smoothing factor for confirmed track positions.
-        // 0.55 = 55% new detection, 45% previous smoothed position.
-        // Higher = more responsive but more jitter; lower = smoother but more lag.
-        constexpr float kSmoothAlpha = 0.55f;
+        // 0.45 = 45% new detection, 55% previous smoothed position.
+        // Lowered from 0.55 for YOLO26s: the model's raw detections are
+        // stable enough that more smoothing eliminates jitter without lag.
+        constexpr float kSmoothAlpha = 0.45f;
         // EMA smoothing factor for velocity (lower = more stable velocity est).
-        constexpr float kVelAlpha = 0.50f;
-        // Confidence decay per coast cycle (0.20 = loses 20% per missed cycle).
-        constexpr float kCoastConfidenceDecay = 0.20f;
+        constexpr float kVelAlpha = 0.40f;
+        // Confidence decay per coast cycle (0.15 = loses 15% per missed cycle).
+        constexpr float kCoastConfidenceDecay = 0.15f;
         // Minimum confidence to keep publishing a coasting track.
-        constexpr float kCoastMinConfidence = 0.15f;
+        constexpr float kCoastMinConfidence = 0.20f;
         // Maximum coasting distance in pixels (safety: don't coast across screen).
-        constexpr float kCoastMaxDistance = 200.0f;
+        constexpr float kCoastMaxDistance = 300.0f;
 
         for (int b = 0; b < boxes.size(); ++b) {
             const ESP::BoundingBox& box = boxes[b];
@@ -570,14 +579,14 @@ namespace {
                     // scale-to-720p → full-frame letterbox → resize-to-640).
                     //
                     // The runtime MUST use the same FOV: letterbox the entire
-                    // 1280×720 capture into the 256×256 model input. Both
+                    // 1280×720 capture into the 320×320 model input. Both
                     // training and inference see 100% of the game screen
                     // because games run fullscreen. Using center-crop mode
                     // (fullFrame=false) would only see the central 320×320
                     // region, missing edge enemies the model was trained on.
                     //
                     // Full-frame mode (fullFrame=true) matches training exactly:
-                    //   1280×720 → letterbox 256×256 → infer
+                    //   1280×720 → letterbox 320×320 → infer
                     // ----------------------------------------------------------------
                     if (g_detector->detect(frame.hardwareBuffer, result, Config::CROP_SIZE, true)) {
                         const auto inferEnd = std::chrono::steady_clock::now();
