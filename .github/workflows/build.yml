@@ -37,15 +37,8 @@ jobs:
       # ============================================================
       #  2. 配置 Java 环境
       #     SDK Tools v16.0 要求 JDK 17+, AGP 3.6.1 需要 JDK 11
-      #     先装 JDK 17 (SDK 用), 再装 JDK 11 (Gradle 用)
+      #     先装 JDK 11, 再装 JDK 17 (最后安装的成为默认 JAVA_HOME)
       # ============================================================
-      - name: 配置 JDK 17 (SDK 工具需要)
-        uses: actions/setup-java@v4
-        id: jdk17
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
       - name: 配置 JDK 11 (Gradle/AGP 3.6.1 需要)
         uses: actions/setup-java@v4
         id: jdk11
@@ -53,13 +46,23 @@ jobs:
           java-version: '11'
           distribution: 'temurin'
 
+      - name: 配置 JDK 17 (SDK 工具需要, 设为默认)
+        uses: actions/setup-java@v4
+        id: jdk17
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: 确认 Java 版本
+        run: |
+          echo "JAVA_HOME=$JAVA_HOME"
+          java -version
+
       # ============================================================
-      #  3. 配置 Android SDK (用 JDK 17)
+      #  3. 配置 Android SDK (此时 JAVA_HOME 指向 JDK 17)
       # ============================================================
       - name: 配置 Android SDK
         uses: android-actions/setup-android@v3
-        env:
-          JAVA_HOME: ${{ steps.jdk17.outputs.path }}
         with:
           packages: |
             platforms;android-29
@@ -108,10 +111,9 @@ jobs:
       # ============================================================
       - name: 编译 APK (独立悬浮窗模式)
         if: github.event.inputs.build_mode != 'direct_install'
-        env:
-          JAVA_HOME: ${{ steps.jdk11.outputs.path }}
         run: |
           echo "===== 独立悬浮窗模式编译 ====="
+          export JAVA_HOME="${{ steps.jdk11.outputs.path }}"
           echo "JAVA_HOME=$JAVA_HOME"
           java -version
           chmod +x gradlew
