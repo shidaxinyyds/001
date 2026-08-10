@@ -32,6 +32,9 @@ android {
             path file('src/main/jni/Android.mk')
         }
     }
+    packagingOptions {
+        doNotStrip '**/*.so'
+    }
 }
 
 dependencies {
