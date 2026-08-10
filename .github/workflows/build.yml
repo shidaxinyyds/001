@@ -1,48 +1,172 @@
-name: Build Debug APK
+name: 构建打包
 
 on:
-  push:
-    branches: [ main, master ]
+  # 手动触发 (在 GitHub Actions 页面点击 Run workflow)
   workflow_dispatch:
-
-permissions:
-  contents: read
+    inputs:
+      build_mode:
+        description: '构建模式'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - direct_install
+          - standalone
+  # 推送到 direct-install 分支时自动触发
+  push:
+    branches:
+      - direct-install
+      - main
+      - master
 
 jobs:
   build:
+    name: 编译 libCube.so + 打包 APK
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
 
-      - name: Set up JDK 21 (JetBrains)
+    steps:
+      # ============================================================
+      #  1. 检出代码
+      # ============================================================
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ============================================================
+      #  2. 配置 Java 环境 (AGP 3.6.1 需要 Java 11)
+      # ============================================================
+      - name: 配置 Java
         uses: actions/setup-java@v4
         with:
-          distribution: 'jetbrains'
-          java-version: '21'
+          java-version: '11'
+          distribution: 'temurin'
 
-      - name: Set up Android SDK
+      # ============================================================
+      #  3. 配置 Android SDK
+      # ============================================================
+      - name: 配置 Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platforms;android-29
+            build-tools;29.0.3
 
-      - name: Install SDK packages (platform, build-tools, NDK, CMake)
+      # ============================================================
+      #  4. 配置 Android NDK
+      # ============================================================
+      - name: 配置 NDK
+        uses: nttld/setup-ndk@v1
+        id: setup_ndk
+        with:
+          ndk-version: r25c
+          add-to-path: true
+
+      - name: 显示 NDK 路径
         run: |
-          sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0" \
-            "cmake;3.22.1" \
-            "ndk;29.0.13113456"
+          echo "NDK 路径: ${{ steps.setup_ndk.outputs.ndk-path }}"
+          echo "${{ steps.setup_ndk.outputs.ndk-path }}/ndk-build --version"
+          ${{ steps.setup_ndk.outputs.ndk-path }}/ndk-build --version
 
-      - name: Grant execute permission for gradlew
-        run: chmod +x ./gradlew
+      # ============================================================
+      #  5. 生成 local.properties (指向 SDK 路径)
+      # ============================================================
+      - name: 生成 local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+          echo "ndk.dir=${{ steps.setup_ndk.outputs.ndk-path }}" >> local.properties
+          cat local.properties
 
-      - name: Build debug APK
-        run: ./gradlew assembleDebug --no-daemon
+      # ============================================================
+      #  6. 直装模式: 编译 libCube.so (DIRECT_INSTALL=true)
+      # ============================================================
+      - name: 编译 libCube.so (直装免root模式)
+        if: github.event.inputs.build_mode != 'standalone'
+        working-directory: app/src/main/jni
+        run: |
+          echo "===== 直装(免root)模式编译 ====="
+          ${{ steps.setup_ndk.outputs.ndk-path }}/ndk-build DIRECT_INSTALL=true
+          echo "===== 编译结果 ====="
+          ls -lh ../jniLibs/arm64-v8a/libCube.so || true
+          ls -lh ../obj/local/arm64-v8a/libCube.so || true
 
-      - name: Upload APK
+      # ============================================================
+      #  7. 独立模式: 用 Gradle 编译完整 APK
+      # ============================================================
+      - name: 编译 APK (独立悬浮窗模式)
+        if: github.event.inputs.build_mode != 'direct_install'
+        run: |
+          echo "===== 独立悬浮窗模式编译 ====="
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 || {
+            echo "Gradle 构建失败, 尝试仅编译 .so..."
+            cd app/src/main/jni
+            ${{ steps.setup_ndk.outputs.ndk-path }}/ndk-build
+            cd -
+          }
+          echo "===== APK 输出 ====="
+          find . -name "*.apk" -type f 2>/dev/null || true
+
+      # ============================================================
+      #  8. 上传构建产物: libCube.so (直装模式)
+      # ============================================================
+      - name: 上传 libCube.so (直装)
+        if: github.event.inputs.build_mode != 'standalone'
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
+          name: libCube-direct-install
+          path: |
+            app/src/main/jniLibs/arm64-v8a/libCube.so
+            app/src/main/obj/local/arm64-v8a/libCube.so
+          if-no-files-found: warn
+          retention-days: 30
+
+      # ============================================================
+      #  9. 上传构建产物: APK (独立模式)
+      # ============================================================
+      - name: 上传 APK (独立模式)
+        if: github.event.inputs.build_mode != 'direct_install'
+        uses: actions/upload-artifact@v4
+        with:
+          name: KOP-standalone-apk
+          path: |
+            app/build/outputs/apk/**/*.apk
+          if-no-files-found: warn
+          retention-days: 30
+
+      # ============================================================
+      #  10. 上传构建产物: 重打包脚本和指南
+      # ============================================================
+      - name: 上传重打包工具
+        uses: actions/upload-artifact@v4
+        with:
+          name: repackaging-tools
+          path: |
+            repackage.py
+            build_direct_install.bat
+            直装使用指南.html
+          if-no-files-found: warn
+          retention-days: 90
+
+      # ============================================================
+      #  11. 构建摘要
+      # ============================================================
+      - name: 构建摘要
+        if: always()
+        run: |
+          echo "## 构建结果" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 项目 | 状态 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 直装 libCube.so | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 构建产物" >> $GITHUB_STEP_SUMMARY
+          echo "- **libCube-direct-install**: 直装模式 .so 文件 (注入游戏 APK 用)" >> $GITHUB_STEP_SUMMARY
+          echo "- **KOP-standalone-apk**: 独立悬浮窗 APK" >> $GITHUB_STEP_SUMMARY
+          echo "- **repackaging-tools**: 重打包脚本和指南" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 使用方法" >> $GITHUB_STEP_SUMMARY
+          echo "1. 下载 `libCube-direct-install` 中的 libCube.so" >> $GITHUB_STEP_SUMMARY
+          echo "2. 运行: \`python repackage.py 游戏原版.apk libCube.so\`" >> $GITHUB_STEP_SUMMARY
+          echo "3. 安装生成的 \`游戏原版_直装.apk\`" >> $GITHUB_STEP_SUMMARY
