@@ -35,8 +35,6 @@ jobs:
           pwd
           echo "=== NDK path ==="
           echo "$ANDROID_NDK_HOME"
-          ls -la "$ANDROID_NDK_HOME/ndk-build"
-          chmod +x "$ANDROID_NDK_HOME/ndk-build"
           echo "=== jni/ directory ==="
           ls -la jni/
           echo "=== Source files ==="
@@ -44,16 +42,31 @@ jobs:
           echo "=== Prebuilt libraries ==="
           ls -la jni/src/CPUaffinity/libPikachu.a jni/include/lib/libcurl.a
           echo "=== Running ndk-build ==="
+          set +e
           "$ANDROID_NDK_HOME/ndk-build" \
             NDK_PROJECT_PATH=. \
             APP_BUILD_SCRIPT=jni/Android.mk \
             NDK_APPLICATION_MK=jni/Application.mk \
             NDK_OUT=build/ndk/obj \
             NDK_LIBS_OUT=build/ndk/libs \
-            V=1
-          echo "=== ndk-build exit code: $? ==="
+            V=1 2>&1 | tee ndk-build.log
+          NDK_EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          echo "=== ndk-build exit code: $NDK_EXIT_CODE ==="
           echo "=== Build output ==="
           find build/ndk -type f 2>/dev/null || echo "No build output found"
+          if [ $NDK_EXIT_CODE -ne 0 ]; then
+            echo "ndk-build failed! Uploading log as artifact."
+            exit 1
+          fi
+
+      - name: Upload ndk-build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ndk-build-log
+          path: ndk-build.log
+          retention-days: 7
 
       - name: Copy native binary to jniLibs
         run: |
