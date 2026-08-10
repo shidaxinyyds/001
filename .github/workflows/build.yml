@@ -59,14 +59,16 @@ jobs:
           java -version
 
       # ============================================================
-      #  3. 配置 Android SDK (此时 JAVA_HOME 指向 JDK 17)
+      #  3. 配置 Android SDK (用预装 sdkmanager 手动安装)
       # ============================================================
       - name: 配置 Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: |
-            platforms;android-29
-            build-tools;29.0.3
+        run: |
+          echo "JAVA_HOME=$JAVA_HOME"
+          java -version
+          echo "SDK Root: $ANDROID_SDK_ROOT"
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platforms;android-29" "build-tools;29.0.3" 2>&1 || true
+          echo "SDK 配置完成"
 
       # ============================================================
       #  4. 配置 Android NDK
