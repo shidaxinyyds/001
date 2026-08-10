@@ -179,7 +179,7 @@ bool YoloDetector::detect(AHardwareBuffer* buffer, DetectionResult& result) {
     // (extract_frames.py: full-frame letterbox → resize to model input).
     // Both training and inference use 100% of the game screen (1280×720)
     // letterboxed to the model input square, because games run fullscreen.
-    // Using fullFrame=false (center crop) would only see the central 320×320
+    // Using fullFrame=false (center crop) would only see the central 640×640
     // region, missing enemies at screen edges that the model was trained to detect.
     return detect(buffer, result, Config::CROP_SIZE, true);
 }
@@ -293,7 +293,7 @@ bool YoloDetector::preprocess(AHardwareBuffer* buffer, ncnn::Mat& inputMat, int 
     // The model was trained with Ultralytics' default letterbox resize:
     // scale = min(modelW/srcW, modelH/srcH), resize, then pad to square with
     // value 114. The OLD inference code used from_pixels_resize() which does a
-    // STRETCH resize (ignoring aspect ratio). For a 1280x720 capture → 320x320
+    // STRETCH resize (ignoring aspect ratio). For a 1280x720 capture → 640x640
     // model input, that's a 16:9→1:1 distortion the model never saw in training,
     // which silently degrades mAP by 10-20% and causes both missed detections
     // (distorted targets fall below threshold) and phantom detections (distorted
@@ -468,6 +468,16 @@ void YoloDetector::postprocess(const ncnn::Mat& output, DetectionResult& result,
         }
     }
 
+    // ------------------------------------------------------------------
+    // Periodic debug logging: dump output dimensions and detection stats
+    // every 120 frames to help diagnose runtime issues without flooding
+    // logcat. Logs: output shape, letterbox params, raw detection count,
+    // and first few detection values.
+    // ------------------------------------------------------------------
+    static std::atomic<int> s_debugFrameCounter{0};
+    int frameIdx = s_debugFrameCounter.fetch_add(1, std::memory_order_relaxed);
+    bool debugLog = (frameIdx % 120 == 0);
+
     // Cache coordinate mapping scalars (Math Optimization)
     float captureWidth = static_cast<float>(currentCaptureWidth_ > 0 ? currentCaptureWidth_ : Config::CAPTURE_WIDTH);
     float captureHeight = static_cast<float>(currentCaptureHeight_ > 0 ? currentCaptureHeight_ : Config::CAPTURE_HEIGHT);
@@ -481,7 +491,7 @@ void YoloDetector::postprocess(const ncnn::Mat& output, DetectionResult& result,
     if (fullFrame) {
         // Letterbox-aware coordinate mapping.
         //
-        // Model input (320x320) contains the resized content at offset
+        // Model input (640x640) contains the resized content at offset
         // (letterboxPadX_, letterboxPadY_) with size (letterboxResizedW_ x
         // letterboxResizedH_). To map a model-space coordinate back to screen
         // space we must:
@@ -502,6 +512,15 @@ void YoloDetector::postprocess(const ncnn::Mat& output, DetectionResult& result,
         scaleY  = screenH / rH;
         offsetX = -static_cast<float>(letterboxPadX_) * scaleX;
         offsetY = -static_cast<float>(letterboxPadY_) * scaleY;
+
+        if (debugLog) {
+            LOGI("Postprocess: out=%dx%dx%d boxes=%d vals=%d transposed=%d | "
+                 "letterbox: resize=%dx%d pad=%d,%d | screen=%.0fx%.0f | "
+                 "scale=%.2f,%.2f offset=%.1f,%.1f confThr=%.2f",
+                 output.w, output.h, output.c, numBoxes, numValues, transposed,
+                 letterboxResizedW_, letterboxResizedH_, letterboxPadX_, letterboxPadY_,
+                 screenW, screenH, scaleX, scaleY, offsetX, offsetY, confThreshold);
+        }
     } else {
         float modelToCrop = static_cast<float>(std::max(32, currentActualCropSize_)) / modelSize;
         float captureToScreenX = screenW / captureWidth;
@@ -674,6 +693,17 @@ void YoloDetector::postprocess(const ncnn::Mat& output, DetectionResult& result,
     
     if (result.boxes.size() > 1) {
         applyNMS(result.boxes);
+    }
+
+    if (debugLog) {
+        if (result.boxes.size() > 0) {
+            const auto& b = result.boxes[0];
+            LOGI("Postprocess result: %zu boxes after NMS | "
+                 "best: x=%.0f y=%.0f w=%.0f h=%.0f conf=%.3f cls=%d",
+                 result.boxes.size(), b.x, b.y, b.width, b.height, b.confidence, b.classId);
+        } else {
+            LOGW("Postprocess result: 0 boxes (no detections above threshold %.2f)", confThreshold);
+        }
     }
 }
 

@@ -77,6 +77,7 @@ void AimbotController::stop() {
         m_aimThread.join();
     }
     stopAiming();
+    stopAutoFire();
 }
 
 void AimbotController::updateTargets(const ESP::BoundingBox* detections, int count) {
@@ -84,6 +85,7 @@ void AimbotController::updateTargets(const ESP::BoundingBox* detections, int cou
 
     if (IsImGuiMenuVisible()) {
         stopAiming();
+        stopAutoFire();
         {
             std::lock_guard<std::mutex> lock(m_trackerMutex);
             m_tracker.reset();
@@ -97,6 +99,9 @@ void AimbotController::updateTargets(const ESP::BoundingBox* detections, int cou
     const int enemyCount = CountEnemyDetections(detections, count);
     if (enemyCount == 0 && m_isAiming) {
         stopAiming();
+    }
+    if (enemyCount == 0 && m_autoFireState != AutoFireState::IDLE) {
+        stopAutoFire();
     }
 
     {
@@ -121,6 +126,7 @@ void AimbotController::aimLoop() {
 
         if (IsImGuiMenuVisible()) {
             if (m_isAiming) stopAiming();
+            if (m_autoFireState != AutoFireState::IDLE) stopAutoFire();
             {
                 std::lock_guard<std::mutex> lock(m_trackerMutex);
                 m_tracker.reset();
@@ -131,6 +137,7 @@ void AimbotController::aimLoop() {
 
         if (!settingsSnapshot.aimbotEnabled) {
             if (m_isAiming) stopAiming();
+            if (m_autoFireState != AutoFireState::IDLE) stopAutoFire();
             // Wait until enabled or stopped  -  no busy polling.
             std::unique_lock<std::mutex> lk(m_trackerMutex);
             m_targetUpdateCv.wait_for(lk, std::chrono::milliseconds(120));
@@ -146,8 +153,15 @@ void AimbotController::aimLoop() {
 
         if (hasTarget) {
             aimAt(bestTarget);
+            // Auto-fire: tap fire button when target meets confidence + FOV criteria
+            if (settingsSnapshot.autoFireEnabled) {
+                tryAutoFire(bestTarget, settingsSnapshot);
+            } else if (m_autoFireState != AutoFireState::IDLE) {
+                stopAutoFire();
+            }
         } else {
             if (m_isAiming) stopAiming();
+            if (m_autoFireState != AutoFireState::IDLE) stopAutoFire();
         }
 
         // Pace the loop: target aimbotFps as the maximum rate, but wake up
@@ -577,4 +591,82 @@ void AimbotController::setScreenSize(int width, int height) {
 
 bool AimbotController::isAiming() const {
     return m_isAiming;
+}
+
+// ============================================================================
+// Auto-fire (trigger bot) implementation
+//
+// State machine:
+//   IDLE → (target confidence ≥ threshold AND within aim FOV AND cooldown elapsed)
+//        → FIRE_DOWN: touchDown at fire button position
+//   FIRE_DOWN → (hold time elapsed)
+//        → IDLE: touchUp, start cooldown timer
+//
+// The fire tap uses a SEPARATE touch slot (FIRE_SLOT=8) from the aimbot
+// (AIM_SLOT=9), so aiming and firing can happen simultaneously without
+// one cancelling the other.
+//
+// Safety: auto-fire only activates when:
+//   1. Aimbot is enabled (aimbotEnabled=true) — auto-fire is a sub-feature
+//   2. A valid target exists with confidence ≥ autoFireConfidence
+//   3. The target is within the aim FOV radius from screen center
+//   4. The ImGui menu is not visible
+// ============================================================================
+
+void AimbotController::tryAutoFire(const TrackedTarget& target, const UnifiedSettings& settings) {
+    if (!m_touch) return;
+
+    const auto now = std::chrono::steady_clock::now();
+
+    if (m_autoFireState == AutoFireState::IDLE) {
+        // Check confidence threshold
+        if (target.confidence < settings.autoFireConfidence) return;
+
+        // Check FOV: target must be within aim FOV from screen center
+        const ESP::Vector2 aimPoint = target.getAimPoint(settings.headPriority, settings.headOffset);
+        const float dx = aimPoint.x - m_crosshairX;
+        const float dy = aimPoint.y - m_crosshairY;
+        const float distSq = dx * dx + dy * dy;
+        const float aimFov = (settings.aimFovRadius > 0.0f) ? settings.aimFovRadius : settings.fovRadius;
+        if (distSq > aimFov * aimFov) return;
+
+        // Check cooldown: enough time passed since last fire release
+        const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - m_autoFireTimer).count();
+        if (elapsedMs < static_cast<int64_t>(settings.autoFireTapInterval)) return;
+
+        // Fire! Press the fire button
+        if (settings.touchBackend == 2) {
+            m_touch->setBackend(TouchBackend::ACCESSIBILITY);
+        } else if (settings.touchBackend == 1) {
+            m_touch->setBackend(TouchBackend::SHIZUKU);
+        } else {
+            m_touch->setBackend(TouchBackend::UINPUT);
+        }
+        m_touch->touchDown(FIRE_SLOT, settings.autoFireFireX, settings.autoFireFireY);
+        m_autoFireState = AutoFireState::FIRE_DOWN;
+        m_autoFireTimer = now;
+        LOGI("Auto-fire: DOWN at (%.0f, %.0f) conf=%.2f", 
+             settings.autoFireFireX, settings.autoFireFireY, target.confidence);
+
+    } else if (m_autoFireState == AutoFireState::FIRE_DOWN) {
+        // Check if hold time elapsed
+        const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - m_autoFireTimer).count();
+        if (elapsedMs >= static_cast<int64_t>(settings.autoFireHoldTime)) {
+            // Release fire button
+            m_touch->touchUp(FIRE_SLOT);
+            m_autoFireState = AutoFireState::IDLE;
+            m_autoFireTimer = now;  // Start cooldown timer
+            LOGI("Auto-fire: UP (held %lld ms)", (long long)elapsedMs);
+        }
+    }
+}
+
+void AimbotController::stopAutoFire() {
+    if (m_autoFireState != AutoFireState::IDLE && m_touch) {
+        m_touch->touchUp(FIRE_SLOT);
+        LOGI("Auto-fire: stopped (released slot %d)", FIRE_SLOT);
+    }
+    m_autoFireState = AutoFireState::IDLE;
 }

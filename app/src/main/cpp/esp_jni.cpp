@@ -246,7 +246,7 @@ namespace {
     // track has been seen kConfirmHits cycles in a row. Tracks that go unseen
     // for kMaxMisses cycles are dropped so targets still vanish promptly.
     //
-    // TUNING NOTES (YOLO26s, 320×320, mAP50=0.892):
+    // TUNING NOTES (YOLO26s, 640×640, mAP50=0.889):
     //   kMatchIoU kept at 0.20: with single-pass full-frame the cycle time is
     //     ~5-15ms, so targets move less between cycles. The lower confidence
     //     threshold (0.38) means more jitter in box positions, so a loose
@@ -579,14 +579,14 @@ namespace {
                     // scale-to-720p → full-frame letterbox → resize-to-640).
                     //
                     // The runtime MUST use the same FOV: letterbox the entire
-                    // 1280×720 capture into the 320×320 model input. Both
+                    // 1280×720 capture into the 640×640 model input. Both
                     // training and inference see 100% of the game screen
                     // because games run fullscreen. Using center-crop mode
-                    // (fullFrame=false) would only see the central 320×320
+                    // (fullFrame=false) would only see the central 640×640
                     // region, missing edge enemies the model was trained on.
                     //
                     // Full-frame mode (fullFrame=true) matches training exactly:
-                    //   1280×720 → letterbox 320×320 → infer
+                    //   1280×720 → letterbox 640×640 → infer
                     // ----------------------------------------------------------------
                     if (g_detector->detect(frame.hardwareBuffer, result, Config::CROP_SIZE, true)) {
                         const auto inferEnd = std::chrono::steady_clock::now();

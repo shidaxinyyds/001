@@ -4,6 +4,21 @@ All notable changes to AimBuddy. Format inspired by [Keep a Changelog](https://k
 
 Dates are in ISO-8601 (YYYY-MM-DD).
 
+## [0.3.0-beta.23] - 2026-08-10
+
+检测输入分辨率 320→640 并新增自动开火（trigger bot）功能。
+
+### Changed
+- **模型输入 `MODEL_INPUT_SIZE` 320→640**：训练（`runtime_imgsz=640`）与推理统一 640×640，消除此前 320×320 推理丢失小/远目标的细节失配（mAP50=0.889）。
+- **FP16 全关**（PACKED/STORAGE/ARITHMETIC → false）：模型导出为 FP32（`training/config half=false`），规避部分 Adreno GPU 在 YOLO26 注意力层 FP16 数值错误。
+- **自动开火（trigger bot）新功能**：独立触摸槽 FIRE_SLOT=8（与瞄准 AIM_SLOT=9 分离）。目标置信度≥`autoFireConfidence`(0.55)、位于 aim FOV 内、冷却(100ms)到达时按下开火键，保持 40ms 后释放。菜单可见/无敌人/aimbot 禁用/无目标时均 `stopAutoFire()`。UI 新增 Auto-Fire 设置区（开火键坐标、置信度、间隔、按住时长）。
+- **settings magic 0xE5BA100B→0xE5BA100C**：新增 `showFovIndicator` 与 autoFire* 字段，旧 `settings.bin` 被拒重置。
+- **UI 重构**：`ToggleButton` 风格（绿/灰按钮替代 Checkbox）+ 分组（主开关/Aim/Auto-Fire/Display/Advanced 折叠）；新增 `showFovIndicator` 开关控制准星与 FOV 区域绘制。
+- **后处理调试日志**：每 120 帧 dump 输出维度、letterbox 参数、检测统计到 logcat 便于诊断。
+
+### 版本号
+- 因远程已存在 `v0.3.0-beta.22` 标签（指向 2b0825c），本次升到 beta.23 以触发新的 CI 构建与 tag，避免 detect-version 因标签已存在而跳过出包。
+
 ## [0.3.0-beta.22] - 2026-08-10
 
 切换检测模型：YOLOv26n (256) → YOLOv26s (320)，并相应调参。

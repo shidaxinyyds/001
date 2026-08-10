@@ -10,6 +10,7 @@
 #include <atomic>
 #include <thread>
 #include <vector>
+#include <chrono>
 #include "../detector/bounding_box.h"
 
 class AimbotController {
@@ -71,6 +72,18 @@ private:
                           float& inOutX, float& inOutY);
                         
     void applyMovement(float moveX, float moveY, const UnifiedSettings& settings);
+
+    // Auto-fire (trigger bot) state machine
+    static constexpr int FIRE_SLOT = 8;  // Separate from aim slot (9)
+    enum class AutoFireState : uint8_t {
+        IDLE = 0,       // Waiting for target / cooldown
+        FIRE_DOWN = 1,  // Fire button pressed, waiting to release
+    };
+    AutoFireState m_autoFireState = AutoFireState::IDLE;
+    std::chrono::steady_clock::time_point m_autoFireTimer;
+    
+    void tryAutoFire(const TrackedTarget& target, const UnifiedSettings& settings);
+    void stopAutoFire();
 };
 
 #endif

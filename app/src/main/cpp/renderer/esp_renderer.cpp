@@ -240,43 +240,46 @@ void ESPRenderer::drawESPBoxes(const DetectionResult& result) {
     float screenW = io.DisplaySize.x;
     float screenH = io.DisplaySize.y;
     
-    // Draw screen center crosshair
+    // Draw screen center crosshair + FOV zone box (toggleable, purely visual)
     float centerX = screenW * 0.5f;
     float centerY = screenH * 0.5f;
-    float crossSize = 11.5f;
-    ImU32 crosshairColor = IM_COL32(58, 156, 255, 240);
-    drawList->AddLine(ImVec2(centerX - crossSize, centerY), ImVec2(centerX + crossSize, centerY), crosshairColor, 3.0f);
-    drawList->AddLine(ImVec2(centerX, centerY - crossSize), ImVec2(centerX, centerY + crossSize), crosshairColor, 3.0f);
-    
+
     const float espFovRadius = g_settings.fovRadius;
     const float aimFovRadius = std::min(
         (g_settings.aimFovRadius > 0.0f) ? g_settings.aimFovRadius : g_settings.fovRadius,
         espFovRadius
     );
 
-    int captureWidth = Config::CAPTURE_WIDTH;
-    int captureHeight = Config::CAPTURE_HEIGHT;
-    GetCaptureSize(&captureWidth, &captureHeight);
-    const int logicalScreenWidth = (g_settings.screenWidth > 0)
-        ? g_settings.screenWidth
-        : static_cast<int>(screenW);
-    const ESP::DetectionZoneMetrics zone = ESP::ComputeDetectionZoneMetrics(
-        espFovRadius,
-        logicalScreenWidth,
-        screenW,
-        screenH,
-        captureWidth,
-        captureHeight
-    );
+    if (g_settings.showFovIndicator) {
+        float crossSize = 11.5f;
+        ImU32 crosshairColor = IM_COL32(58, 156, 255, 240);
+        drawList->AddLine(ImVec2(centerX - crossSize, centerY), ImVec2(centerX + crossSize, centerY), crosshairColor, 3.0f);
+        drawList->AddLine(ImVec2(centerX, centerY - crossSize), ImVec2(centerX, centerY + crossSize), crosshairColor, 3.0f);
 
-    const ImU32 espFovColor = IM_COL32(40, 140, 255, 210);
-    const ImVec2 zoneTl(centerX - zone.halfWidthPx, centerY - zone.halfHeightPx);
-    const ImVec2 zoneBr(centerX + zone.halfWidthPx, centerY + zone.halfHeightPx);
-    ESP::ImGuiHelper::DrawBox3D(drawList, zoneTl, zoneBr, espFovColor, 2.2f, IM_COL32(10, 20, 40, 140));
-    ESP::ImGuiHelper::DrawBoxCorners(drawList, zoneTl, zoneBr, espFovColor, 2.4f, 16.0f);
+        int captureWidth = Config::CAPTURE_WIDTH;
+        int captureHeight = Config::CAPTURE_HEIGHT;
+        GetCaptureSize(&captureWidth, &captureHeight);
+        const int logicalScreenWidth = (g_settings.screenWidth > 0)
+            ? g_settings.screenWidth
+            : static_cast<int>(screenW);
+        const ESP::DetectionZoneMetrics zone = ESP::ComputeDetectionZoneMetrics(
+            espFovRadius,
+            logicalScreenWidth,
+            screenW,
+            screenH,
+            captureWidth,
+            captureHeight
+        );
 
-    if (g_settings.aimbotEnabled) {
-        drawList->AddCircle(ImVec2(centerX, centerY), aimFovRadius, IM_COL32(255, 60, 60, 220), 48, 2.2f);
+        const ImU32 espFovColor = IM_COL32(40, 140, 255, 210);
+        const ImVec2 zoneTl(centerX - zone.halfWidthPx, centerY - zone.halfHeightPx);
+        const ImVec2 zoneBr(centerX + zone.halfWidthPx, centerY + zone.halfHeightPx);
+        ESP::ImGuiHelper::DrawBox3D(drawList, zoneTl, zoneBr, espFovColor, 2.2f, IM_COL32(10, 20, 40, 140));
+        ESP::ImGuiHelper::DrawBoxCorners(drawList, zoneTl, zoneBr, espFovColor, 2.4f, 16.0f);
+
+        if (g_settings.aimbotEnabled) {
+            drawList->AddCircle(ImVec2(centerX, centerY), aimFovRadius, IM_COL32(255, 60, 60, 220), 48, 2.2f);
+        }
     }
     
     int count = result.boxes.size();
@@ -415,230 +418,171 @@ void ESPRenderer::drawESPBoxes(const DetectionResult& result) {
 
 void ESPRenderer::drawMenu() {
     ImGuiIO& io = ImGui::GetIO();
-    
+
     // Scale menu size based on screen dimensions
-    float scale = io.DisplaySize.y / 2400.0f;  // Reference scale
-    float menuWidth = 450.0f * scale;  // Increased width for aimbot settings
-    float menuHeight = 800.0f * scale;  // Increased height for scrolling
-    
+    float scale = io.DisplaySize.y / 2400.0f;
+    scale = std::max(0.5f, std::min(2.0f, scale));
+    float menuWidth = 420.0f * scale;
+    float menuHeight = 780.0f * scale;
+
     // Center menu on screen
     ImVec2 menuSize(menuWidth, menuHeight);
     ImVec2 menuPos((io.DisplaySize.x - menuSize.x) * 0.5f,
                    (io.DisplaySize.y - menuSize.y) * 0.5f);
-    
+
     ImGui::SetNextWindowPos(menuPos, ImGuiCond_Always);
     ImGui::SetNextWindowSize(menuSize, ImGuiCond_Always);
-    
-    ImGuiWindowFlags windowFlags = ImGuiWindowFlags_NoResize | 
+
+    ImGuiWindowFlags windowFlags = ImGuiWindowFlags_NoResize |
                                    ImGuiWindowFlags_NoCollapse |
                                    ImGuiWindowFlags_NoMove;
-    
+
+    // ------------------------------------------------------------------
+    // Button-style toggle helper: renders a full-width button that is
+    // green when ON and dark gray when OFF, with the state text visible.
+    // Replaces all Checkbox calls for a cleaner, touch-friendly look.
+    // ------------------------------------------------------------------
+    auto ToggleButton = [&](const char* label, bool& value, float btnHeight = 44.0f) {
+        if (value) {
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.18f, 0.60f, 0.27f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.22f, 0.70f, 0.32f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.15f, 0.50f, 0.22f, 1.0f));
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.32f, 0.32f, 0.36f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.40f, 0.40f, 0.44f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.28f, 0.28f, 0.32f, 1.0f));
+        }
+        const char* stateText = value ? "ON" : "OFF";
+        char btnLabel[160];
+        snprintf(btnLabel, sizeof(btnLabel), "%s  [ %s ]##tgl_%s", label, stateText, label);
+        if (ImGui::Button(btnLabel, ImVec2(-1.0f, btnHeight * scale))) {
+            value = !value;
+        }
+        ImGui::PopStyleColor(3);
+    };
+
     if (ImGui::Begin("##ESP_Settings", nullptr, windowFlags)) {
         // Title
-        ImGui::TextUnformatted("ESP Configuration");
+        ImGui::SetWindowFontScale(1.15f * scale);
+        ImGui::TextUnformatted("AimBuddy");
+        ImGui::SetWindowFontScale(1.0f * scale);
         ImGui::Separator();
-        
-        // Color adjustment section
-        ImGui::TextUnformatted("Box Color");
-        float r = g_settings.boxColorR;
-        float g = g_settings.boxColorG;
-        float b = g_settings.boxColorB;
-        
-        if (ImGui::SliderFloat("##Red", &r, 0.0f, 1.0f)) {
-            g_settings.boxColorR = r;
-        }
-        if (ImGui::SliderFloat("##Green", &g, 0.0f, 1.0f)) {
-            g_settings.boxColorG = g;
-        }
-        if (ImGui::SliderFloat("##Blue", &b, 0.0f, 1.0f)) {
-            g_settings.boxColorB = b;
-        }
-        
-        // Color preview
+
+        // ================================================================
+        // Section 1: Main Toggles
+        // ================================================================
+        ToggleButton("Enable Aimbot",    g_settings.aimbotEnabled);
         ImGui::Spacing();
-        ImGui::TextUnformatted("Color Preview:");
-        ImGui::SameLine();
-        ImGui::ColorButton("##Preview", ImVec4(r, g, b, 1.0f), 
-                          ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_NoPicker, 
-                          ImVec2(100.0f, 30.0f));
-        
+        ToggleButton("Enable Auto-Fire", g_settings.autoFireEnabled);
+
         ImGui::Separator();
-        
-        // Box thickness
-        int thickness = g_settings.boxThickness;
-        if (ImGui::SliderInt("Box Thickness", &thickness, 1, 5)) {
-            g_settings.boxThickness = std::max(1, std::min(thickness, 5));
-        }
-        
-        ImGui::Separator();
-        
-        // Confidence threshold
-        float threshold = g_settings.confidenceThreshold;
-        if (ImGui::SliderFloat("Confidence Threshold", &threshold, 0.1f, 0.95f, "%.2f")) {
-            g_settings.confidenceThreshold = threshold;
-        }
-        
-        // Detection FOV Radius (dynamic crop size optimization)
-        if (float fovRadius = g_settings.fovRadius;
-            ImGui::SliderFloat("Detection FOV", &fovRadius, 200.0f, 600.0f, "%.0f px")) {
-            g_settings.fovRadius = fovRadius;
-            if (g_settings.aimFovRadius > g_settings.fovRadius) {
-                g_settings.aimFovRadius = g_settings.fovRadius;
+
+        // ================================================================
+        // Section 2: Aim Settings (shown when aimbot is on)
+        // ================================================================
+        if (g_settings.aimbotEnabled) {
+            ImGui::TextDisabled("Aim Settings");
+
+            ImGui::SliderFloat("Aim Speed",    &g_settings.aimSpeed,    0.1f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Smoothness",   &g_settings.smoothness,  0.0f, 1.0f, "%.2f");
+
+            const char* priorities[] = {"Closest to Crosshair", "Distance", "Confidence"};
+            int currentPriority = g_settings.targetPriority;
+            if (ImGui::Combo("Target Priority", &currentPriority, priorities, 3)) {
+                g_settings.targetPriority = currentPriority;
             }
-        }
-        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), 
-            "Smaller = faster (experimental)");
-        
-        ImGui::Separator();
-        
-        // Display toggles
-        ImGui::TextUnformatted("Display Options");
-        bool showFPS = g_settings.showFPS;
-        if (ImGui::Checkbox("Show FPS", &showFPS)) {
-            g_settings.showFPS = showFPS;
-        }
-        
-        bool showCount = g_settings.showDetectionCount;
-        if (ImGui::Checkbox("Show Detection Count", &showCount)) {
-            g_settings.showDetectionCount = showCount;
+
+            ImGui::Spacing();
+            ToggleButton("Aim at Head", g_settings.headPriority, 38.0f);
+
+            ImGui::Separator();
         }
 
-        bool showLabels = g_settings.showLabels;
-        if (ImGui::Checkbox("Show Labels", &showLabels)) {
-            g_settings.showLabels = showLabels;
+        // ================================================================
+        // Section 3: Auto-Fire Settings (shown when auto-fire is on)
+        // ================================================================
+        if (g_settings.autoFireEnabled) {
+            ImGui::TextDisabled("Auto-Fire Settings");
+
+            ImGui::SliderFloat("Fire Confidence", &g_settings.autoFireConfidence, 0.2f, 0.95f, "%.2f");
+            ImGui::SliderFloat("Fire Button X",   &g_settings.autoFireFireX,      0.0f, (float)g_settings.screenWidth,  "%.0f");
+            ImGui::SliderFloat("Fire Button Y",   &g_settings.autoFireFireY,      0.0f, (float)g_settings.screenHeight, "%.0f");
+
+            ImGui::Separator();
         }
-        
+
+        // ================================================================
+        // Section 4: Display
+        // ================================================================
+        ImGui::TextDisabled("Display");
+        ToggleButton("Show FOV Indicator", g_settings.showFovIndicator, 38.0f);
+        ImGui::Spacing();
+        ToggleButton("Show Labels",        g_settings.showLabels,       38.0f);
+
         ImGui::Separator();
-        
-        // ========== AIMBOT SETTINGS ==========
-        ImGui::TextUnformatted("Aimbot Settings (Adaptive Algorithm)");
-        
-        // Master enable
-        if (ImGui::Checkbox("Enable Aimbot", &g_settings.aimbotEnabled)) {
-            // Toggle aimbot
-        }
-        
-        // Aim Speed
-        if (ImGui::SliderFloat("Aim Speed", &g_settings.aimSpeed, 0.1f, 1.0f, "%.2f")) {
-            // Auto-clamped
-        }
-        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), 
-            "Higher = faster aim movement");
-        
-        // Smoothness
-        if (ImGui::SliderFloat("Smoothness", &g_settings.smoothness, 0.0f, 1.0f, "%.2f")) {
-            // Auto-clamped
-        }
-        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), 
-            "Higher = smoother easing curve");
-        
-        // Aim FOV Radius
-        if (ImGui::SliderFloat("Aim FOV Radius", &g_settings.aimFovRadius, 50.0f, g_settings.fovRadius, "%.0f px")) {
-            g_settings.validate();
-        }
-        
-        // Target Priority
-        const char* priorities[] = {"Closest to Crosshair", "Distance", "Confidence"};
-        int currentPriority = g_settings.targetPriority;
-        if (ImGui::Combo("Target Priority", &currentPriority, priorities, 3)) {
-            g_settings.targetPriority = currentPriority;
-        }
-        
-        // Head Priority
-        if (ImGui::Checkbox("Aim at Head", &g_settings.headPriority)) {
-            // Toggle
-        }
-        
-        // Touch Configuration
-        ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "Touch Zone (Template Logic)");
-        
-        // Show/hide touch zone overlay
-        if (ImGui::Checkbox("Show Touch Zone Overlay", &g_settings.showTouchZone)) {
-            // Toggle
-        }
-        
-        if (g_settings.showTouchZone) {
-            // Touch zone opacity
-            if (ImGui::SliderFloat("Overlay Opacity", &g_settings.touchZoneAlpha, 0.1f, 1.0f, "%.2f")) {
-                // Updated
+
+        // ================================================================
+        // Section 5: Advanced (collapsible, collapsed by default)
+        // ================================================================
+        if (ImGui::TreeNode("Advanced Settings")) {
+            ImGui::Spacing();
+
+            ImGui::SliderFloat("Confidence Threshold", &g_settings.confidenceThreshold, 0.1f, 0.95f, "%.2f");
+            if (ImGui::SliderFloat("Detection FOV", &g_settings.fovRadius, 200.0f, 600.0f, "%.0f px")) {
+                if (g_settings.aimFovRadius > g_settings.fovRadius) {
+                    g_settings.aimFovRadius = g_settings.fovRadius;
+                }
             }
+            ImGui::SliderFloat("Aim FOV Radius", &g_settings.aimFovRadius, 50.0f, g_settings.fovRadius, "%.0f px");
+
+            if (g_settings.autoFireEnabled) {
+                ImGui::Spacing();
+                ImGui::TextDisabled("Auto-Fire Timing");
+                ImGui::SliderFloat("Tap Interval (ms)", &g_settings.autoFireTapInterval, 30.0f, 500.0f, "%.0f");
+                ImGui::SliderFloat("Hold Time (ms)",    &g_settings.autoFireHoldTime,    20.0f, 200.0f, "%.0f");
+            }
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Touch Zone");
+            ToggleButton("Show Touch Zone Overlay", g_settings.showTouchZone, 38.0f);
+
+            if (g_settings.showTouchZone) {
+                ImGui::SliderFloat("Touch X",      &g_settings.touchX,      0.0f, (float)g_settings.screenWidth,  "%.0f");
+                ImGui::SliderFloat("Touch Y",      &g_settings.touchY,      0.0f, (float)g_settings.screenHeight, "%.0f");
+                ImGui::SliderFloat("Touch Radius", &g_settings.touchRadius, 50.0f, 500.0f, "%.0f");
+                if (ImGui::Button("Reset Touch Zone", ImVec2(-1.0f, 36.0f * scale))) {
+                    g_settings.setDefaultTouchPosition(g_settings.screenWidth, g_settings.screenHeight);
+                }
+            }
+
+            ImGui::Spacing();
+            ImGui::SliderFloat("Aim Delay (ms)", &g_settings.aimDelay, 0.0f, 50.0f, "%.1f");
+
+            int fpsi = (int)g_settings.aimbotFps;
+            if (ImGui::SliderInt("Aimbot FPS", &fpsi, 30, 120)) {
+                g_settings.aimbotFps = (uint32_t)fpsi;
+            }
+
+            ImGui::TreePop();
         }
-        
-        if (ImGui::SliderFloat("Touch X", &g_settings.touchX, 0.0f, (float)g_settings.screenWidth, "%.0f")) {
-            // Updated
-        }
-        
-        if (ImGui::SliderFloat("Touch Y", &g_settings.touchY, 0.0f, (float)g_settings.screenHeight, "%.0f")) {
-            // Updated
-        }
-        
-        if (ImGui::SliderFloat("Touch Radius", &g_settings.touchRadius, 50.0f, 500.0f, "%.0f")) {
+
+        ImGui::Separator();
+
+        // ================================================================
+        // Bottom: Save + Close
+        // ================================================================
+        if (ImGui::Button("Save Settings", ImVec2(-1.0f, 42.0f * scale))) {
             g_settings.validate();
-        }
-        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), 
-            "Max drag distance before reset");
-        
-        // Button to reset touch zone to default
-        if (ImGui::Button("Reset Touch Zone Position", ImVec2(-1.0f, 0.0f))) {
-            g_settings.setDefaultTouchPosition(g_settings.screenWidth, g_settings.screenHeight);
-            LOGI("Touch zone reset to default position");
-        }
-        
-        // Aim Delay
-        if (ImGui::SliderFloat("Aim Delay (ms)", &g_settings.aimDelay, 0.0f, 50.0f, "%.1f")) {
-            g_settings.validate();
-        }
-        
-        // FPS Control
-        ImGui::Spacing();
-        int fpsi = (int)g_settings.aimbotFps;
-        if (ImGui::SliderInt("Aimbot FPS", &fpsi, 30, 120)) {
-            g_settings.aimbotFps = (uint32_t)fpsi;
-        }
-        
-        // Save/Load Buttons
-        ImGui::Spacing();
-        if (ImGui::Button("Save Settings", ImVec2(-1.0f, 0.0f))) {
             if (g_settings.save()) {
-                LOGI("Settings saved successfully");
+                LOGI("Settings saved");
             } else {
                 LOGE("Failed to save settings");
             }
         }
-        
-        if (ImGui::Button("Load Settings", ImVec2(-1.0f, 0.0f))) {
-            if (g_settings.load()) {
-                LOGI("Settings loaded successfully");
-                g_settings.validate();
-            } else {
-                LOGE("Failed to load settings");
-            }
-        }
-        
-        ImGui::Separator();
-        
-        // Smoothing settings
-        ImGui::TextUnformatted("ESP Smoothing");
-        bool enableSmoothing = g_settings.enableSmoothing;
-        if (ImGui::Checkbox("Enable Box Smoothing", &enableSmoothing)) {
-            g_settings.enableSmoothing = enableSmoothing;
-        }
-        
-        if (enableSmoothing) {
-            float smoothFactor = g_settings.smoothingFactor;
-            if (ImGui::SliderFloat("Smoothing Factor", &smoothFactor, 0.1f, 1.0f, "%.2f")) {
-                g_settings.smoothingFactor = smoothFactor;
-            }
-            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), 
-                "Lower = smoother, Higher = faster");
-        }
-        
+
         ImGui::Spacing();
-        ImGui::Separator();
-        
-        // Close button (takes full width)
-        if (ImGui::Button("Close Menu", ImVec2(-1.0f, 40.0f))) {
+
+        if (ImGui::Button("Close Menu", ImVec2(-1.0f, 42.0f * scale))) {
             config_.menuVisible.store(false, std::memory_order_relaxed);
         }
     }

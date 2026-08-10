@@ -15,14 +15,11 @@
 #include "../utils/vector2.h"
 
 struct UnifiedSettings {
-    // Bumped to 0xE5BA100B so that settings.bin written by older builds is
-    // rejected and users get a clean slate with the new defaults:
-    //   - confidence threshold lowered to 0.38 for YOLO26s (mAP50=0.892),
-    //   - NMS IoU threshold adjusted to 0.40 for better WBF merging,
-    //   - temporal filter EMA smoothing and coasting parameters tuned,
-    //   - single-pass full-frame detection replaces 6-tile detection,
-    //   - temporal filter IoU gates loosened for fast-cycle matching.
-    uint32_t magic = 0xE5BA100B;  // Magic number for validation
+    // Bumped to 0xE5BA100C: added showFovIndicator and autoFire settings.
+    // Previous 0xE5BA100B added confidence threshold, NMS IoU, temporal filter,
+    // single-pass full-frame detection, and IoU gate tuning.
+    // Old settings.bin is rejected so users get a clean slate with new defaults.
+    uint32_t magic = 0xE5BA100C;  // Magic number for validation
     
     bool aimbotEnabled = false;
     bool espEnabled = true;
@@ -91,6 +88,20 @@ struct UnifiedSettings {
     // being captured and re-detected as phantoms.
     bool streamerMode = true;
 
+    // FOV indicator: the blue detection-zone box + crosshair at screen center.
+    // Purely visual — turning it off does NOT affect detection or aimbot.
+    bool showFovIndicator = true;
+
+    // Auto-fire (trigger bot): when enabled, automatically taps the fire button
+    // when an enemy is detected with sufficient confidence within the aim FOV.
+    // Uses a separate touch slot (8) so it doesn't conflict with aimbot (slot 9).
+    bool autoFireEnabled = false;
+    float autoFireConfidence = 0.55f;   // Min target confidence to trigger fire
+    float autoFireFireX = 540.0f;       // Fire button screen X position
+    float autoFireFireY = 1900.0f;      // Fire button screen Y position
+    float autoFireTapInterval = 100.0f;  // Min ms between fire taps (cooldown)
+    float autoFireHoldTime = 40.0f;      // How long to hold the fire button (ms)
+
     // UI language: 0 = English, 1 = Chinese (中文). Drives ImGui menu text.
     int32_t language = 1; // 默认中文
     
@@ -115,7 +126,7 @@ struct UnifiedSettings {
         UnifiedSettings temp;
         if (fread(&temp, sizeof(UnifiedSettings), 1, f) == 1) {
             // Verify magic number
-            if (temp.magic == 0xE5BA100B) {
+            if (temp.magic == 0xE5BA100C) {
                 *this = temp;
                 fclose(f);
                 return true;
@@ -170,6 +181,17 @@ struct UnifiedSettings {
         kalmanProcessNoise = (kalmanProcessNoise < 0.01f) ? 0.01f : (kalmanProcessNoise > 20.0f) ? 20.0f : kalmanProcessNoise;
         kalmanMeasurementNoise = (kalmanMeasurementNoise < 0.5f) ? 0.5f : (kalmanMeasurementNoise > 40.0f) ? 40.0f : kalmanMeasurementNoise;
         language = (language < 0) ? 0 : (language > 1) ? 1 : language;
+        
+        // Auto-fire validation
+        autoFireConfidence = (autoFireConfidence < 0.2f) ? 0.2f : (autoFireConfidence > 0.95f) ? 0.95f : autoFireConfidence;
+        autoFireTapInterval = (autoFireTapInterval < 30.0f) ? 30.0f : (autoFireTapInterval > 500.0f) ? 500.0f : autoFireTapInterval;
+        autoFireHoldTime = (autoFireHoldTime < 20.0f) ? 20.0f : (autoFireHoldTime > 200.0f) ? 200.0f : autoFireHoldTime;
+        if (screenWidth > 0) {
+            autoFireFireX = (autoFireFireX < 0.0f) ? 0.0f : (autoFireFireX > screenWidth) ? screenWidth : autoFireFireX;
+        }
+        if (screenHeight > 0) {
+            autoFireFireY = (autoFireFireY < 0.0f) ? 0.0f : (autoFireFireY > screenHeight) ? screenHeight : autoFireFireY;
+        }
         
         // Clamp touch position to screen bounds
         if (screenWidth > 0 && screenHeight > 0) {

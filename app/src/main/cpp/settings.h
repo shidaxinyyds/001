@@ -28,7 +28,7 @@ namespace Config {
     /// letterboxed to the model input square, matching the training pipeline
     /// (extract_frames.py: full-frame letterbox → resize to model input).
     /// Both training and inference see 100% of the game screen.
-    constexpr int CROP_SIZE = 320;
+    constexpr int CROP_SIZE = 640;
 
     /// ImageReader buffer depth. 3 is the minimum for triple buffering
     /// (one being captured, one queued, one being consumed by inference).
@@ -41,8 +41,12 @@ namespace Config {
     // Model Configuration
     // ============================================================================
     
-    /// YOLOv26s input size (320 for better small-target detection)
-    constexpr int MODEL_INPUT_SIZE = 320;
+    /// YOLOv26s input size (640 = matches training imgsz exactly).
+    /// Previously was 320, causing a train/inference resolution mismatch:
+    /// the model was trained at 640×640 (mAP50=0.889) but ran at 320×320
+    /// at runtime, missing small/distant enemies that were detectable
+    /// during training. Now both train and infer at 640×640.
+    constexpr int MODEL_INPUT_SIZE = 640;
     
     /// Model parameter file name
     constexpr const char* MODEL_PARAM_FILE = "models/yolo26s-opt.param";
@@ -102,14 +106,17 @@ namespace Config {
     /// Enable Vulkan compute shaders
     constexpr bool NCNN_USE_VULKAN_COMPUTE = true;
     
-    /// Enable FP16 packed (critical for Adreno 660)
-    constexpr bool NCNN_USE_FP16_PACKED = true;
+    /// FP16 disabled: model is exported as FP32. Some Adreno GPU drivers
+    /// produce incorrect results with FP16 arithmetic on attention layers
+    /// (MatMul/Softmax in YOLO26's A2C2f blocks). FP32 ensures numerical
+    /// correctness at a modest speed/memory cost.
+    constexpr bool NCNN_USE_FP16_PACKED = false;
     
-    /// Enable FP16 storage (critical for Adreno 660)
-    constexpr bool NCNN_USE_FP16_STORAGE = true;
+    /// Enable FP16 storage (disabled for FP32 model)
+    constexpr bool NCNN_USE_FP16_STORAGE = false;
     
-    /// Enable FP16 arithmetic (Adreno 660 has native FP16 support)
-    constexpr bool NCNN_USE_FP16_ARITHMETIC = true;
+    /// Enable FP16 arithmetic (disabled for correctness)
+    constexpr bool NCNN_USE_FP16_ARITHMETIC = false;
     
     /// Enable packing layout optimization
     constexpr bool NCNN_USE_PACKING_LAYOUT = true;
