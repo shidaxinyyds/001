@@ -12,6 +12,7 @@ import android.util.Log;
 import androidx.core.app.NotificationCompat;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.InputStreamReader;
 
 public class KernelService extends Service {

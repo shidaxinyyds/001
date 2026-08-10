@@ -90,7 +90,7 @@ public class MainActivity extends AppCompatActivity {
 
         Intent serviceIntent = new Intent(this, KernelService.class);
         serviceIntent.putExtra("binary_path", binaryPath);
-        startForegroundService(serviceIntent);
+        startKernelService(serviceIntent);
 
         btnStart.setEnabled(false);
         btnStop.setEnabled(true);
@@ -106,7 +106,7 @@ public class MainActivity extends AppCompatActivity {
         tvStatus.setText("状态：已停止");
     }
 
-    private void startForegroundService(Intent intent) {
+    private void startKernelService(Intent intent) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent);
         } else {
