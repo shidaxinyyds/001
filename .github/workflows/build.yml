@@ -35,19 +35,31 @@ jobs:
           fetch-depth: 0
 
       # ============================================================
-      #  2. 配置 Java 环境 (AGP 3.6.1 需要 Java 11)
+      #  2. 配置 Java 环境
+      #     SDK Tools v16.0 要求 JDK 17+, AGP 3.6.1 需要 JDK 11
+      #     先装 JDK 17 (SDK 用), 再装 JDK 11 (Gradle 用)
       # ============================================================
-      - name: 配置 Java
+      - name: 配置 JDK 17 (SDK 工具需要)
         uses: actions/setup-java@v4
+        id: jdk17
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: 配置 JDK 11 (Gradle/AGP 3.6.1 需要)
+        uses: actions/setup-java@v4
+        id: jdk11
         with:
           java-version: '11'
           distribution: 'temurin'
 
       # ============================================================
-      #  3. 配置 Android SDK
+      #  3. 配置 Android SDK (用 JDK 17)
       # ============================================================
       - name: 配置 Android SDK
         uses: android-actions/setup-android@v3
+        env:
+          JAVA_HOME: ${{ steps.jdk17.outputs.path }}
         with:
           packages: |
             platforms;android-29
@@ -96,8 +108,12 @@ jobs:
       # ============================================================
       - name: 编译 APK (独立悬浮窗模式)
         if: github.event.inputs.build_mode != 'direct_install'
+        env:
+          JAVA_HOME: ${{ steps.jdk11.outputs.path }}
         run: |
           echo "===== 独立悬浮窗模式编译 ====="
+          echo "JAVA_HOME=$JAVA_HOME"
+          java -version
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 || {
             echo "Gradle 构建失败, 尝试仅编译 .so..."
