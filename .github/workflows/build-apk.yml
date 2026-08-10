@@ -35,12 +35,18 @@ jobs:
         id: ndk-build
         continue-on-error: true
         run: |
+          set +e
           echo "=== Working directory ==="
           pwd
           echo "=== NDK path ==="
           echo "$ANDROID_NDK_HOME"
+          ls -la "$ANDROID_NDK_HOME/ndk-build" || echo "ndk-build NOT FOUND"
           echo "=== jni/ directory ==="
           ls -la jni/
+          echo "=== Android.mk ==="
+          cat jni/Android.mk
+          echo "=== Application.mk ==="
+          cat jni/Application.mk
           echo "=== Source files ==="
           find jni/src -name "*.c*" -o -name "*.cpp" | head -30
           echo "=== Prebuilt libraries ==="
@@ -52,9 +58,14 @@ jobs:
             NDK_APPLICATION_MK=jni/Application.mk \
             NDK_OUT=build/ndk/obj \
             NDK_LIBS_OUT=build/ndk/libs \
-            V=1 2>&1 | tee ndk-build.log
+            V=1 > ndk-build.log 2>&1
+          NDK_EXIT=$?
+          echo "=== ndk-build exit code: $NDK_EXIT ==="
+          echo "=== ndk-build output (last 100 lines) ==="
+          tail -100 ndk-build.log
           echo "=== Build output ==="
           find build/ndk -type f 2>/dev/null || echo "No build output found"
+          exit $NDK_EXIT
 
       - name: Upload ndk-build log
         if: always()
