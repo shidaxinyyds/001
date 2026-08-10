@@ -12,6 +12,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -30,6 +32,8 @@ jobs:
           echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
 
       - name: Build native code with ndk-build
+        id: ndk-build
+        continue-on-error: true
         run: |
           echo "=== Working directory ==="
           pwd
@@ -42,7 +46,6 @@ jobs:
           echo "=== Prebuilt libraries ==="
           ls -la jni/src/CPUaffinity/libPikachu.a jni/include/lib/libcurl.a
           echo "=== Running ndk-build ==="
-          set +e
           "$ANDROID_NDK_HOME/ndk-build" \
             NDK_PROJECT_PATH=. \
             APP_BUILD_SCRIPT=jni/Android.mk \
@@ -50,23 +53,23 @@ jobs:
             NDK_OUT=build/ndk/obj \
             NDK_LIBS_OUT=build/ndk/libs \
             V=1 2>&1 | tee ndk-build.log
-          NDK_EXIT_CODE=${PIPESTATUS[0]}
-          set -e
-          echo "=== ndk-build exit code: $NDK_EXIT_CODE ==="
           echo "=== Build output ==="
           find build/ndk -type f 2>/dev/null || echo "No build output found"
-          if [ $NDK_EXIT_CODE -ne 0 ]; then
-            echo "ndk-build failed! Uploading log as artifact."
-            exit 1
-          fi
 
-      - name: Upload ndk-build log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ndk-build-log
-          path: ndk-build.log
-          retention-days: 7
+      - name: Push ndk-build log to logs branch
+        if: always()
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git checkout --orphan logs
+          git rm -rf .
+          git add ndk-build.log 2>/dev/null || echo "No log file found"
+          git commit -m "ndk-build log from run ${{ github.run_id }}" || echo "Nothing to commit"
+          git push origin logs --force
+
+      - name: Fail if ndk-build failed
+        if: steps.ndk-build.outcome == 'failure'
+        run: exit 1
 
       - name: Copy native binary to jniLibs
         run: |
