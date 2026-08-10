@@ -121,6 +121,7 @@ jobs:
         if: github.event.inputs.build_mode != 'direct_install'
         run: |
           echo "===== 独立悬浮窗模式编译 ====="
+          rm -rf app/src/main/jniLibs/
           export JAVA_HOME="${{ steps.jdk11.outputs.path }}"
           export PATH="$JAVA_HOME/bin:$PATH"
           echo "JAVA_HOME=$JAVA_HOME"
