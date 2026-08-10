@@ -1,0 +1,959 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>直装使用指南 — 和平精英修改器免root方案</title>
+<style>
+    /* ===== 基础重置与全局样式 ===== */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+        --bg: #1a1a2e;
+        --card: #16213e;
+        --accent: #e94560;
+        --accent-soft: rgba(233, 69, 96, 0.15);
+        --code-bg: #0f0f23;
+        --text: #e0e0e0;
+        --text-dim: #a0a0b0;
+        --border: rgba(255, 255, 255, 0.08);
+        --green: #4ecca3;
+        --yellow: #f0c040;
+        --blue: #4a9eff;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+        background: var(--bg);
+        color: var(--text);
+        font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+        line-height: 1.8;
+        font-size: 16px;
+        padding: 0 16px 80px;
+        -webkit-font-smoothing: antialiased;
+    }
+
+    /* ===== 顶部标题区 ===== */
+    .header {
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 56px 0 32px;
+        text-align: center;
+    }
+    .header h1 {
+        font-size: 2.4rem;
+        font-weight: 800;
+        letter-spacing: 1px;
+        margin-bottom: 12px;
+        background: linear-gradient(135deg, #e94560, #4a9eff);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+    }
+    .header .subtitle {
+        color: var(--text-dim);
+        font-size: 1.05rem;
+    }
+    .header .badge-row {
+        margin-top: 20px;
+        display: flex;
+        gap: 10px;
+        justify-content: center;
+        flex-wrap: wrap;
+    }
+    .badge {
+        display: inline-block;
+        padding: 5px 16px;
+        border-radius: 20px;
+        font-size: 0.82rem;
+        font-weight: 600;
+        border: 1px solid var(--border);
+    }
+    .badge.red    { background: var(--accent-soft); color: var(--accent); border-color: rgba(233,69,96,0.3); }
+    .badge.green  { background: rgba(78,204,163,0.12); color: var(--green); border-color: rgba(78,204,163,0.3); }
+    .badge.blue   { background: rgba(74,158,255,0.12); color: var(--blue); border-color: rgba(74,158,255,0.3); }
+    .badge.yellow { background: rgba(240,192,64,0.12); color: var(--yellow); border-color: rgba(240,192,64,0.3); }
+
+    /* ===== 主容器 ===== */
+    .container {
+        max-width: 900px;
+        margin: 0 auto;
+    }
+
+    /* ===== 目录 ===== */
+    .toc {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 24px 28px;
+        margin-bottom: 40px;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+    }
+    .toc h2 {
+        font-size: 1.1rem;
+        color: var(--accent);
+        margin-bottom: 14px;
+        border-left: 4px solid var(--accent);
+        padding-left: 12px;
+    }
+    .toc ol {
+        list-style: none;
+        counter-reset: toc;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px 24px;
+    }
+    .toc li {
+        counter-increment: toc;
+    }
+    .toc a {
+        color: var(--text-dim);
+        text-decoration: none;
+        font-size: 0.92rem;
+        display: inline-block;
+        padding: 3px 0;
+        transition: color 0.2s;
+    }
+    .toc a::before {
+        content: counter(toc) ". ";
+        color: var(--accent);
+        font-weight: 700;
+    }
+    .toc a:hover { color: var(--text); }
+    @media (max-width: 600px) {
+        .toc ol { grid-template-columns: 1fr; }
+    }
+
+    /* ===== 章节通用 ===== */
+    section {
+        margin-bottom: 44px;
+        scroll-margin-top: 20px;
+    }
+    section h2 {
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: var(--text);
+        border-left: 5px solid var(--accent);
+        padding-left: 16px;
+        margin-bottom: 20px;
+        line-height: 1.4;
+    }
+
+    /* ===== 卡片 ===== */
+    .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 26px 30px;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+    }
+    .card p { margin-bottom: 14px; }
+    .card p:last-child { margin-bottom: 0; }
+
+    /* ===== 强调文本 ===== */
+    .hl-red    { color: var(--accent); font-weight: 600; }
+    .hl-green  { color: var(--green); font-weight: 600; }
+    .hl-blue   { color: var(--blue); font-weight: 600; }
+    .hl-yellow { color: var(--yellow); font-weight: 600; }
+
+    .callout {
+        border-left: 4px solid var(--accent);
+        background: var(--accent-soft);
+        border-radius: 0 10px 10px 0;
+        padding: 14px 20px;
+        margin: 16px 0;
+    }
+    .callout.green  { border-color: var(--green); background: rgba(78,204,163,0.1); }
+    .callout.yellow { border-color: var(--yellow); background: rgba(240,192,64,0.08); }
+    .callout strong { color: var(--text); }
+
+    /* ===== 代码块 ===== */
+    pre {
+        background: var(--code-bg);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 18px 22px;
+        overflow-x: auto;
+        margin: 14px 0;
+        font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+        font-size: 0.88rem;
+        line-height: 1.7;
+        color: #d4d4d4;
+    }
+    code {
+        font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+        background: rgba(255,255,255,0.07);
+        padding: 2px 7px;
+        border-radius: 5px;
+        font-size: 0.88rem;
+        color: var(--accent);
+    }
+    pre code {
+        background: none;
+        padding: 0;
+        color: #d4d4d4;
+    }
+    /* 代码语法高亮(简易) */
+    .kw  { color: #c678dd; }   /* 关键字 */
+    .str { color: #98c379; }   /* 字符串 */
+    .com { color: #7f7f7f; font-style: italic; } /* 注释 */
+    .fn  { color: #61afef; }   /* 函数名 */
+    .num { color: #d19a66; }   /* 数字 */
+
+    /* ===== 表格 ===== */
+    .table-wrap {
+        overflow-x: auto;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+    }
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.92rem;
+        min-width: 640px;
+    }
+    th {
+        background: #1c2545;
+        color: var(--text);
+        font-weight: 700;
+        padding: 14px 18px;
+        text-align: left;
+        border-bottom: 2px solid var(--accent);
+        white-space: nowrap;
+    }
+    td {
+        padding: 13px 18px;
+        border-bottom: 1px solid var(--border);
+        vertical-align: top;
+    }
+    tr:nth-child(even) td { background: rgba(255,255,255,0.025); }
+    tr:last-child td { border-bottom: none; }
+    td:first-child {
+        font-weight: 600;
+        color: var(--blue);
+        white-space: nowrap;
+        width: 110px;
+    }
+
+    /* ===== 文件清单 ===== */
+    .file-list { list-style: none; }
+    .file-item {
+        background: rgba(255,255,255,0.03);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 16px 20px;
+        margin-bottom: 12px;
+        transition: border-color 0.2s, background 0.2s;
+    }
+    .file-item:hover {
+        border-color: var(--accent);
+        background: rgba(233,69,96,0.05);
+    }
+    .file-path {
+        font-family: 'Consolas', 'Monaco', monospace;
+        font-size: 0.9rem;
+        color: var(--yellow);
+        word-break: break-all;
+    }
+    .file-tag {
+        display: inline-block;
+        font-size: 0.72rem;
+        font-weight: 700;
+        padding: 2px 10px;
+        border-radius: 4px;
+        margin-left: 8px;
+        vertical-align: middle;
+    }
+    .file-tag.new     { background: rgba(78,204,163,0.2); color: var(--green); }
+    .file-tag.modify  { background: rgba(74,158,255,0.2); color: var(--blue); }
+    .file-desc {
+        color: var(--text-dim);
+        font-size: 0.9rem;
+        margin-top: 6px;
+    }
+
+    /* ===== 步骤列表 ===== */
+    .steps {
+        list-style: none;
+        counter-reset: step;
+    }
+    .steps > li {
+        counter-increment: step;
+        position: relative;
+        padding: 12px 0 12px 52px;
+        border-bottom: 1px solid var(--border);
+    }
+    .steps > li:last-child { border-bottom: none; }
+    .steps > li::before {
+        content: counter(step);
+        position: absolute;
+        left: 0;
+        top: 12px;
+        width: 34px;
+        height: 34px;
+        background: var(--accent);
+        color: #fff;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        font-size: 0.9rem;
+    }
+
+    /* ===== SVG 流程图 ===== */
+    .flow-diagram {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 30px 20px;
+        margin: 20px 0;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+        overflow-x: auto;
+    }
+    .flow-diagram svg {
+        display: block;
+        margin: 0 auto;
+        min-width: 700px;
+    }
+
+    /* ===== 返回顶部 ===== */
+    #back-to-top {
+        position: fixed;
+        bottom: 32px;
+        right: 32px;
+        width: 50px;
+        height: 50px;
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        border-radius: 50%;
+        font-size: 1.4rem;
+        cursor: pointer;
+        opacity: 0;
+        visibility: hidden;
+        transition: opacity 0.3s, visibility 0.3s, transform 0.3s;
+        box-shadow: 0 4px 16px rgba(233,69,96,0.4);
+        z-index: 999;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    #back-to-top.show {
+        opacity: 1;
+        visibility: visible;
+    }
+    #back-to-top:hover {
+        transform: translateY(-4px);
+        box-shadow: 0 6px 22px rgba(233,69,96,0.55);
+    }
+    #back-to-top::after {
+        content: "返回顶部";
+        position: absolute;
+        right: 60px;
+        white-space: nowrap;
+        background: var(--card);
+        color: var(--text);
+        padding: 6px 14px;
+        border-radius: 8px;
+        font-size: 0.82rem;
+        border: 1px solid var(--border);
+        opacity: 0;
+        transition: opacity 0.2s;
+        pointer-events: none;
+    }
+    #back-to-top:hover::after { opacity: 1; }
+
+    /* ===== 页脚 ===== */
+    .footer {
+        max-width: 900px;
+        margin: 60px auto 0;
+        text-align: center;
+        color: var(--text-dim);
+        font-size: 0.85rem;
+        border-top: 1px solid var(--border);
+        padding-top: 28px;
+    }
+</style>
+</head>
+<body>
+
+<!-- ============ 标题区 ============ -->
+<header class="header">
+    <h1>直装使用指南</h1>
+    <p class="subtitle">和平精英修改器 · 免root / 直装注入方案 · 技术文档</p>
+    <div class="badge-row">
+        <span class="badge red">免Root</span>
+        <span class="badge green">免sharedUserId</span>
+        <span class="badge blue">进程内注入</span>
+        <span class="badge yellow">UE4 / ARM64</span>
+    </div>
+</header>
+
+<!-- ============ 主容器 ============ -->
+<main class="container">
+
+    <!-- ===== 目录 ===== -->
+    <nav class="toc">
+        <h2>目录</h2>
+        <ol>
+            <li><a href="#sec1">方案概述</a></li>
+            <li><a href="#sec2">架构对比</a></li>
+            <li><a href="#sec3">新增/修改文件清单</a></li>
+            <li><a href="#sec4">编译步骤</a></li>
+            <li><a href="#sec5">打包步骤</a></li>
+            <li><a href="#sec6">安装与使用</a></li>
+            <li><a href="#sec7">工作原理详解</a></li>
+            <li><a href="#sec8">注意事项与故障排查</a></li>
+        </ol>
+    </nav>
+
+    <!-- ===== 1. 方案概述 ===== -->
+    <section id="sec1">
+        <h2>1. 方案概述</h2>
+        <div class="card">
+            <p>本项目是一个安卓游戏内存修改器（基于 <span class="hl-blue">ImGui</span> 悬浮菜单），目标游戏为 <strong>和平精英</strong>（包名 <code>com.tencent.tmgp.pubgmhd</code>，采用 <span class="hl-blue">UE4 引擎</span>）。</p>
+
+            <p>在<span class="hl-red">旧方案</span>中，修改器作为独立 App 运行，通过 <code>WindowManager</code> 悬浮窗覆盖在游戏上方，利用 <code>process_vm_readv</code> 跨进程读取游戏内存。这种方式存在根本性限制：<strong>跨进程读写其他应用内存需要 root 权限</strong>，或依赖 <code>sharedUserId</code> 使两个 App 共享同一 Linux UID —— 而后者要求两方 APK 签名一致，在实际游戏场景中几乎不可行。</p>
+
+            <p><span class="hl-green">新方案「直装（Direct Install）」</span>彻底改变了运行模式：将修改器的核心动态库 <code>libCube.so</code> <strong>直接注入到游戏 APK 内部</strong>，使其在游戏进程内运行，无需 root、无需 sharedUserId、无需独立悬浮窗 App。</p>
+
+            <div class="callout green">
+                <strong>核心洞察：</strong><code>process_vm_readv</code> 在对<span class="hl-green">自身进程 PID</span>（即 <code>getpid()</code> 返回值）调用时，<strong>不需要 root 权限</strong>。由于 <code>libCube.so</code> 被注入后运行在游戏进程内，<code>getPID()</code> 直接返回 <code>getpid()</code>，内存读写顺理成章地变为「自进程读写」，完全绕开了权限壁垒。
+            </div>
+
+            <p>渲染方面，旧方案依赖独立 App 的 <code>GLSurfaceView</code>；新方案则通过 <span class="hl-blue">Hook <code>eglSwapBuffers</code></span> 函数，在游戏每帧交换缓冲区的时机插入 ImGui 绘制，实现菜单与 ESP 透视的无缝叠加。触摸输入则通过直接读取 <code>/dev/input/event*</code> 设备节点来捕获，不影响游戏本身的触摸响应。</p>
+        </div>
+    </section>
+
+    <!-- ===== 2. 架构对比 ===== -->
+    <section id="sec2">
+        <h2>2. 架构对比</h2>
+        <div class="card">
+            <p>下表从七个维度对比 <span class="hl-red">独立悬浮窗模式（旧）</span> 与 <span class="hl-green">直装模式（新）</span> 的核心差异：</p>
+
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>对比维度</th>
+                            <th>独立悬浮窗模式（旧）</th>
+                            <th>直装模式（新）</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>运行方式</td>
+                            <td>独立 App 进程，与游戏分属两个进程</td>
+                            <td><span class="hl-green">注入 .so 到游戏 APK，与游戏同进程运行</span></td>
+                        </tr>
+                        <tr>
+                            <td>内存读写</td>
+                            <td>跨进程 <code>process_vm_readv</code>（目标 PID 为游戏进程）</td>
+                            <td>同进程 <code>process_vm_readv(getpid())</code>，<span class="hl-green">无需 root</span></td>
+                        </tr>
+                        <tr>
+                            <td>Root 需求</td>
+                            <td><span class="hl-red">需要 root 或 sharedUserId</span></td>
+                            <td><span class="hl-green">完全不需要</span></td>
+                        </tr>
+                        <tr>
+                            <td>用户体验</td>
+                            <td>需先开修改器再开游戏，两步操作</td>
+                            <td>打开游戏即自动加载，<span class="hl-green">开箱即用</span></td>
+                        </tr>
+                        <tr>
+                            <td>安装方式</td>
+                            <td>修改器 App + 游戏 App 分别安装</td>
+                            <td>仅需安装一个注入后的游戏 APK</td>
+                        </tr>
+                        <tr>
+                            <td>渲染方式</td>
+                            <td><code>GLSurfaceView</code> 独立渲染上下文</td>
+                            <td>Hook <code>eglSwapBuffers</code>，复用游戏 EGL 上下文渲染</td>
+                        </tr>
+                        <tr>
+                            <td>触摸输入</td>
+                            <td>Android <code>onTouchEvent</code>（悬浮窗内）</td>
+                            <td>轮询 <code>/dev/input/event*</code> 原始触摸事件（只读，不消费）</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="callout yellow">
+                <strong>关键区别总结：</strong>旧方案是「<span class="hl-red">旁路</span>」——站在游戏进程之外去窥探；新方案是「<span class="hl-green">内嵌</span>」——把自己变成游戏的一部分。这一从「外」到「内」的转变，是免root的根基。
+            </div>
+        </div>
+    </section>
+
+    <!-- ===== 3. 文件清单 ===== -->
+    <section id="sec3">
+        <h2>3. 新增/修改文件清单</h2>
+        <div class="card">
+            <p>直装模式涉及以下文件的新增与修改：</p>
+            <ul class="file-list" style="margin-top:18px;">
+                <li class="file-item">
+                    <div>
+                        <span class="file-path">app/src/main/jni/app/And64InlineHook.h</span>
+                        <span class="file-tag new">新增</span>
+                    </div>
+                    <div class="file-desc">ARM64 内联 Hook 库。用于 Hook <code>eglSwapBuffers</code> 函数，原理是在目标函数入口写入 <code>LDR X16 / BR X16</code> 跳转指令并构建 trampoline 跳板，使每帧渲染时都能插入 ImGui 绘制。</div>
+                </li>
+                <li class="file-item">
+                    <div>
+                        <span class="file-path">app/src/main/jni/app/Inject.h</span>
+                        <span class="file-tag new">新增</span>
+                    </div>
+                    <div class="file-desc">直装注入核心模块。包含四大功能：<code>JNI_OnLoad</code> 自动启动入口、<code>eglSwapBuffers</code> Hook 渲染循环、触摸轮询线程（<code>/dev/input/event*</code>）、以及从 assets 加载字体的逻辑。通过 <code>#ifdef DIRECT_INSTALL</code> 条件编译启用。</div>
+                </li>
+                <li class="file-item">
+                    <div>
+                        <span class="file-path">app/src/main/jni/app/Memory.h</span>
+                        <span class="file-tag modify">修改</span>
+                    </div>
+                    <div class="file-desc"><code>getPID()</code> 在 <code>DIRECT_INSTALL</code> 宏定义下直接返回 <code>getpid()</code>（而非遍历 <code>/proc</code> 查找游戏包名）；<code>mem_addr_virtophy()</code> 修复为使用 <code>/proc/self/pagemap</code> 读取页表，并修正了缺页检查逻辑。</div>
+                </li>
+                <li class="file-item">
+                    <div>
+                        <span class="file-path">app/src/main/jni/app/main.cpp</span>
+                        <span class="file-tag modify">修改</span>
+                    </div>
+                    <div class="file-desc">在文件末尾（所有函数和全局变量定义之后）引入 <code>Inject.h</code>，确保直装模块能正确引用 <code>BeginDraw</code> / <code>DrawPlayer</code> / <code>EndDraw</code> 等渲染函数和 <code>pid</code> / <code>font</code> 等全局变量。通过 <code>#ifdef DIRECT_INSTALL</code> 条件包含。</div>
+                </li>
+                <li class="file-item">
+                    <div>
+                        <span class="file-path">app/src/main/jni/Android.mk</span>
+                        <span class="file-tag modify">修改</span>
+                    </div>
+                    <div class="file-desc">添加 <code>DIRECT_INSTALL</code> 构建开关。当传入 <code>DIRECT_INSTALL=true</code> 时，追加 <code>-DDIRECT_INSTALL</code> 预处理宏，启用所有条件编译的直装代码路径。</div>
+                </li>
+                <li class="file-item">
+                    <div>
+                        <span class="file-path">repackage.py</span>
+                        <span class="file-tag new">新增</span>
+                    </div>
+                    <div class="file-desc">APK 注入重打包脚本。使用 apktool 解包游戏 APK，将 <code>libCube.so</code> 注入到 <code>lib/arm64-v8a/</code>，将 <code>Font.ttf</code> 注入到 <code>assets/</code>，修改 smali 添加 <code>System.loadLibrary("Cube")</code>，最后重新打包并签名。</div>
+                </li>
+                <li class="file-item">
+                    <div>
+                        <span class="file-path">build_direct_install.bat</span>
+                        <span class="file-tag new">新增</span>
+                    </div>
+                    <div class="file-desc">Windows 一键编译脚本。检查 <code>ndk-build</code> 是否可用，自动切换到 jni 目录执行 <code>ndk-build DIRECT_INSTALL=true</code>，产出 <code>libCube.so</code>。</div>
+                </li>
+            </ul>
+        </div>
+    </section>
+
+    <!-- ===== 4. 编译步骤 ===== -->
+    <section id="sec4">
+        <h2>4. 编译步骤</h2>
+        <div class="card">
+            <ol class="steps">
+                <li>
+                    <p><strong>安装 Android NDK</strong></p>
+                    <p style="color:var(--text-dim);font-size:0.92rem;">从 <a href="https://developer.android.com/ndk/downloads" target="_blank" style="color:var(--blue);">官方下载页</a> 获取 NDK，确保 <code>ndk-build</code> 命令在系统 PATH 中。本项目仅支持 <code>arm64-v8a</code> 架构。</p>
+                </li>
+                <li>
+                    <p><strong>运行编译脚本（推荐）</strong></p>
+                    <p style="color:var(--text-dim);font-size:0.92rem;">双击执行 <code>build_direct_install.bat</code>，或在命令行运行：</p>
+                    <pre><code><span class="com">REM Windows 命令行</span>
+build_direct_install.bat</code></pre>
+                </li>
+                <li>
+                    <p><strong>手动编译（等效命令）</strong></p>
+                    <pre><code><span class="com">REM 切换到 jni 目录并编译</span>
+<span class="kw">cd</span> app\src\main\jni
+ndk-build DIRECT_INSTALL=true</code></pre>
+                </li>
+                <li>
+                    <p><strong>确认产出文件</strong></p>
+                    <p style="color:var(--text-dim);font-size:0.92rem;">编译成功后，动态库产出在以下路径：</p>
+                    <pre><code>app/src/main/jniLibs/arm64-v8a/libCube.so   <span class="com"># 主输出</span>
+app/src/main/obj/local/arm64-v8a/libCube.so  <span class="com"># 中间产物</span></code></pre>
+                    <p style="color:var(--text-dim);font-size:0.92rem;margin-top:8px;"><span class="hl-green">编译日志中应看到：</span><code>===== 直装(免root)模式编译 =====</code>，确认 <code>DIRECT_INSTALL</code> 宏已生效。</p>
+                </li>
+            </ol>
+
+            <div class="callout">
+                <strong>提示：</strong>如果不带 <code>DIRECT_INSTALL=true</code> 参数直接运行 <code>ndk-build</code>，则编译为<span class="hl-red">独立悬浮窗模式（需 root）</span>，不会包含 <code>Inject.h</code> 的直装注入逻辑。
+            </div>
+        </div>
+    </section>
+
+    <!-- ===== 5. 打包步骤 ===== -->
+    <section id="sec5">
+        <h2>5. 打包步骤</h2>
+        <div class="card">
+            <ol class="steps">
+                <li>
+                    <p><strong>安装依赖环境</strong></p>
+                    <p style="color:var(--text-dim);font-size:0.92rem;">需要以下工具已安装并加入 PATH：</p>
+                    <pre><code>Python 3.x      <span class="com"># 运行 repackage.py</span>
+apktool         <span class="com"># APK 反编译/重编译</span>
+Java (JRE/JDK)  <span class="com"># apksigner / jarsigner / keytool 签名工具</span></code></pre>
+                </li>
+                <li>
+                    <p><strong>运行打包脚本</strong></p>
+                    <pre><code><span class="com"># 基本用法（自动查找 libCube.so）</span>
+python repackage.py 游戏原版.apk
+
+<span class="com"># 指定 libCube.so 路径</span>
+python repackage.py 游戏原版.apk app/src/main/jniLibs/arm64-v8a/libCube.so</code></pre>
+                </li>
+                <li>
+                    <p><strong>脚本自动执行流程</strong></p>
+                    <div class="table-wrap" style="margin-top:12px;">
+                        <table>
+                            <thead>
+                                <tr><th style="width:60px;">阶段</th><th>操作内容</th></tr>
+                            </thead>
+                            <tbody>
+                                <tr><td>[1]</td><td>用 <code>apktool d</code> 解包游戏 APK</td></tr>
+                                <tr><td>[2]</td><td>将 <code>libCube.so</code> 复制到 <code>lib/arm64-v8a/</code>，删除其他架构目录</td></tr>
+                                <tr><td>[3]</td><td>将 <code>Font.ttf</code> 复制到 <code>assets/</code></td></tr>
+                                <tr><td>[4]</td><td>修改 smali 代码，在 Application/Activity 启动时注入 <code>System.loadLibrary("Cube")</code></td></tr>
+                                <tr><td>[5]</td><td>用 <code>apktool b</code> 重新打包为 APK</td></tr>
+                                <tr><td>[6]</td><td>生成调试签名密钥并签名（apksigner 或 jarsigner）</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </li>
+                <li>
+                    <p><strong>确认产出文件</strong></p>
+                    <pre><code>游戏原版_直装.apk   <span class="com"># 最终签名包，位于当前工作目录</span></code></pre>
+                </li>
+            </ol>
+
+            <div class="callout yellow">
+                <strong>smali 注入说明：</strong>脚本会优先在 Application 类的 <code>onCreate</code> / <code>attachBaseContext</code> 方法中注入 <code>loadLibrary("Cube")</code>；若无法找到，则回退到 <code>&lt;clinit&gt;</code> 静态初始化块或主 Activity。注入的 smali 代码如下：
+            </div>
+            <pre><code><span class="com"># ---- 直装注入: 加载修改器 .so ----</span>
+<span class="kw">const-string</span> v0, <span class="str">"Cube"</span>
+<span class="kw">invoke-static</span> {v0}, Ljava/lang/System;->loadLibrary(Ljava/lang/String;)V
+<span class="com"># ---- 注入结束 ----</span></code></pre>
+        </div>
+    </section>
+
+    <!-- ===== 6. 安装与使用 ===== -->
+    <section id="sec6">
+        <h2>6. 安装与使用</h2>
+        <div class="card">
+            <ol class="steps">
+                <li>
+                    <p><strong>卸载原版游戏</strong></p>
+                    <p style="color:var(--text-dim);font-size:0.92rem;">直装 APK 使用调试签名，与官方游戏签名不同，<span class="hl-red">不能覆盖安装</span>。必须先完全卸载原版游戏（数据也会清除），再安装直装版。</p>
+                </li>
+                <li>
+                    <p><strong>安装直装 APK</strong></p>
+                    <pre><code><span class="com"># 通过 adb 安装</span>
+adb install 游戏原版_直装.apk
+
+<span class="com"># 或直接在手机上点击安装</span></code></pre>
+                </li>
+                <li>
+                    <p><strong>打开游戏</strong></p>
+                    <p style="color:var(--text-dim);font-size:0.92rem;">启动游戏后，修改器菜单会<span class="hl-green">自动显示</span>在屏幕上（<code>JNI_OnLoad</code> 在 <code>loadLibrary</code> 时自动执行，无需任何手动操作）。</p>
+                </li>
+                <li>
+                    <p><strong>音量键切换菜单</strong></p>
+                    <p style="color:var(--text-dim);font-size:0.92rem;">按 <strong>音量下键</strong> 切换菜单的显示/隐藏状态。ESP 透视等功能在菜单隐藏时仍然正常运行（仅菜单 UI 隐藏，绘制逻辑不受影响）。</p>
+                </li>
+                <li>
+                    <p><strong>触摸操作菜单</strong></p>
+                    <p style="color:var(--text-dim);font-size:0.92rem;">直接用手指<span class="hl-green">点击菜单按钮</span>即可操作。触摸事件通过 <code>/dev/input/event*</code> 以只读方式捕获，<strong>不会消费事件</strong>，游戏本身的触摸操作不受影响。</p>
+                </li>
+            </ol>
+        </div>
+    </section>
+
+    <!-- ===== 7. 工作原理详解 ===== -->
+    <section id="sec7">
+        <h2>7. 工作原理详解</h2>
+        <div class="card">
+
+            <!-- SVG 流程图 -->
+            <div class="flow-diagram">
+                <svg width="760" height="200" viewBox="0 0 760 200" xmlns="http://www.w3.org/2000/svg">
+                    <defs>
+                        <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+                            <path d="M0,0 L0,6 L9,3 z" fill="#e94560"/>
+                        </marker>
+                        <linearGradient id="boxGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+                            <stop offset="0%" style="stop-color:#1c2545;stop-opacity:1"/>
+                            <stop offset="100%" style="stop-color:#16213e;stop-opacity:1"/>
+                        </linearGradient>
+                    </defs>
+
+                    <!-- 节点1: Game APK -->
+                    <rect x="10" y="65" width="120" height="50" rx="8" fill="url(#boxGrad)" stroke="#e94560" stroke-width="1.5"/>
+                    <text x="70" y="87" text-anchor="middle" fill="#e0e0e0" font-size="13" font-family="sans-serif">游戏 APK 启动</text>
+                    <text x="70" y="103" text-anchor="middle" fill="#a0a0b0" font-size="10" font-family="sans-serif">(注入后)</text>
+
+                    <!-- 箭头1 -->
+                    <line x1="135" y1="90" x2="165" y2="90" stroke="#e94560" stroke-width="2" marker-end="url(#arrow)"/>
+
+                    <!-- 节点2: loadLibrary -->
+                    <rect x="170" y="65" width="120" height="50" rx="8" fill="url(#boxGrad)" stroke="#4a9eff" stroke-width="1.5"/>
+                    <text x="230" y="87" text-anchor="middle" fill="#e0e0e0" font-size="13" font-family="sans-serif">loadLibrary</text>
+                    <text x="230" y="103" text-anchor="middle" fill="#a0a0b0" font-size="10" font-family="sans-serif">("Cube")</text>
+
+                    <!-- 箭头2 -->
+                    <line x1="295" y1="90" x2="325" y2="90" stroke="#e94560" stroke-width="2" marker-end="url(#arrow)"/>
+
+                    <!-- 节点3: JNI_OnLoad -->
+                    <rect x="330" y="65" width="120" height="50" rx="8" fill="url(#boxGrad)" stroke="#4ecca3" stroke-width="1.5"/>
+                    <text x="390" y="87" text-anchor="middle" fill="#e0e0e0" font-size="13" font-family="sans-serif">JNI_OnLoad</text>
+                    <text x="390" y="103" text-anchor="middle" fill="#a0a0b0" font-size="10" font-family="sans-serif">pid = getpid()</text>
+
+                    <!-- 箭头3 -->
+                    <line x1="455" y1="90" x2="485" y2="90" stroke="#e94560" stroke-width="2" marker-end="url(#arrow)"/>
+
+                    <!-- 节点4: Hook eglSwapBuffers -->
+                    <rect x="490" y="65" width="130" height="50" rx="8" fill="url(#boxGrad)" stroke="#f0c040" stroke-width="1.5"/>
+                    <text x="555" y="84" text-anchor="middle" fill="#e0e0e0" font-size="12" font-family="sans-serif">Hook</text>
+                    <text x="555" y="100" text-anchor="middle" fill="#a0a0b0" font-size="11" font-family="sans-serif">eglSwapBuffers</text>
+
+                    <!-- 箭头4 -->
+                    <line x1="625" y1="90" x2="655" y2="90" stroke="#e94560" stroke-width="2" marker-end="url(#arrow)"/>
+
+                    <!-- 节点5: Render ImGui -->
+                    <rect x="660" y="65" width="90" height="50" rx="8" fill="url(#boxGrad)" stroke="#e94560" stroke-width="1.5"/>
+                    <text x="705" y="84" text-anchor="middle" fill="#e0e0e0" font-size="12" font-family="sans-serif">渲染</text>
+                    <text x="705" y="100" text-anchor="middle" fill="#a0a0b0" font-size="11" font-family="sans-serif">ImGui</text>
+
+                    <!-- 底部标注: 触摸线程 -->
+                    <rect x="330" y="150" width="120" height="36" rx="8" fill="rgba(74,158,255,0.1)" stroke="#4a9eff" stroke-width="1" stroke-dasharray="4,3"/>
+                    <text x="390" y="172" text-anchor="middle" fill="#4a9eff" font-size="11" font-family="sans-serif">TouchPollThread</text>
+
+                    <line x1="390" y1="115" x2="390" y2="150" stroke="#4a9eff" stroke-width="1.5" stroke-dasharray="3,3" marker-end="url(#arrow)"/>
+                </svg>
+            </div>
+
+            <p style="text-align:center;color:var(--text-dim);font-size:0.88rem;margin-top:-8px;margin-bottom:24px;">注入流程图：游戏启动 → 加载 .so → JNI_OnLoad → Hook 渲染函数 → 每帧绘制 ImGui</p>
+
+            <!-- 技术流程详解 -->
+            <h3 style="color:var(--accent);font-size:1.1rem;margin-bottom:14px;border-left:3px solid var(--accent);padding-left:10px;">阶段一：启动加载</h3>
+            <p>游戏启动时，由于 smali 中已被注入 <code>System.loadLibrary("Cube")</code>，系统会自动加载 <code>libCube.so</code>。加载瞬间触发 <code>JNI_OnLoad</code> 入口函数，整个直装注入流程由此开始：</p>
+            <pre><code><span class="com">// Inject.h — JNI_OnLoad 入口</span>
+<span class="kw">extern "C"</span> JNIEXPORT jint JNICALL <span class="fn">JNI_OnLoad</span>(JavaVM *vm, <span class="kw">void</span> *reserved) {
+    g_vm = vm;
+    pid = <span class="fn">getpid</span>();  <span class="com">// 关键: 设置为自身进程 PID</span>
+    <span class="com">// 启动等待线程 (Hook eglSwapBuffers)</span>
+    <span class="fn">pthread_create</span>(&hook_tid, nullptr, WaitAndHookThread, nullptr);
+    <span class="com">// 启动触摸轮询线程</span>
+    <span class="fn">pthread_create</span>(&g_touch_tid, nullptr, TouchPollThread, nullptr);
+    <span class="kw">return</span> JNI_VERSION_1_6;
+}</code></pre>
+
+            <h3 style="color:var(--accent);font-size:1.1rem;margin:24px 0 14px;border-left:3px solid var(--accent);padding-left:10px;">阶段二：等待并安装 Hook</h3>
+            <p><code>WaitAndHookThread</code> 线程通过轮询 <code>/proc/self/maps</code> 检测 <code>libUE4.so</code> 是否已加载。确认加载后，使用 <code>dlsym</code> 获取 <code>eglSwapBuffers</code> 函数地址，再调用 <code>A64HookFunction</code> 安装内联 Hook：</p>
+            <pre><code><span class="com">// 等待 libUE4.so 加载 (最多 ~30 秒)</span>
+<span class="kw">while</span> (<span class="kw">true</span>) {
+    <span class="com">// 读取 /proc/self/maps 查找 libUE4.so</span>
+    <span class="kw">if</span> (found_libUE4) <span class="kw">break</span>;
+    <span class="fn">usleep</span>(100000);  <span class="com">// 100ms 轮询间隔</span>
+}
+
+<span class="com">// Hook eglSwapBuffers</span>
+<span class="kw">void</span> *egl_swap = <span class="fn">dlsym</span>(RTLD_DEFAULT, <span class="str">"eglSwapBuffers"</span>);
+<span class="fn">A64HookFunction</span>(egl_swap, hook_eglSwapBuffers, &orig_eglSwapBuffers);</code></pre>
+
+            <h3 style="color:var(--accent);font-size:1.1rem;margin:24px 0 14px;border-left:3px solid var(--accent);padding-left:10px;">阶段三：每帧渲染 ImGui</h3>
+            <p>Hook 安装后，游戏每次调用 <code>eglSwapBuffers</code> 交换帧缓冲时，实际执行的是 <code>hook_eglSwapBuffers</code>。该函数在首帧初始化 ImGui（OpenGL3 + Android 后端，从 assets 加载中文字体），随后每帧执行完整的渲染流程：</p>
+            <pre><code><span class="kw">static</span> EGLBoolean <span class="fn">hook_eglSwapBuffers</span>(EGLDisplay dpy, EGLSurface surface) {
+    <span class="com">// 获取当前画面尺寸</span>
+    <span class="fn">eglQuerySurface</span>(dpy, surface, EGL_WIDTH, &width);
+    <span class="fn">eglQuerySurface</span>(dpy, surface, EGL_HEIGHT, &height);
+
+    <span class="com">// 首帧初始化 ImGui</span>
+    <span class="kw">if</span> (!g_Initialized) <span class="fn">DirectInstallInit</span>();
+
+    <span class="com">// 每帧渲染</span>
+    <span class="fn">ImGui_ImplOpenGL3_NewFrame</span>();
+    <span class="fn">ImGui_ImplAndroid_NewFrame</span>(screenWidth, screenHeight);
+    ImGui::<span class="fn">NewFrame</span>();
+
+    <span class="kw">if</span> (g_menu_visible) { <span class="fn">BeginDraw</span>(); <span class="fn">颜色初始化</span>(); }
+    <span class="fn">DrawPlayer</span>(ImGui::<span class="fn">GetBackgroundDrawList</span>());  <span class="com">// ESP 始终绘制</span>
+    <span class="kw">if</span> (g_menu_visible) <span class="fn">EndDraw</span>();
+
+    ImGui::<span class="fn">Render</span>();
+    <span class="fn">ImGui_ImplOpenGL3_RenderDrawData</span>(ImGui::<span class="fn">GetDrawData</span>());
+
+    <span class="kw">return</span> <span class="fn">orig_eglSwapBuffers</span>(dpy, surface);  <span class="com">// 调用原始函数</span>
+}</code></pre>
+            <div class="callout green">
+                <strong>注意：</strong>Hook 函数中<strong>不调用 <code>glClear</code></strong>，否则游戏画面会被清除。ImGui 的绘制数据叠加在游戏画面之上，最后由原始 <code>eglSwapBuffers</code> 统一呈现到屏幕。
+            </div>
+
+            <h3 style="color:var(--accent);font-size:1.1rem;margin:24px 0 14px;border-left:3px solid var(--accent);padding-left:10px;">阶段四：触摸输入捕获</h3>
+            <p><code>TouchPollThread</code> 线程负责捕获触摸事件。它扫描 <code>/dev/input/event0</code> ~ <code>event15</code>，通过 <code>ioctl(EVIOCGBIT)</code> 检测支持 <code>ABS_MT_POSITION_X</code> 的设备（即触摸屏），然后持续读取 <code>input_event</code> 结构体：</p>
+            <pre><code><span class="com">// 查找触摸设备</span>
+<span class="kw">for</span> (<span class="kw">int</span> i = 0; i &lt; 16; i++) {
+    <span class="fn">snprintf</span>(path, <span class="str">"/dev/input/event%d"</span>, i);
+    <span class="kw">if</span> (支持 ABS_MT_POSITION_X) { fd = tmp; <span class="kw">break</span>; }
+}
+
+<span class="com">// 轮询事件</span>
+<span class="kw">while</span> (<span class="kw">true</span>) {
+    <span class="fn">read</span>(fd, &ev, <span class="kw">sizeof</span>(ev));
+    <span class="kw">switch</span> (ev.type) {
+        <span class="kw">case</span> EV_ABS:  <span class="com">// 原始坐标 X/Y</span>
+        <span class="kw">case</span> EV_KEY:  <span class="com">// BTN_TOUCH 按下/抬起, KEY_VOLUMEDOWN 切换菜单</span>
+        <span class="kw">case</span> EV_SYN:  <span class="com">// 转换坐标 → io.MousePos</span>
+    }
+}</code></pre>
+            <p>触摸原始坐标通过 <code>(raw - min) / range * screen</code> 公式转换为屏幕像素坐标，写入 <code>ImGui::GetIO().MousePos</code> 和 <code>io.MouseDown[0]</code>。由于采用 <code>O_RDONLY</code> 只读模式打开设备，事件不会被消费，游戏仍能正常收到触摸输入。</p>
+
+            <h3 style="color:var(--accent);font-size:1.1rem;margin:24px 0 14px;border-left:3px solid var(--accent);padding-left:10px;">阶段五：内存读写（免root核心）</h3>
+            <p>所有内存读写操作最终调用 <code>process_vm_readv</code> / <code>process_vm_writev</code> 系统调用。在直装模式下，<code>getPID()</code> 返回 <code>getpid()</code>（自身进程 ID），Linux 内核对自身进程的 <code>process_vm_readv</code> 调用<strong>不检查 root 权限</strong>：</p>
+            <pre><code><span class="com">// Memory.h — 直装模式下的 getPID()</span>
+<span class="kw">int</span> <span class="fn">getPID</span>(<span class="kw">const char</span> *packageName) {
+<span class="kw">#ifdef</span> DIRECT_INSTALL
+    <span class="kw">return</span> <span class="fn">getpid</span>();  <span class="com">// 返回自身 PID, 无需 root</span>
+<span class="kw">#else</span>
+    <span class="com">// 旧模式: 遍历 /proc 查找游戏包名对应的 PID</span>
+<span class="kw">#endif</span>
+}
+
+<span class="com">// 实际内存读取 (pid = getpid())</span>
+<span class="kw">ssize_t</span> <span class="fn">process_v</span>(pid_t __pid, ...) {
+    <span class="kw">return</span> <span class="fn">syscall</span>(process_vm_readv_syscall, __pid, ...);
+}</code></pre>
+            <div class="callout green">
+                <strong>这是整个免root方案的基石：</strong>旧方案中 <code>pid</code> 是游戏进程 ID（不同于修改器进程），跨进程读写需要 <code>CAP_SYS_PTRACE</code>（即 root）；新方案中 <code>pid == getpid()</code>，内核允许进程读写自身内存，无需任何特殊权限。
+            </div>
+        </div>
+    </section>
+
+    <!-- ===== 8. 注意事项与故障排查 ===== -->
+    <section id="sec8">
+        <h2>8. 注意事项与故障排查</h2>
+        <div class="card">
+
+            <div class="callout">
+                <strong>1. 签名校验 / 反篡改检测</strong><br>
+                游戏可能内置签名校验或 APK 完整性检测机制。直装版使用了调试签名，与官方签名不同，可能触发检测导致闪退或封号。需要额外的反检测绕过方案（如 Hook 签名校验函数、修改 <code>PackageManager</code> 返回值等）。
+            </div>
+
+            <div class="callout yellow">
+                <strong>2. 触摸设备路径差异</strong><br>
+                不同设备的触摸设备节点路径可能不同（<code>/dev/input/event0</code> ~ <code>event15</code>）。如果菜单无法响应触摸，请通过 logcat 过滤 <code>"DirectInstall"</code> 标签查看日志：
+                <pre style="margin-top:10px;"><code>adb logcat -s DirectInstall</code></pre>
+                日志中会打印找到的触摸设备路径。若显示「未找到触摸设备」，说明当前设备的触摸节点不在扫描范围内，需修改 <code>TouchPollThread</code> 中的扫描逻辑。
+            </div>
+
+            <div class="callout">
+                <strong>3. eglSwapBuffers Hook 的指令限制</strong><br>
+                <code>And64InlineHook</code> 采用覆盖函数入口前 16 字节（4 条 ARM64 指令）的方式安装 Hook。这要求目标函数前 4 条指令<strong>不能包含 PC 相对寻址指令</strong>（如 <code>B</code> / <code>BL</code> / <code>ADR</code> / <code>ADRP</code> / <code>LDR literal</code>）。标准的 <code>eglSwapBuffers</code> 函数序言通常为 <code>STP</code> / <code>MOV</code> 等指令，不受此限制。若 Hook 后游戏崩溃，可能是目标函数序言不满足要求。
+            </div>
+
+            <div class="callout yellow">
+                <strong>4. 内存偏移地址随版本变化</strong><br>
+                代码中使用的内存偏移地址（如 <code>libbase + 0xXXX</code>、<code>Gname</code>、<code>Uworld</code> 等全局偏移）是针对特定游戏版本硬编码的。游戏版本更新后，UE4 引擎重新编译会导致偏移地址变化，<strong>需要重新逆向定位</strong>。可通过 <code>get_module_base(pid, "libUE4.so")</code> 获取基址后重新计算。
+            </div>
+
+            <div class="callout">
+                <strong>5. 字体加载失败</strong><br>
+                如果菜单文字显示为方块（豆腐块 □□□），说明中文字体加载失败。请确认 <code>Font.ttf</code> 已被正确注入到游戏 APK 的 <code>assets/</code> 目录中。可解包直装 APK 检查 <code>assets/Font.ttf</code> 是否存在。logcat 中搜索 <code>"assets/Font.ttf 未找到"</code> 可确认加载状态。
+            </div>
+
+            <div class="callout yellow">
+                <strong>6. 安卓 11+ 分区存储限制</strong><br>
+                Android 11 及以上版本引入了 Scoped Storage（分区存储）机制，部分文件系统访问行为发生变化。虽然直装方案主要通过 <code>/proc/self/maps</code>、<code>/dev/input/event*</code>、<code>process_vm_readv</code> 等系统级接口工作（不受分区存储限制），但若涉及外部存储文件读写，可能需要额外适配。
+            </div>
+
+            <!-- 故障排查速查表 -->
+            <h3 style="color:var(--accent);font-size:1.1rem;margin:28px 0 14px;border-left:3px solid var(--accent);padding-left:10px;">故障排查速查表</h3>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width:200px;">现象</th>
+                            <th>可能原因</th>
+                            <th style="width:180px;">排查方法</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>游戏闪退</td>
+                            <td>签名校验检测 / Hook 崩溃</td>
+                            <td>logcat 过滤 <code>DirectInstall</code></td>
+                        </tr>
+                        <tr>
+                            <td>菜单不显示</td>
+                            <td>eglSwapBuffers Hook 失败 / ImGui 未初始化</td>
+                            <td>检查 <code>eglSwapBuffers Hook</code> 日志</td>
+                        </tr>
+                        <tr>
+                            <td>菜单显示但无响应</td>
+                            <td>触摸设备未找到 / 坐标转换错误</td>
+                            <td>检查 <code>找到触摸设备</code> 日志</td>
+                        </tr>
+                        <tr>
+                            <td>文字显示方块</td>
+                            <td>Font.ttf 未注入 assets</td>
+                            <td>解包 APK 检查 assets 目录</td>
+                        </tr>
+                        <tr>
+                            <td>ESP 透视无数据</td>
+                            <td>内存偏移地址过期</td>
+                            <td>重新定位 libUE4.so 偏移</td>
+                        </tr>
+                        <tr>
+                            <td>安装失败</td>
+                            <td>未卸载原版 / 签名冲突</td>
+                            <td>先卸载原版游戏</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="callout green" style="margin-top:20px;">
+                <strong>logcat 调试命令汇总：</strong>
+                <pre style="margin-top:10px;"><code><span class="com"># 查看所有直装相关日志</span>
+adb logcat -s DirectInstall
+
+<span class="com"># 查看 Hook 相关日志</span>
+adb logcat -s DirectInstall And64Hook
+
+<span class="com"># 同时查看崩溃日志</span>
+adb logcat -s DirectInstall And64Hook DEBUG</code></pre>
+            </div>
+
+        </div>
+    </section>
+
+</main>
+
+<!-- ===== 页脚 ===== -->
+<footer class="footer">
+    <p>直装使用指南 · 和平精英修改器免root方案 · 技术文档</p>
+    <p style="margin-top:6px;">本指南基于项目源码实际编写，涵盖编译、打包、安装、原理与故障排查全流程。</p>
+</footer>
+
+<!-- ===== 返回顶部按钮 ===== -->
+<button id="back-to-top" aria-label="返回顶部">&#8593;</button>
+
+<script>
+    // 返回顶部按钮显隐逻辑
+    (function() {
+        var btn = document.getElementById('back-to-top');
+        window.addEventListener('scroll', function() {
+            if (window.pageYOffset > 400) {
+                btn.classList.add('show');
+            } else {
+                btn.classList.remove('show');
+            }
+        });
+        btn.addEventListener('click', function() {
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        });
+    })();
+</script>
+
+</body>
+</html>

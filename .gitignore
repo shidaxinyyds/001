@@ -1,0 +1,21 @@
+# Build artifacts
+app/build/
+app/src/main/obj/
+build/
+.gradle/
+local.properties
+
+# Backup files
+*.bak
+
+# Work files
+.workbuddy/
+
+# IDE
+.idea/
+*.iml
+.cxx/
+
+# OS
+Thumbs.db
+.DS_Store
