@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string>
 #include <imgui/imgui.h>
-#include "gradient.h"
+#include "Gradient.h"
 
 #ifdef IMCANDYCONSTS
 
