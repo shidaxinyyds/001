@@ -31,15 +31,29 @@ jobs:
 
       - name: Build native code with ndk-build
         run: |
-          echo "NDK path: $ANDROID_NDK_HOME"
+          echo "=== Working directory ==="
+          pwd
+          echo "=== NDK path ==="
+          echo "$ANDROID_NDK_HOME"
           ls -la "$ANDROID_NDK_HOME/ndk-build"
           chmod +x "$ANDROID_NDK_HOME/ndk-build"
+          echo "=== jni/ directory ==="
+          ls -la jni/
+          echo "=== Source files ==="
+          find jni/src -name "*.c*" -o -name "*.cpp" | head -30
+          echo "=== Prebuilt libraries ==="
+          ls -la jni/src/CPUaffinity/libPikachu.a jni/include/lib/libcurl.a
+          echo "=== Running ndk-build ==="
           "$ANDROID_NDK_HOME/ndk-build" \
             NDK_PROJECT_PATH=. \
             APP_BUILD_SCRIPT=jni/Android.mk \
             NDK_APPLICATION_MK=jni/Application.mk \
             NDK_OUT=build/ndk/obj \
-            NDK_LIBS_OUT=build/ndk/libs
+            NDK_LIBS_OUT=build/ndk/libs \
+            V=1
+          echo "=== ndk-build exit code: $? ==="
+          echo "=== Build output ==="
+          find build/ndk -type f 2>/dev/null || echo "No build output found"
 
       - name: Copy native binary to jniLibs
         run: |
