@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">BerryKernel</string>
+    <string name="subtitle">Native Overlay Tool</string>
+    <string name="btn_start">启动</string>
+    <string name="btn_stop">停止</string>
+    <string name="status_stopped">状态：已停止</string>
+    <string name="status_running">状态：运行中</string>
+    <string name="hint">使用说明：\n1. 首次使用请先授予悬浮窗权限\n2. 点击「启动」开始运行\n3. 悬浮窗将出现在屏幕上方\n4. 点击「停止」结束运行</string>
+</resources>
