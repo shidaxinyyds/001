@@ -56,16 +56,13 @@ jobs:
           echo "=== Build output ==="
           find build/ndk -type f 2>/dev/null || echo "No build output found"
 
-      - name: Push ndk-build log to logs branch
+      - name: Upload ndk-build log
         if: always()
-        run: |
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git checkout --orphan logs
-          git rm -rf .
-          git add ndk-build.log 2>/dev/null || echo "No log file found"
-          git commit -m "ndk-build log from run ${{ github.run_id }}" || echo "Nothing to commit"
-          git push origin logs --force
+        uses: actions/upload-artifact@v4
+        with:
+          name: ndk-build-log
+          path: ndk-build.log
+          retention-days: 7
 
       - name: Fail if ndk-build failed
         if: steps.ndk-build.outcome == 'failure'
@@ -74,10 +71,17 @@ jobs:
       - name: Copy native binary to jniLibs
         run: |
           mkdir -p app/src/main/jniLibs/arm64-v8a
-          cp build/ndk/libs/arm64-v8a/m app/src/main/jniLibs/arm64-v8a/libberry.so
-          chmod +x app/src/main/jniLibs/arm64-v8a/libberry.so
-          echo "Binary copied:"
-          ls -la app/src/main/jniLibs/arm64-v8a/
+          if [ -f build/ndk/libs/arm64-v8a/m ]; then
+            cp build/ndk/libs/arm64-v8a/m app/src/main/jniLibs/arm64-v8a/libberry.so
+            chmod +x app/src/main/jniLibs/arm64-v8a/libberry.so
+            echo "Binary copied:"
+            ls -la app/src/main/jniLibs/arm64-v8a/
+          else
+            echo "ERROR: Native binary not found at build/ndk/libs/arm64-v8a/m"
+            echo "=== Contents of build/ndk/ ==="
+            find build/ndk -type f 2>/dev/null || echo "No build output found"
+            exit 1
+          fi
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
