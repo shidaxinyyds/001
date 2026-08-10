@@ -14,8 +14,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -34,91 +32,20 @@ jobs:
           echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
 
       - name: Build native code with ndk-build
-        id: ndk-build
-        continue-on-error: true
         run: |
-          set +e
-          echo "=== Working directory ==="
-          pwd
-          echo "=== NDK path ==="
-          echo "$ANDROID_NDK_HOME"
-          ls -la "$ANDROID_NDK_HOME/ndk-build" || echo "ndk-build NOT FOUND"
-          echo "=== jni/ directory ==="
-          ls -la jni/
-          echo "=== Android.mk ==="
-          cat jni/Android.mk
-          echo "=== Application.mk ==="
-          cat jni/Application.mk
-          echo "=== Source files ==="
-          find jni/src -name "*.c*" -o -name "*.cpp" | head -30
-          echo "=== Prebuilt libraries ==="
-          ls -la jni/src/CPUaffinity/libPikachu.a jni/include/lib/libcurl.a
-          echo "=== Running ndk-build ==="
           "$ANDROID_NDK_HOME/ndk-build" \
             NDK_PROJECT_PATH=. \
             APP_BUILD_SCRIPT=jni/Android.mk \
             NDK_APPLICATION_MK=jni/Application.mk \
             NDK_OUT=build/ndk/obj \
             NDK_LIBS_OUT=build/ndk/libs \
-            V=1 > ndk-build.log 2>&1
-          NDK_EXIT=$?
-          echo "=== ndk-build exit code: $NDK_EXIT ==="
-          echo "=== ndk-build output (full) ==="
-          cat ndk-build.log
-          echo "=== Build output ==="
-          find build/ndk -type f 2>/dev/null || echo "No build output found"
-          exit $NDK_EXIT
-
-      - name: Upload ndk-build log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ndk-build-log
-          path: ndk-build.log
-          retention-days: 7
-
-      - name: Post ndk-build log as commit comment
-        if: always()
-        continue-on-error: true
-        run: |
-          if [ -f ndk-build.log ]; then
-            python3 -c "
-          import json, sys
-          with open('ndk-build.log', 'r') as f:
-              log = f.read()
-          body = '## ndk-build log (run #${{ github.run_id }})\n\n\`\`\`\n' + log + '\n\`\`\`'
-          print(json.dumps({'body': body}))
-          " > /tmp/comment.json
-            curl -s -X POST \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer ${{ github.token }}" \
-              "https://api.github.com/repos/${{ github.repository }}/commits/${{ github.sha }}/comments" \
-              -d @/tmp/comment.json
-          fi
-
-      - name: Fail if ndk-build failed
-        if: steps.ndk-build.outcome == 'failure'
-        run: |
-          echo "## ndk-build FAILED" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          cat ndk-build.log >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          exit 1
+            V=1
 
       - name: Copy native binary to jniLibs
         run: |
           mkdir -p app/src/main/jniLibs/arm64-v8a
-          if [ -f build/ndk/libs/arm64-v8a/m ]; then
-            cp build/ndk/libs/arm64-v8a/m app/src/main/jniLibs/arm64-v8a/libberry.so
-            chmod +x app/src/main/jniLibs/arm64-v8a/libberry.so
-            echo "Binary copied:"
-            ls -la app/src/main/jniLibs/arm64-v8a/
-          else
-            echo "ERROR: Native binary not found at build/ndk/libs/arm64-v8a/m"
-            echo "=== Contents of build/ndk/ ==="
-            find build/ndk -type f 2>/dev/null || echo "No build output found"
-            exit 1
-          fi
+          cp build/ndk/libs/arm64-v8a/m app/src/main/jniLibs/arm64-v8a/libberry.so
+          chmod +x app/src/main/jniLibs/arm64-v8a/libberry.so
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
@@ -129,50 +56,7 @@ jobs:
         run: echo "sdk.dir=$ANDROID_HOME" > local.properties
 
       - name: Build Debug APK
-        id: gradle-build
-        continue-on-error: true
-        run: |
-          set +e
-          gradle assembleDebug --no-daemon --stacktrace > gradle-build.log 2>&1
-          GRADLE_EXIT=$?
-          echo "=== Gradle exit code: $GRADLE_EXIT ==="
-          echo "=== Gradle output (last 200 lines) ==="
-          tail -200 gradle-build.log
-          exit $GRADLE_EXIT
-
-      - name: Post Gradle log as commit comment
-        if: always()
-        continue-on-error: true
-        run: |
-          if [ -f gradle-build.log ]; then
-            python3 -c "
-          import json
-          with open('gradle-build.log', 'r') as f:
-              log = f.read()
-          # Truncate to 50000 chars to avoid GitHub API limits
-          if len(log) > 50000:
-              log = log[-50000:]
-          body = '## Gradle build log (run #${{ github.run_id }})\n\n\`\`\`\n' + log + '\n\`\`\`'
-          print(json.dumps({'body': body}))
-          " > /tmp/gradle-comment.json
-            curl -s -X POST \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer ${{ github.token }}" \
-              "https://api.github.com/repos/${{ github.repository }}/commits/${{ github.sha }}/comments" \
-              -d @/tmp/gradle-comment.json
-          fi
-
-      - name: Upload Gradle build log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gradle-build-log
-          path: gradle-build.log
-          retention-days: 7
-
-      - name: Fail if Gradle build failed
-        if: steps.gradle-build.outcome == 'failure'
-        run: exit 1
+        run: gradle assembleDebug --no-daemon
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
