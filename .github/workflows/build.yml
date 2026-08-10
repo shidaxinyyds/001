@@ -111,15 +111,22 @@ jobs:
       # ============================================================
       #  7. 独立模式: 用 Gradle 编译完整 APK
       # ============================================================
+      - name: 安装 Gradle 6.3 (AGP 3.6.1 兼容)
+        if: github.event.inputs.build_mode != 'direct_install'
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '6.3'
+
       - name: 编译 APK (独立悬浮窗模式)
         if: github.event.inputs.build_mode != 'direct_install'
         run: |
           echo "===== 独立悬浮窗模式编译 ====="
           export JAVA_HOME="${{ steps.jdk11.outputs.path }}"
+          export PATH="$JAVA_HOME/bin:$PATH"
           echo "JAVA_HOME=$JAVA_HOME"
           java -version
-          chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 || {
+          gradle --version
+          gradle assembleDebug --no-daemon --stacktrace 2>&1 || {
             echo "Gradle 构建失败, 尝试仅编译 .so..."
             cd app/src/main/jni
             ${{ steps.setup_ndk.outputs.ndk-path }}/ndk-build
