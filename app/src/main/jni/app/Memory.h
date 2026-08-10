@@ -111,16 +111,28 @@ int countddr;
 
 // syscall内存读写
 #if defined(__arm__)
+#ifndef PROCESS_VM_READV_DEFINED
+#define PROCESS_VM_READV_DEFINED
 int process_vm_readv_syscall = 376;
+#endif
 int process_vm_writev_syscall = 377;
 #elif defined(__aarch64__)
+#ifndef PROCESS_VM_READV_DEFINED
+#define PROCESS_VM_READV_DEFINED
 int process_vm_readv_syscall = 270;
+#endif
 int process_vm_writev_syscall = 271;
 #elif defined(__i386__)
+#ifndef PROCESS_VM_READV_DEFINED
+#define PROCESS_VM_READV_DEFINED
 int process_vm_readv_syscall = 347;
+#endif
 int process_vm_writev_syscall = 348;
 #else
+#ifndef PROCESS_VM_READV_DEFINED
+#define PROCESS_VM_READV_DEFINED
 int process_vm_readv_syscall = 310;
+#endif
 int process_vm_writev_syscall = 311;
 #endif
 

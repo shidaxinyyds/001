@@ -26,16 +26,28 @@
 #include <sys/uio.h>
 
 #if defined(__arm__)
+#ifndef PROCESS_VM_READV_DEFINED
+#define PROCESS_VM_READV_DEFINED
 int process_vm_readv_syscall = 376;
+#endif
 int process_vm_write64_syscall = 377;
 #elif defined(__aarch64__)
+#ifndef PROCESS_VM_READV_DEFINED
+#define PROCESS_VM_READV_DEFINED
 //int process_vm_readv_syscall = 270;
+#endif
 int process_vm_write64_syscall = 271;
 #elif defined(__i386__)
+#ifndef PROCESS_VM_READV_DEFINED
+#define PROCESS_VM_READV_DEFINED
 int process_vm_readv_syscall = 347;
+#endif
 int process_vm_write64_syscall = 348;
 #else
+#ifndef PROCESS_VM_READV_DEFINED
+#define PROCESS_VM_READV_DEFINED
 int process_vm_readv_syscall = 310;
+#endif
 int process_vm_write64_syscall = 311;
 #endif
 
