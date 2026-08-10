@@ -1,17 +1,11 @@
 package com.berry.kernel;
 
-import android.app.Activity;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
 import android.app.Service;
-import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.IBinder;
 import android.provider.Settings;
-import android.view.View;
 import android.widget.Button;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -20,9 +14,6 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.app.NotificationCompat;
-
-import java.io.File;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -76,21 +67,12 @@ public class MainActivity extends AppCompatActivity {
             });
 
     private void startKernel() {
-        String nativeDir = getApplicationInfo().nativeLibraryDir;
-        String binaryPath = nativeDir + "/libberry.so";
-
-        File binary = new File(binaryPath);
-        if (!binary.exists()) {
-            tvStatus.setText("状态：未找到本地工具文件");
-            Toast.makeText(this, "工具文件不存在: " + binaryPath, Toast.LENGTH_LONG).show();
-            return;
-        }
-
-        binary.setExecutable(true, false);
-
         Intent serviceIntent = new Intent(this, KernelService.class);
-        serviceIntent.putExtra("binary_path", binaryPath);
-        startKernelService(serviceIntent);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(serviceIntent);
+        } else {
+            startService(serviceIntent);
+        }
 
         btnStart.setEnabled(false);
         btnStop.setEnabled(true);
@@ -104,13 +86,5 @@ public class MainActivity extends AppCompatActivity {
         btnStart.setEnabled(true);
         btnStop.setEnabled(false);
         tvStatus.setText("状态：已停止");
-    }
-
-    private void startKernelService(Intent intent) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent);
-        } else {
-            startService(intent);
-        }
     }
 }

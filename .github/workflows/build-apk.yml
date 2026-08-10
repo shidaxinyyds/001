@@ -41,11 +41,10 @@ jobs:
             NDK_LIBS_OUT=build/ndk/libs \
             V=1
 
-      - name: Copy native binary to jniLibs
+      - name: Copy native library to jniLibs
         run: |
           mkdir -p app/src/main/jniLibs/arm64-v8a
-          cp build/ndk/libs/arm64-v8a/m app/src/main/jniLibs/arm64-v8a/libberry.so
-          chmod +x app/src/main/jniLibs/arm64-v8a/libberry.so
+          cp build/ndk/libs/arm64-v8a/libberry.so app/src/main/jniLibs/arm64-v8a/libberry.so
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3

@@ -14,7 +14,7 @@ include $(PREBUILT_STATIC_LIBRARY)
 # Main module
 include $(CLEAR_VARS)
 
-LOCAL_MODULE := m
+LOCAL_MODULE := berry
 LOCAL_CFLAGS := -w -s -Wno-error=format-security -fvisibility=hidden -fpermissive -fexceptions
 LOCAL_CPPFLAGS += -w -s -Wno-error=format-security -fvisibility=hidden -Wno-error=c++11-narrowing -fpermissive -Wall -fexceptions -std=c++17
 LOCAL_LDFLAGS += -Wl,--gc-sections,--strip-all
@@ -38,4 +38,4 @@ LOCAL_LDLIBS += -lz
 
 LOCAL_STATIC_LIBRARIES := imgui_static curl_static
 
-include $(BUILD_EXECUTABLE)
+include $(BUILD_SHARED_LIBRARY)

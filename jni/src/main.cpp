@@ -1,5 +1,3 @@
-//微验网络验证//
-//如果是AIDE编译jni，请将原main.cpp删除，将此注入好的文件改成main.cpp
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -67,69 +65,122 @@ using namespace std;
 //#include "My_T3verify.h"
 #include "drivers/driver.h"
 
+// JNI 支持
+#include <jni.h>
+#include <android/native_window_jni.h>
+#include <android/log.h>
+#include <thread>
+
+#define LOG_TAG "BerryNative"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
 using namespace std;
 
 int abs_ScreenX, abs_ScreenY;
 
-int 无后台, 自瞄选项, 漏打;
+int 无后台 = 1, 自瞄选项, 漏打;
 
 布局 布局;
 绘制 绘制;
 
-int main(int argc, char* argv[])
+static std::thread* g_render_thread = nullptr;
+static bool g_running = false;
+
+// 声明 draw.cpp 中的设置函数
+extern void set_external_window(ANativeWindow* window);
+extern void set_screen_info(int w, int h, int orient);
+
+static void berry_run()
 {
+	LOGI("berry_run 开始");
 
+	绘制.防录屏 = 1;
+	绘制.自瞄模式 = 0;
+	绘制.无后台开关 = 1;
 
-
-
-	绘制.防录屏 = 1;      // std::stoi(argv[1]);
-	绘制.自瞄模式 = 0;    // std::stoi(argv[2]);
-	绘制.无后台开关 = 0;  // std::stoi(argv[3]);
-	
-	// new std::thread(音量);
-	 // 无后台选择
-	/*printf("\033[31;1m");
-	std::cout << std::endl << "1.有后台\n2.无后台\n\n";
-	std::cin >> 无后台;*/
-	if (无后台 == 1)
+	// 初始化程序（使用 Java 提供的窗口）
+	if (布局.初始化程序() != 0)
 	{
-		std::cout << "\033[1;32m[+] 有后台开启成功\033[0m\n";
+		LOGE("初始化程序失败");
+		return;
 	}
-	else
-	{
-		pid_t pids = fork();
-		if (pids > 0)
-		{
-			exit(0);
-		}
-		std::cout << "\033[1;32m[+] 无后台开启成功\033[0m\n";
-	}
+	LOGI("初始化程序成功");
 
-
-
-	布局.初始化程序();
 	加载内存图片();
-	/*
-	std::cout << std::endl << "[-] 自瞄模式：\n[-] 1.触摸自瞄\n[-] 2.驱动自瞄\n\n";
-	std::cin >> 自瞄选项;
-	*/
-	//if (绘制.自瞄模式 == 0)
-	{
-		绘制.自瞄.预判力度 = 1.55f;
-		绘制.自瞄主线程();
-		//绘制.陀螺仪自瞄主线程();
-		//绘制.陀螺仪自瞄主线程2();
-		//绘制.停火闪镜线程();
-		绘制.GetTouch();
-		绘制.按钮.自瞄选项 = true;
-		// 绘制.是否开启自瞄页面 = true;
-	}
+	LOGI("图片加载完成");
 
+	绘制.自瞄.预判力度 = 1.55f;
+	绘制.自瞄主线程();
+	绘制.GetTouch();
+	绘制.按钮.自瞄选项 = true;
 	绘制.读取配置();
 
-	// 绘制.自瞄主线程();
-	// 绘制.GetTouch();
-
+	LOGI("开始渲染循环");
 	布局.开启悬浮窗();
-
+	LOGI("渲染循环结束");
 }
+
+extern "C" {
+
+JNIEXPORT jboolean JNICALL
+Java_com_berry_kernel_KernelService_nativeInit(
+	JNIEnv* env, jobject thiz, jobject surface, jint width, jint height, jint orientation)
+{
+	LOGI("nativeInit 调入, width=%d, height=%d, orientation=%d", width, height, orientation);
+
+	if (!surface)
+	{
+		LOGE("surface 为空");
+		return JNI_FALSE;
+	}
+
+	ANativeWindow* window = ANativeWindow_fromSurface(env, surface);
+	if (!window)
+	{
+		LOGE("ANativeWindow_fromSurface 失败");
+		return JNI_FALSE;
+	}
+
+	LOGI("ANativeWindow 获取成功: %p", window);
+
+	// 设置外部窗口和屏幕信息给 draw.cpp
+	set_external_window(window);
+	set_screen_info(width, height, orientation);
+
+	if (g_running)
+	{
+		LOGE("已经在运行中");
+		return JNI_FALSE;
+	}
+	g_running = true;
+
+	// 在新线程中运行主循环
+	g_render_thread = new std::thread([]() {
+		berry_run();
+		g_running = false;
+	});
+
+	LOGI("nativeInit 完成");
+	return JNI_TRUE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_berry_kernel_KernelService_nativeStop(JNIEnv* env, jobject thiz)
+{
+	LOGI("nativeStop 调入");
+
+	g_running = false;
+
+	if (g_render_thread)
+	{
+		if (g_render_thread->joinable())
+			g_render_thread->detach();
+		delete g_render_thread;
+		g_render_thread = nullptr;
+	}
+
+	LOGI("nativeStop 完成");
+}
+
+} // extern "C"

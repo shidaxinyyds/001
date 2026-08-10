@@ -19,6 +19,24 @@ bool g_Initialized = false;
 ImGuiWindow* g_window = nullptr;
 int Orientation;
 
+// JNI 提供的外部窗口和屏幕信息（免root方案）
+static ANativeWindow* g_external_window = nullptr;
+static int g_java_screen_w = 0;
+static int g_java_screen_h = 0;
+static int g_java_orientation = 0;
+
+void set_external_window(ANativeWindow* window)
+{
+	g_external_window = window;
+}
+
+void set_screen_info(int w, int h, int orient)
+{
+	g_java_screen_w = w;
+	g_java_screen_h = h;
+	g_java_orientation = orient;
+}
+
 bool initGUI_draw(uint32_t _screen_x, uint32_t _screen_y, bool log)
 {
 	orientation = displayInfo.orientation;
@@ -37,18 +55,23 @@ bool initGUI_draw(uint32_t _screen_x, uint32_t _screen_y, bool log)
 
 bool init_egl(uint32_t _screen_x, uint32_t _screen_y, bool log)
 {
-	string strbool = "1";
-	/*cout << endl << "是否开启防录屏(y/n):";
-	cin >> strbool;
-	cout << endl;*/
-
-	if (strbool == "y" || strbool == "1" || strbool == "Y")//等于y和1就开启防录屏
+	if (g_external_window)
 	{
-		::native_window = android::ANativeWindowCreator::Create("AImGui", _screen_x, _screen_y, true);
+		// 免root方案：使用 Java WindowManager 创建的 Surface
+		::native_window = g_external_window;
 	}
 	else
 	{
-		::native_window = android::ANativeWindowCreator::Create("AImGui", _screen_x, _screen_y);
+		// 原 root 方案：通过 SurfaceComposer 创建窗口
+		string strbool = "1";
+		if (strbool == "y" || strbool == "1" || strbool == "Y")
+		{
+			::native_window = android::ANativeWindowCreator::Create("AImGui", _screen_x, _screen_y, true);
+		}
+		else
+		{
+			::native_window = android::ANativeWindowCreator::Create("AImGui", _screen_x, _screen_y);
+		}
 	}
 
 	ANativeWindow_acquire(native_window);
@@ -105,7 +128,18 @@ bool init_egl(uint32_t _screen_x, uint32_t _screen_y, bool log)
 
 void screen_config()
 {
-	displayInfo = android::ANativeWindowCreator::GetDisplayInfo();
+	if (g_java_screen_w > 0)
+	{
+		// 免root方案：使用 Java 传入的屏幕参数
+		displayInfo.width = g_java_screen_w;
+		displayInfo.height = g_java_screen_h;
+		displayInfo.orientation = g_java_orientation;
+	}
+	else
+	{
+		// 原 root 方案：通过 SurfaceComposer 获取屏幕信息
+		displayInfo = android::ANativeWindowCreator::GetDisplayInfo();
+	}
 	Orientation = displayInfo.orientation;
 }
 

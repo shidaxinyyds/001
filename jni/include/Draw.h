@@ -66,4 +66,8 @@ void shutdown();
 
 int 音量();
 
+// 免root方案：设置 Java 提供的窗口和屏幕信息
+void set_external_window(ANativeWindow* window);
+void set_screen_info(int w, int h, int orient);
+
 #endif //NATIVESURFACE_DRAW_H
