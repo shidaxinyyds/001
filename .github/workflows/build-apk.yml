@@ -77,7 +77,12 @@ jobs:
 
       - name: Fail if ndk-build failed
         if: steps.ndk-build.outcome == 'failure'
-        run: exit 1
+        run: |
+          echo "## ndk-build FAILED" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat ndk-build.log >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          exit 1
 
       - name: Copy native binary to jniLibs
         run: |
