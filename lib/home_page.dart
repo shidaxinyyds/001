@@ -50,30 +50,46 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  void showOverlay() async {
-    if (await FlutterOverlayWindow.isActive()) {
-      print("悬浮窗已开启");
-      return;
-    }
-    if (await FlutterOverlayWindow.isPermissionGranted() != true) {
-      if (await FlutterOverlayWindow.requestPermission() != true) {
-        print("未授予悬浮窗权限");
+  Future<void> showOverlay() async {
+    try {
+      if (await FlutterOverlayWindow.isActive()) {
+        print("悬浮窗已开启");
         return;
       }
-    }
+      // 若未授予“显示在其他应用上层”权限，先引导到系统设置开启。
+      bool granted = await FlutterOverlayWindow.isPermissionGranted() == true;
+      if (!granted) {
+        granted = await FlutterOverlayWindow.requestPermission() == true;
+      }
+      if (!granted) {
+        // 权限未授予时悬浮窗无法显示，提示用户去系统设置开启。
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text(
+                '悬浮窗需要“显示在其他应用上层”权限。请到系统设置→应用→麻将训练器→权限中开启，再点一次“开始识别"。'),
+            duration: Duration(seconds: 6),
+          ));
+        }
+        print("未授予悬浮窗权限，无法显示悬浮按钮");
+        return;
+      }
 
-    // 以 266x340 打开：悬浮窗内“悬浮按钮 + 分析面板”两块区域同时常驻，整窗可拖动。
-    await FlutterOverlayWindow.showOverlay(
-      enableDrag: true,
-      overlayTitle: "麻将助手",
-      overlayContent: '悬浮窗已开启',
-      flag: OverlayFlag.defaultFlag,
-      visibility: NotificationVisibility.visibilityPublic,
-      positionGravity: PositionGravity.auto,
-      alignment: OverlayAlignment.topRight,
-      width: 266,
-      height: 340,
-    );
+      // 先以 60x60 的“悬浮按钮”形态出现（可拖动，常驻屏幕）；
+      // 用户点击按钮后由悬浮窗自身 resizeOverlay 展开为分析小窗口。
+      await FlutterOverlayWindow.showOverlay(
+        enableDrag: true,
+        overlayTitle: "麻将助手",
+        overlayContent: '麻将助手',
+        flag: OverlayFlag.defaultFlag,
+        visibility: NotificationVisibility.visibilityPublic,
+        positionGravity: PositionGravity.auto,
+        alignment: OverlayAlignment.topRight,
+        width: 60,
+        height: 60,
+      );
+    } catch (e) {
+      print("showOverlay error: $e");
+    }
   }
 
   void hideOverlay() async {
@@ -120,8 +136,9 @@ class _HomePageState extends State<HomePage> {
                         child: const Text("停止识别"),
                       )
                     : TextButton(
-                        onPressed: () {
-                          showOverlay();
+                        onPressed: () async {
+                          // 先弹出悬浮按钮（需要“显示在其他应用上层”权限），再开始识别
+                          await showOverlay();
                           setProcessingState(true);
                           setState(() {
                             isProcessing = true;
@@ -129,6 +146,13 @@ class _HomePageState extends State<HomePage> {
                         },
                         child: const Text("开始识别"),
                       )),
+                const SizedBox(height: 12),
+                const Text(
+                  '提示：点“开始识别”后，屏幕右上角会出现一个橙色悬浮按钮（可拖动）。\n'
+                  '若没出现，请到系统设置→应用→麻将训练器→权限，开启“显示在其他应用上层”，再点一次。',
+                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                  textAlign: TextAlign.center,
+                ),
                 Clock(),
               ],
             ),

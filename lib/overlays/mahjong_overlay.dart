@@ -14,6 +14,8 @@ parseEngineResult(List<int> b) {
   String jsonString = String.fromCharCodes(b.sublist(0, sepIndex));
   var json = jsonDecode(jsonString);
 
+  // 图片字节当前未直接用于 UI（手牌/点评已由 JSON 承载），保留解析以备扩展。
+  // ignore: unused_local_variable
   Image image = Image.memory(Uint8List.fromList(b.sublist(sepIndex + 1)));
 
   return (json, image);
@@ -28,11 +30,12 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   late Map<String, dynamic> result;
   bool ready = false;
 
-  // 悬浮按钮始终常驻；点击按钮可收起/展开“分析悬浮窗”面板。
-  bool panelVisible = true;
+  // 初始仅显示“悬浮按钮”（收起态）；点击后展开为“分析小窗口”。
+  bool panelVisible = false;
 
-  static const double _windowWidth = 266;
-  static const double _windowHeight = 340;
+  static const double _collapsed = 60;
+  static const double _expandedW = 266;
+  static const double _expandedH = 340;
 
   @override
   void initState() {
@@ -55,9 +58,25 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     );
   }
 
-  // 悬浮窗内的“停止”：通过 shareData 通知主 App 真正停止识别。
-  // 悬浮窗运行在独立的 Flutter 引擎，没有 MainActivity 注册的 MethodChannel 处理器，
-  // 无法直接调用原生 stopProcessing，因此借助 overlayListener 通道。
+  // 悬浮按钮点击：在“仅按钮”与“分析小窗口”之间切换（窗口始终常驻在屏幕上）
+  Future<void> _togglePanel() async {
+    if (!mounted) return;
+    final next = !panelVisible;
+    setState(() {
+      panelVisible = next;
+    });
+    try {
+      if (next) {
+        await FlutterOverlayWindow.resizeOverlay(
+            _expandedW.toInt(), _expandedH.toInt(), true);
+      } else {
+        await FlutterOverlayWindow.resizeOverlay(
+            _collapsed.toInt(), _collapsed.toInt(), true);
+      }
+    } catch (_) {}
+  }
+
+  // 悬浮窗内“停止”：通过 shareData 通知主 App 真正停止识别，并关闭整个悬浮窗。
   Future<void> _stop() async {
     try {
       await FlutterOverlayWindow.shareData('stop');
@@ -67,25 +86,54 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     } catch (_) {}
   }
 
-  // 悬浮按钮点击：收起 / 展开分析面板（悬浮按钮本身与悬浮窗始终常驻）
-  void _togglePanel() {
-    if (!mounted) return;
-    setState(() {
-      panelVisible = !panelVisible;
-    });
+  // 悬浮按钮本体（橙色圆形，常驻在屏幕上，可拖动整窗）
+  Widget _floatingButton({double size = _collapsed}) {
+    return GestureDetector(
+      onTap: _togglePanel,
+      child: Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          color: Colors.orange,
+          shape: BoxShape.circle,
+          boxShadow: const [
+            BoxShadow(
+              color: Colors.black45,
+              blurRadius: 4,
+              spreadRadius: 1,
+            ),
+          ],
+        ),
+        child: Center(
+          child: ready
+              ? const Icon(Icons.visibility, color: Colors.white, size: 26)
+              : const SizedBox(
+                  width: 22,
+                  height: 22,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.white,
+                  ),
+                ),
+        ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
+    // 收起态：屏幕上只保留一个悬浮按钮
+    if (!panelVisible) {
+      return _floatingButton();
+    }
+
+    // 展开态：分析小窗口（手牌 / 向听数 / 建议），一直常驻在屏幕上
     final hand = ready ? (result['hand'] ?? '') : '';
     final Map<String, dynamic>? analysis = ready ? result['analysis'] : null;
 
-    // 说明：flutter_overlay_window 0.4.5 仅支持单实例悬浮窗，无法开两个独立系统窗口。
-    // 这里用“一个透明悬浮窗 + 两块常驻区域”实现“悬浮按钮 + 悬浮窗同时常驻”，
-    // 整窗可拖动（enableDrag），满足双窗口常驻体验。
     return Container(
-      width: _windowWidth,
-      height: _windowHeight,
+      width: _expandedW,
+      height: _expandedH,
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
         color: Colors.black.withAlpha(190),
@@ -95,7 +143,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // 顶部栏：标题 + 悬浮按钮（常驻）+ 停止
+          // 顶部栏：标题 + 悬浮按钮（点击收起窗口）+ 停止
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
@@ -107,38 +155,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // 悬浮按钮：始终常驻，点击收起/展开分析面板
-                  GestureDetector(
-                    onTap: _togglePanel,
-                    child: Container(
-                      width: 36,
-                      height: 36,
-                      decoration: BoxDecoration(
-                        color: Colors.orange,
-                        shape: BoxShape.circle,
-                        boxShadow: const [
-                          BoxShadow(
-                            color: Colors.black45,
-                            blurRadius: 4,
-                            spreadRadius: 1,
-                          ),
-                        ],
-                      ),
-                      child: Center(
-                        child: ready
-                            ? const Icon(Icons.visibility,
-                                color: Colors.white, size: 20)
-                            : const SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
-                                ),
-                              ),
-                      ),
-                    ),
-                  ),
+                  _floatingButton(size: 36),
                   const SizedBox(width: 8),
                   GestureDetector(
                     onTap: _stop,
@@ -159,31 +176,26 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             ],
           ),
           const SizedBox(height: 8),
-          // 分析悬浮窗：默认展开，可点击悬浮按钮收起
-          if (panelVisible)
-            Expanded(
-              child: SingleChildScrollView(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (!ready)
-                      const Text('正在识别牌局…',
-                          style: TextStyle(color: Colors.white70, fontSize: 13))
-                    else ...[
-                      if (hand.isNotEmpty)
-                        Text('手牌：${handToChinese(hand)}',
-                            style: const TextStyle(
-                                color: Colors.white70, fontSize: 12)),
-                      const SizedBox(height: 4),
-                      if (analysis != null) Analysis(analysis),
-                    ],
+          Expanded(
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (!ready)
+                    const Text('正在识别牌局…',
+                        style: TextStyle(color: Colors.white70, fontSize: 13))
+                  else ...[
+                    if (hand.isNotEmpty)
+                      Text('手牌：${handToChinese(hand)}',
+                          style: const TextStyle(
+                              color: Colors.white70, fontSize: 12)),
+                    const SizedBox(height: 4),
+                    if (analysis != null) Analysis(analysis),
                   ],
-                ),
+                ],
               ),
-            )
-          else
-            const Text('（面板已收起，点击上方橙色按钮展开）',
-                style: TextStyle(color: Colors.white38, fontSize: 11)),
+            ),
+          ),
         ],
       ),
     );
