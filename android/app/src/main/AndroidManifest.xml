@@ -2,6 +2,9 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Android 14(API 34)：mediaProjection 类型的前台服务必须持有该权限，
+         否则 startForeground() 抛 SecurityException，录屏识别根本起不来 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
@@ -15,8 +18,8 @@
 
         <service
             android:name=".MediaProjectionService"
-            android:foregroundServiceType="mediaProjection">
-        </service>
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
 
         <!-- Android 14(API 34) 要求前台服务必须声明 foregroundServiceType，否则 startForeground 抛 SecurityException 导致悬浮窗服务起不来、按钮不出现 -->
         <service

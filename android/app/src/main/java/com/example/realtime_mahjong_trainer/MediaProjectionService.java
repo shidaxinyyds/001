@@ -19,28 +19,49 @@ public class MediaProjectionService extends Service {
     //     return START_STICKY;
     // }
 
+    private static final String TAG = "MediaProjectionService";
+
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         String channelId = createNotificationChannel();
 
-        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, intent,  PendingIntent.FLAG_MUTABLE);
+        // 服务被系统重启时 intent 可能为 null，直接用会 NPE
+        if (intent != null) {
+            try {
+                PendingIntent pendingIntent = PendingIntent.getActivity(
+                        this, 0, intent, PendingIntent.FLAG_MUTABLE);
+                mPendingIntent = pendingIntent;
+            } catch (Exception e) {
+                TimedLog.e(TAG, "创建 PendingIntent 失败: " + e);
+            }
+        }
 
-        //NotificationCompat.Builder notificationBuilder = new NotificationCompat.Builder(this, channelId);
-        //Notification notification = notificationBuilder.setOngoing(true)
-        Notification notification = new NotificationCompat.Builder(this, channelId)
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, channelId)
                 .setContentTitle("正在识别牌局…")
                 .setContentText("用于在屏幕上分析麻将牌")
                 .setSmallIcon(R.drawable.stream)
                 .setOngoing(true)
                 .setPriority(Notification.PRIORITY_MAX)
-                .setCategory(NotificationCompat.CATEGORY_SERVICE)
-                .build();
+                .setCategory(NotificationCompat.CATEGORY_SERVICE);
 
+        if (mPendingIntent != null) {
+            builder.setContentIntent(mPendingIntent);
+        }
 
-        startForeground(1, notification);
+        // Android 14(API 34) 上，若缺少 FOREGROUND_SERVICE_MEDIA_PROJECTION 权限，
+        // 或 startForeground 之前没有先调用 createScreenCaptureIntent()，
+        // startForeground 会抛 SecurityException。这里兜底，避免整个进程被拖垮
+        // （服务起不来最多是没有常驻通知，录屏识别仍由 MediaProjection 正常驱动）。
+        try {
+            startForeground(1, builder.build());
+        } catch (Throwable t) {
+            TimedLog.e(TAG, "startForeground 失败（前台通知不可用，不影响识别）: " + t);
+        }
 
         return super.onStartCommand(intent, flags, startId);
     }
+
+    private PendingIntent mPendingIntent;
 
     @Override
     public IBinder onBind(Intent intent) {

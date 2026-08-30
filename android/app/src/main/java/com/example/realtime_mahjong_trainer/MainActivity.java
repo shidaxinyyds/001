@@ -34,6 +34,11 @@ public class MainActivity extends FlutterActivity {
   private ScreenStreamer streamer;
   private ImageProcessor processor;
 
+  // 最近一次请求录屏时的屏幕参数，startStream() 重建 ScreenStreamer 时复用
+  private int mStreamWidth;
+  private int mStreamHeight;
+  private int mStreamDpi;
+
 
 
   @Override
@@ -112,7 +117,10 @@ public class MainActivity extends FlutterActivity {
     );
 
     if (requestCode == REQUEST_MEDIA_PROJECTION) {
-      if (intent == null) {
+      // 用户在系统弹窗里点了“取消”时，resultCode 不是 RESULT_OK，
+      // 此时硬去建 MediaProjection 会抛异常
+      if (resultCode != Activity.RESULT_OK || intent == null) {
+        TimedLog.i(TAG, "用户取消了录屏授权，未开始识别");
         return;
       }
       startStream(resultCode, intent);
@@ -133,14 +141,15 @@ public class MainActivity extends FlutterActivity {
         Context.MEDIA_PROJECTION_SERVICE
       );
 
-    streamer =
-      new ScreenStreamer(
-        wm.getBounds().width(),
-        wm.getBounds().height(),
-        dm.densityDpi,
-        mMediaProjectionManager
-      );
+    // 记下分辨率，startStream() 里重建 ScreenStreamer 时要用
+    mStreamWidth = wm.getBounds().width();
+    mStreamHeight = wm.getBounds().height();
+    mStreamDpi = dm.densityDpi;
 
+    // Android 14(API 34) 硬性要求：mediaProjection 类型的前台服务，
+    // 必须在 startForeground() 之前先调用 createScreenCaptureIntent()，
+    // 否则系统会抛 SecurityException。所以这里先拿到 intent 再起服务。
+    Intent captureIntent = mMediaProjectionManager.createScreenCaptureIntent();
 
     TimedLog.i(TAG, "Start foreground service");
     startForegroundService(new Intent(this, MediaProjectionService.class));
@@ -149,15 +158,23 @@ public class MainActivity extends FlutterActivity {
     // This initiates a prompt dialog for the user to confirm screen projection.
     // Looks like this is the legacy approach, the recommended one is
     // https://developer.android.com/guide/topics/large-screens/media-projection
-    startActivityForResult(
-      mMediaProjectionManager.createScreenCaptureIntent(),
-      REQUEST_MEDIA_PROJECTION
-    );
+    startActivityForResult(captureIntent, REQUEST_MEDIA_PROJECTION);
 
     return 0;
   }
 
   private void startStream(int resultCode, Intent intent) {
+    // 先清理上一次会话：否则重复点“开始识别”会残留多个 500ms 采集 Timer，
+    // 队列越排越长，表现为识别结果严重滞后甚至看起来“卡死”。
+    stopStream();
+
+    streamer =
+      new ScreenStreamer(
+        mStreamWidth,
+        mStreamHeight,
+        mStreamDpi,
+        mMediaProjectionManager
+      );
     streamer.startStream(resultCode, intent);
     processor = new ImageProcessor(() -> streamer.acquireLatestImage());
     processor.prepare(getContext());
@@ -165,9 +182,16 @@ public class MainActivity extends FlutterActivity {
   }
 
   private void stopStream() {
-    processor.stop();
-    streamer.stopStream();
-    streamer = null;
+    // 悬浮窗的“停止”、主界面的“停止识别”、以及用户没点授权就取消，
+    // 都会走到这里。此前没有判空，未开始识别就点停止会直接 NPE 崩掉。
+    if (processor != null) {
+      processor.stop();
+      processor = null;
+    }
+    if (streamer != null) {
+      streamer.stopStream();
+      streamer = null;
+    }
     stopService(new Intent(this, MediaProjectionService.class));
   }
 

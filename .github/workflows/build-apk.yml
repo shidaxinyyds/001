@@ -37,6 +37,11 @@ jobs:
       - name: Pub get
         run: flutter pub get
 
+      # 与 build.yml 一致：先用 Dart 3.1 静态检查快速失败，
+      # 避免白等 2 分多钟的 Chaquopy 下载后才在 kernel_snapshot 阶段报错
+      - name: Dart analyze (fail fast)
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
       - name: Build APK (debug)
         run: flutter build apk --debug
 

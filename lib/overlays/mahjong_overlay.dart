@@ -159,8 +159,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         },
         onPointerMove: (PointerMoveEvent e) {
           setState(() {
-            panelW = (panelW + e.delta.dx).clamp(minPanelW, maxPanelW);
-            panelH = (panelH + e.delta.dy).clamp(minPanelH, maxPanelH);
+            // 显式 toDouble()：旧版 Dart 的 clamp 返回 num，直接赋给 double 会报错
+            panelW = (panelW + e.delta.dx).clamp(minPanelW, maxPanelW).toDouble();
+            panelH = (panelH + e.delta.dy).clamp(minPanelH, maxPanelH).toDouble();
           });
           _resizeLive(panelW, panelH);
         },
@@ -176,7 +177,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             painter: _GripPainter(
               color: _draggingResize
                   ? Colors.amber
-                  : Colors.white.withValues(alpha: 0.55),
+                  : Colors.white.withAlpha(140),
             ),
           ),
         ),
@@ -197,7 +198,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           shape: BoxShape.circle,
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withValues(alpha: 0.35),
+              color: Colors.black.withAlpha(89),
               blurRadius: 6,
               spreadRadius: 1,
             ),
@@ -252,7 +253,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               color: const Color(0xE61C1C1E),
               borderRadius: BorderRadius.circular(10),
               border: Border.all(
-                color: Colors.white.withValues(alpha: 0.12),
+                color: Colors.white.withAlpha(31),
               ),
             ),
             padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
@@ -281,7 +282,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                         padding: const EdgeInsets.symmetric(
                             horizontal: 7, vertical: 3),
                         decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.14),
+                          color: Colors.white.withAlpha(36),
                           borderRadius: BorderRadius.circular(6),
                         ),
                         child: const Text('收起',
@@ -456,9 +457,9 @@ class _AdviceChip extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.10),
+        color: Colors.white.withAlpha(26),
         borderRadius: BorderRadius.circular(5),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.18)),
+        border: Border.all(color: Colors.white.withAlpha(46)),
       ),
       child: RichText(
         text: TextSpan(
