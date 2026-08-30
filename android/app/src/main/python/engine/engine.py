@@ -224,6 +224,14 @@ class Engine:
                     [int(v) for v in rect] + [label if label is not None else ""]
                     for rect, label in stage.result
                 ],
+                # 最近一帧的最高模板匹配分（无论是否过阈）。
+                # 用于诊断：分数长期 <0.2 说明屏幕里没牌；0.3~0.44 说明有牌但样式与模板差异大。
+                "top_score": round(float(getattr(detector, "last_top_score", 0.0)), 3),
+                # MediaProjection 截到的屏幕真实像素尺寸（宽, 高）——用于确认取到了整屏
+                "screen": [
+                    int(getattr(detector, "last_screen", (0, 0))[0]),
+                    int(getattr(detector, "last_screen", (0, 0))[1]),
+                ],
                 "elapsed": round(time.time() - start_time, 3),
             }
 

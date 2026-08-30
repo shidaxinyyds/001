@@ -100,6 +100,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       'count': json['count'] ?? 0,
       'status': json['status'] ?? '',
       'shanten': json['shanten'],
+      // 诊断用：最高模板匹配分与截屏分辨率。
+      // 分数长期 <0.2 => 屏幕里没有牌；0.2~0.45 => 有牌但样式跟模板差异大。
+      'top_score': json['top_score'] ?? 0,
+      'screen': (json['screen'] as List?)?.join('x') ?? '',
     }).catchError((_) {});
   }
 
@@ -116,13 +120,34 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     print('悬浮窗尺寸校正失败（w=$w, h=$h）');
   }
 
-  /// 拖动缩放把手时实时调整尺寸。上一次调用未返回时直接跳过，避免高频堆积。
+  double? _pendingW;
+  double? _pendingH;
+
+  /// 拖动缩放把手时实时调整尺寸。
+  ///
+  /// 关键：不能"忙时直接丢弃"。resizeOverlay 走 MethodChannel 到原生，一次来回要几十毫秒，
+  /// 手指快速拖动时绝大多数调用都会被丢弃，窗口只能零零散散地追上去 —— 表现就是剧烈抖动。
+  /// 改成"最后一次的尺寸一定会被应用"：忙时先记下来，空闲后立刻补上，
+  /// 这样窗口会平滑地收敛到手指停下的位置。
   void _resizeLive(double w, double h) {
-    if (_resizeInFlight) return;
+    if (_resizeInFlight) {
+      _pendingW = w;
+      _pendingH = h;
+      return;
+    }
     _resizeInFlight = true;
     FlutterOverlayWindow.resizeOverlay(w.toInt(), h.toInt(), false)
         .catchError((Object _) => null)
-        .whenComplete(() => _resizeInFlight = false);
+        .whenComplete(() {
+      _resizeInFlight = false;
+      final double? nw = _pendingW;
+      final double? nh = _pendingH;
+      if (nw != null && nh != null) {
+        _pendingW = null;
+        _pendingH = null;
+        _resizeLive(nw, nh);
+      }
+    });
   }
 
   // 悬浮按钮点击：在"仅按钮"与"分析面板"之间切换（窗口始终常驻在屏幕上）
@@ -140,9 +165,16 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   }
 
   // 悬浮窗内"停止"：通过 shareData 通知主 App 真正停止识别，并关闭整个悬浮窗。
+  // 兜底：万一主 App 没收到（被系统回收、或 MethodChannel 回调没送达），
+  // 悬浮窗自己再尝试关一次，避免"点停止毫无反应"。
   Future<void> _stop() async {
     try {
       await FlutterOverlayWindow.shareData('stop');
+    } catch (_) {}
+    await Future<void>.delayed(const Duration(milliseconds: 900));
+    if (!mounted) return;
+    try {
+      await FlutterOverlayWindow.closeOverlay();
     } catch (_) {}
   }
 
@@ -244,6 +276,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final shanten = result?['shanten'];
     final String? commentary = result?['commentary'] as String?;
     final List<dynamic> advice = (result?['advice'] ?? const []) as List<dynamic>;
+    final double topScore =
+        (result?['top_score'] as num?)?.toDouble() ?? 0.0;
+    final String screenText = (result?['screen'] as List?)?.join('×') ?? '';
 
     return SizedBox.expand(
       child: Stack(
@@ -372,6 +407,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                                 color: Colors.white70, fontSize: 12, height: 1.45),
                           ),
                         ],
+                        const SizedBox(height: 8),
+                        _DiagLine(topScore: topScore, screen: screenText),
                         const SizedBox(height: 14),
                       ],
                     ),
@@ -442,6 +479,42 @@ class _StatusLine extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
               style: TextStyle(color: color, fontSize: 11)),
         ),
+      ],
+    );
+  }
+}
+
+/// 诊断行：截屏分辨率 + 最高模板匹配分。
+/// 识别不出牌时，这一行能直接区分"没截到屏/屏幕里没牌"和"有牌但样式跟模板不匹配"。
+class _DiagLine extends StatelessWidget {
+  final double topScore;
+  final String screen;
+  const _DiagLine({required this.topScore, required this.screen});
+
+  @override
+  Widget build(BuildContext context) {
+    String hint;
+    if (screen.isEmpty) {
+      hint = '等待第一帧…';
+    } else if (topScore < 0.20) {
+      hint = '屏幕里没找到麻将牌（确认已打开牌局）';
+    } else if (topScore < 0.45) {
+      hint = '有牌但匹配分偏低，牌面样式与模板差异较大';
+    } else {
+      hint = '匹配正常';
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          screen.isEmpty ? hint : '屏幕 $screen｜匹配分 ${topScore.toStringAsFixed(2)}',
+          style: const TextStyle(color: Colors.white38, fontSize: 10),
+        ),
+        if (screen.isNotEmpty)
+          Text(
+            hint,
+            style: const TextStyle(color: Colors.white30, fontSize: 10),
+          ),
       ],
     );
   }

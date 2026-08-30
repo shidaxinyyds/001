@@ -44,6 +44,8 @@ class _HomePageState extends State<HomePage> {
             _recogCount = (event['count'] ?? 0) as int;
             _recogShanten = event['shanten'] as int?;
             _recogHand = event['hand']?.toString() ?? '';
+            _recogTopScore = (event['top_score'] as num?)?.toDouble() ?? 0.0;
+            _recogScreen = event['screen']?.toString() ?? '';
           });
         }
       }
@@ -55,6 +57,8 @@ class _HomePageState extends State<HomePage> {
   int _recogCount = 0;
   int? _recogShanten;
   String _recogHand = '';
+  double _recogTopScore = 0.0;
+  String _recogScreen = '';
 
   Future<void> setProcessingState(bool start) async {
     try {
@@ -171,10 +175,24 @@ class _HomePageState extends State<HomePage> {
       case 'incomplete':
         return '识别到 $_recogCount 张，需 13/14 张才完整\n（确认牌面完整、没有被遮挡）';
       case 'no_tiles':
-        return '未识别到牌面\n（模板针对 Let\'s Mahjong 的牌面裁剪，其它麻将 App 或主题可能不匹配）';
+        return '未识别到牌面\n${_diagHint()}';
       default:
         return '正在等待第一帧识别结果…';
     }
+  }
+
+  // 识别不出牌时，把"匹配分/分辨率"摆出来，一眼能区分
+  // 是没截到屏、屏幕里没牌，还是牌面样式跟模板不匹配
+  String _diagHint() {
+    final String scr = _recogScreen.isEmpty ? '未知' : _recogScreen;
+    final String score = _recogTopScore.toStringAsFixed(2);
+    if (_recogScreen.isEmpty) {
+      return '（还没收到第一帧，确认已授权录屏并打开牌局）';
+    }
+    if (_recogTopScore < 0.20) {
+      return '屏幕 $scr｜匹配分 $score\n屏幕里没找到麻将牌，确认已打开牌局且手牌可见';
+    }
+    return '屏幕 $scr｜匹配分 $score\n有牌但匹配分偏低：本 App 的牌面样式与内置模板差异较大';
   }
 
   Future<void> _refreshDiag() async {
