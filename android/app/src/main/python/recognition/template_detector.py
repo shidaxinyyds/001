@@ -14,10 +14,27 @@ from utils.stubs import CVImage
 
 class TemplateDetector(Detector):
 
+    # 最低匹配置信度。模板匹配总会对噪声给出一个"最高分"，
+    # 原实现不加阈值，任何噪点都会被硬认成某张牌，导致手牌乱七八糟、建议全错。
+    MIN_SCORE = 0.45
+
+    def __init__(self, targets) -> None:
+        super().__init__(targets)
+        # 灰度模板只算一次。原实现对「每个牌位 × 每个模板」都做一次 cvtColor，
+        # 14 张牌 × 34 个模板 = 476 次/帧，是主要的性能瓶颈。
+        self._gray_targets = None
+
     def preprocess_image(self, img: CVImage) -> CVImage:
         img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         return img
 
+    def gray_targets(self):
+        if self._gray_targets is None:
+            self._gray_targets = {
+                label: self.preprocess_image(img)
+                for label, img in self.targets.items()
+            }
+        return self._gray_targets
 
     def detect(self, image: CVImage) -> Stage[DetectionResult]:
         edge_detector = EdgeDetector()
@@ -28,20 +45,25 @@ class TemplateDetector(Detector):
 
         for rect in rects:
             x,y,w,h = rect
+            if w <= 0 or h <= 0:
+                continue
             tile_img = image[y:y+h, x:x+w]
             tile_img = self.preprocess_image(tile_img)
             # tile_img = self.crop_image(tile_img, self.detect_corners(tile_img))
 
             best_label = None
-            best_score = 0
-            for label, img in self.targets.items():
-                target_img = self.preprocess_image(img)
-
+            best_score = 0.0
+            for label, target_img in self.gray_targets().items():
                 score = self.compare_and_score(tile_img, target_img)
 
                 if score > best_score:
                     best_label = label
                     best_score = score
+
+            # 置信度太低就当作"认不出来"，宁可少认一张也不要认错
+            if best_score < self.MIN_SCORE:
+                best_label = None
+
             output.append((rect, best_label))
 
         def display():
@@ -61,21 +83,34 @@ class TemplateDetector(Detector):
 
 
     def compare_and_score(self, img1: CVImage, img2: CVImage) -> float:
-        w1, h1, *_ = img1.shape
-        w2, h2, *_ = img2.shape
+        h1, w1 = img1.shape[:2]
+        h2, w2 = img2.shape[:2]
+        if w1 <= 0 or h1 <= 0 or w2 <= 0 or h2 <= 0:
+            return 0.0
 
-        scale_factor = 1 / math.sqrt((w1 * h1) / (w2 * h2))
-        img1 = scale(img1, scale_factor)
+        # 把待匹配图缩放到与模板相同的面积，让匹配不受牌面大小影响
+        area_ratio = (w1 * h1) / float(w2 * h2)
+        if area_ratio <= 0:
+            return 0.0
+        img1 = scale(img1, 1 / math.sqrt(area_ratio))
+        h1, w1 = img1.shape[:2]
+
+        # 模板必须能完整放进待匹配图，否则 matchTemplate 会抛异常。
+        # 原实现直接吞掉异常返回 0，等于静默丢弃这一帧的匹配结果。
+        if w1 < w2 or h1 < h2:
+            factor = min(w1 / float(w2), h1 / float(h2)) * 0.98
+            img2 = cv2.resize(
+                img2,
+                (max(1, int(w2 * factor)), max(1, int(h2 * factor))),
+                interpolation=cv2.INTER_AREA,
+            )
 
         try:
             res = cv2.matchTemplate(img1, img2, cv2.TM_CCOEFF_NORMED)
-            min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
-            score = max_val
-        except cv2.error as e:
-            print(img1.shape, img2.shape, "error")
-            score = 0
-
-        return score
+            _, max_val, _, _ = cv2.minMaxLoc(res)
+            return float(max_val)
+        except cv2.error:
+            return 0.0
 
     # def detect_corners(self, stage):
     #     # img = stage.result

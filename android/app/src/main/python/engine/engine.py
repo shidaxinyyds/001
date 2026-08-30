@@ -1,15 +1,14 @@
 from __future__ import annotations
 import traceback
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import json
 import os
-import cv2
 import time
 
+import cv2
 import numpy as np
 
-from utils.image import save_image, show
 from dirs import LABELLED_DIR
 
 from .engine_result import EngineResult
@@ -19,123 +18,223 @@ from utils.stubs import CVImage
 from trainer.trainer import Trainer
 from trainer.objects.tile_collection import TileCollection
 
-def get_mpsz(detection: DetectionResult):
+# 一局中的合法手牌张数：13 = 待摸牌，14 = 刚摸到牌
+VALID_HAND_SIZES = (13, 14)
+
+# 预览图最大宽度。原实现每帧都把全屏截图做 PNG 编码（100~300ms），
+# 而 Dart 端并没有使用这张图，纯属浪费，是识别卡顿的主因之一。
+PREVIEW_MAX_WIDTH = 240
+
+
+def get_mpsz(detection: DetectionResult) -> str:
     tiles = sorted(detection, key=lambda x: x[0][0])
     # Ignore tiles that we are unable to detect
     return ''.join(tile[1] for tile in tiles if tile[1] is not None)
 
+
+def _to_uint8_buffer(image_data) -> np.ndarray:
+    """把 Java 传来的图像字节转成 cv2.imdecode 需要的 uint8 一维数组。
+
+    Chaquopy 可能给出 bytes / Java byte[] 序列 / numpy 数组，这里都兼容。
+    原实现写的是 np.array(image_data)：当传入 bytes 时得到的是「0 维」数组，
+    cv2.imdecode 会直接失败，是识别链路上的一处隐藏断点。
+    """
+    if isinstance(image_data, np.ndarray):
+        return image_data.astype(np.uint8, copy=False)
+    if isinstance(image_data, (bytes, bytearray, memoryview)):
+        return np.frombuffer(bytes(image_data), dtype=np.uint8)
+    return np.asarray(list(image_data), dtype=np.uint8)
+
+
+def _make_preview(image: CVImage) -> CVImage:
+    """生成一张很小的预览图（不再编码全屏截图）。"""
+    try:
+        h, w = image.shape[:2]
+        if w > PREVIEW_MAX_WIDTH:
+            new_h = max(1, int(h * PREVIEW_MAX_WIDTH / w))
+            return cv2.resize(image, (PREVIEW_MAX_WIDTH, new_h), interpolation=cv2.INTER_AREA)
+        return image
+    except Exception:
+        traceback.print_exc()
+        return np.zeros((1, 1, 3), dtype=np.uint8)
+
+
 class Engine:
     def __init__(self):
-        self.trainer = None
+        self.trainer: Optional[Trainer] = None
+        # 模板图与检测器只构建一次。
+        # 原实现每帧都从磁盘读 34 张 PNG，并对「每个牌位 × 每个模板」重复 cvtColor，
+        # 单帧要跑数百次 cv2 运算，手机上远超 500ms 的采集间隔。
+        self._targets: Optional[Dict[str, CVImage]] = None
+        self._detector: Optional[TemplateDetector] = None
+        # 推荐打法的缓存（按手牌内容），避免每帧重算 34 次向听 + 进张
+        self._advice_key: Optional[str] = None
+        self._advice: List[Dict] = []
 
     def start(self):
         pass
 
-    def load_target_images(self):
-        labels = [basename.split('.')[0] for basename in os.listdir(LABELLED_DIR)]
+    def load_target_images(self) -> Dict[str, CVImage]:
+        if self._targets is not None:
+            return self._targets
 
         output: Dict[str, CVImage] = {}
-        for label in labels:
-            path = os.path.join(LABELLED_DIR, f"{label}.png")
-            image: CVImage = cv2.imread(path)
-            image: CVImage = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            output[label] = image
+        try:
+            for basename in sorted(os.listdir(LABELLED_DIR)):
+                if not basename.lower().endswith('.png'):
+                    continue
+                image = cv2.imread(os.path.join(LABELLED_DIR, basename))
+                if image is None:
+                    print(f"Failed to read template: {basename}")
+                    continue
+                output[basename.split('.')[0]] = image
+        except Exception:
+            traceback.print_exc()
 
+        print(f"Loaded {len(output)} tile templates")
+        self._targets = output
         return output
 
-
-    def process_bytes(self, image_data: bytes) -> EngineResult:
-        arr = np.array(image_data)
-        image: CVImage = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        return self.process(image)
+    def get_detector(self) -> Optional[TemplateDetector]:
+        if self._detector is not None:
+            return self._detector
+        targets = self.load_target_images()
+        if not targets:
+            return None
+        self._detector = TemplateDetector(targets)
+        return self._detector
 
     def update_trainer(self, hand: TileCollection) -> Optional[str]:
-        if len(hand) not in (13, 14):
-            print(f"Odd hand length of {len(hand)}")
+        """根据最新一手牌更新训练器，返回对上一手的中文点评。"""
+        # 只有 13/14 张才是合法手牌。其它张数说明这一帧识别不完整，
+        # 直接跳过，避免拿脏数据去点评（原实现在这里 assert，会中断整帧）。
+        if len(hand) not in VALID_HAND_SIZES:
+            print(f"Hand length {len(hand)} is not valid, skipping")
             return None
 
         if self.trainer is None:
-            print(f"First new hand: {hand}")
+            print(f"Initial hand: {hand}")
             self.trainer = Trainer(hand)
             return None
 
         prev_hand = self.trainer.hand
         if hand == prev_hand:
-            print(f"Hand did not change: {hand}")
             return None
 
         diff = hand.get_difference(prev_hand)
         delta = sum(abs(x) for x in diff.values())
 
+        if delta == 0:
+            return None
         if delta > 1:
-            print(f"Change is large, hand reloaded: {diff}")
+            print(f"Large change detected, reloading hand: {diff}")
             self.trainer = Trainer(hand)
             return None
 
-        if delta != 1:
-            assert False
-
         tile, change = list(diff.items())[0]
-        if len(hand) == 13 and len(prev_hand) == 14:
-            assert change == -1
+
+        if len(hand) == 13 and len(prev_hand) == 14 and change == -1:
             print(f"Discard detected: {tile}")
-            msg = self.trainer.discard(tile)
-            assert(len(self.trainer.hand)) == 13
-            return msg
+            return self.trainer.discard(tile)
 
-        if len(hand) == 14 and len(prev_hand) == 13:
-            assert change == 1
+        if len(hand) == 14 and len(prev_hand) == 13 and change == 1:
             print(f"Draw detected: {tile}")
-            msg = self.trainer.draw(tile)
-            assert(len(self.trainer.hand)) == 14
-            return msg
+            return self.trainer.draw(tile)
 
-        print(f"Unknown action {len(hand)} -> {len(prev_hand)} change:{change}")
+        # 张数变化不符合"摸牌/打牌"，多半是中途识别跳变，整手重建
+        print(f"Unexpected transition {len(prev_hand)} -> {len(hand)}, reloading hand")
+        self.trainer = Trainer(hand)
         return None
 
+    def build_advice(self, hand: TileCollection):
+        """返回 (向听数, 推荐打法列表)。
+
+        向听数每帧都算（单次开销很小），保证界面上一直有反馈；
+        推荐打法要跑 34 次向听 + 进张，改为按手牌内容缓存，只有手牌变了才重算。
+        """
+        if self.trainer is None:
+            return None, []
+
+        shanten = self.trainer.get_shanten()
+
+        key = f"{hand}|{shanten}"
+        if key == self._advice_key:
+            return shanten, self._advice
+
+        advice: List[Dict] = []
+        try:
+            if len(hand) == 14:
+                raw = self.trainer.calculate_discards()
+                advice = [
+                    {"tile": str(t), "ukeire": int(u)}
+                    for t, u in sorted(raw.items(), key=lambda kv: -kv[1])
+                ][:6]
+        except Exception:
+            traceback.print_exc()
+
+        self._advice_key = key
+        self._advice = advice
+        return shanten, advice
+
+    def process_bytes(self, image_data) -> Optional[EngineResult]:
+        arr = _to_uint8_buffer(image_data)
+        image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if image is None:
+            print("Failed to decode image")
+            return None
+        return self.process(image)
 
     def process(self, image: CVImage) -> Optional[EngineResult]:
         try:
             start_time = time.time()
 
-            target_set = self.load_target_images()
+            detector = self.get_detector()
+            if detector is None:
+                print("No templates available")
+                return None
 
-            detector = TemplateDetector(target_set)
             stage = detector.detect(image)
             mpsz = get_mpsz(stage.result)
 
-            if mpsz == "":
-                print("No tiles detected")
-                return
+            status = "no_tiles"
+            commentary: Optional[str] = None
+            shanten: Optional[int] = None
+            advice: List[Dict] = []
+            tile_count = 0
 
-            hand = TileCollection.from_mpsz(mpsz)
-
-            commentary = self.update_trainer(hand)
-
-            shanten = None
-
-            analysis = None
-            if commentary is not None:
-                assert self.trainer is not None
-                shanten = self.trainer.get_shanten()
-                analysis = {
-                    "shanten": shanten,
-                    "commentary": commentary,
-                }
-
+            if mpsz:
+                hand = TileCollection.from_mpsz(mpsz)
+                tile_count = len(hand)
+                if tile_count in VALID_HAND_SIZES:
+                    status = "ok"
+                    commentary = self.update_trainer(hand)
+                    shanten, advice = self.build_advice(hand)
+                else:
+                    # 识别到的张数不对（被遮挡或漏检），不做点评，仅回传当前可见的牌
+                    status = "incomplete"
 
             result = {
                 "hand": mpsz,
-                "tiles": stage.result,
-                "analysis": analysis,
+                "count": tile_count,
+                "status": status,
+                "shanten": shanten,
+                "advice": advice,
+                "commentary": commentary,
+                "tiles": [
+                    [int(v) for v in rect] + [label if label is not None else ""]
+                    for rect, label in stage.result
+                ],
+                "elapsed": round(time.time() - start_time, 3),
             }
 
-            image = stage.display
-
-            json_result = json.dumps(result)
-            res = EngineResult(image=image, result=json_result, stage=stage)
+            res = EngineResult(
+                image=_make_preview(image),
+                result=json.dumps(result),
+                stage=stage,
+            )
             print(result)
             print(f"Processed in {time.time() - start_time}")
             return res
-        except Exception as e:
+        except Exception:
             traceback.print_exc()
+            return None

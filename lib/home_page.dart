@@ -24,7 +24,8 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
 
-    // 接收悬浮窗内“停止”按钮发来的指令（悬浮窗与主 App 通过 shareData 通信）
+    // 接收悬浮窗通过 shareData 发来的消息：
+    // 'stop' 为"停止"指令，Map 为识别状态回传（用于确认后端真的在识别）
     FlutterOverlayWindow.overlayListener.listen((event) {
       if (event == 'stop') {
         setProcessingState(false);
@@ -34,9 +35,26 @@ class _HomePageState extends State<HomePage> {
             isProcessing = false;
           });
         }
+        return;
+      }
+      if (event is Map && event['type'] == 'status') {
+        if (mounted) {
+          setState(() {
+            _recogStatus = event['status']?.toString() ?? '';
+            _recogCount = (event['count'] ?? 0) as int;
+            _recogShanten = event['shanten'] as int?;
+            _recogHand = event['hand']?.toString() ?? '';
+          });
+        }
       }
     });
   }
+
+  // 由悬浮窗回传的识别状态（证明链路真的在跑，而不是摆设）
+  String _recogStatus = '';
+  int _recogCount = 0;
+  int? _recogShanten;
+  String _recogHand = '';
 
   Future<void> setProcessingState(bool start) async {
     try {
@@ -108,7 +126,9 @@ class _HomePageState extends State<HomePage> {
         overlayContent: '麻将助手已开启',
         flag: OverlayFlag.defaultFlag,
         visibility: NotificationVisibility.visibilityPublic,
-        positionGravity: PositionGravity.auto,
+        // 关键：必须是 none。若为 auto，松手后插件会把窗口吸附到最近的左右边缘，
+        // 无法停在屏幕任意位置。插件源码中只有 "none" 才跳过吸附动画。
+        positionGravity: PositionGravity.none,
         alignment: OverlayAlignment.topRight,
         width: (btnSizeDp * 3).toInt(),
         height: (btnSizeDp * 3).toInt(),
@@ -137,6 +157,23 @@ class _HomePageState extends State<HomePage> {
           : '⚠ 悬浮窗已调用，但位置校正未成功（$posText）。请把本行内容反馈给开发者。');
     } catch (e) {
       _setStatus('✗ showOverlay 异常：$e');
+    }
+  }
+
+  String _recognitionText() {
+    if (!isProcessing) return '未开始识别';
+    switch (_recogStatus) {
+      case 'ok':
+        final String sh = _recogShanten == null
+            ? ''
+            : (_recogShanten == 0 ? '（听牌）' : '（$_recogShanten 向听）');
+        return '✓ 已识别 $_recogCount 张$sh\n$_recogHand';
+      case 'incomplete':
+        return '识别到 $_recogCount 张，需 13/14 张才完整\n（确认牌面完整、没有被遮挡）';
+      case 'no_tiles':
+        return '未识别到牌面\n（模板针对 Let\'s Mahjong 的牌面裁剪，其它麻将 App 或主题可能不匹配）';
+      default:
+        return '正在等待第一帧识别结果…';
     }
   }
 
@@ -220,6 +257,22 @@ class _HomePageState extends State<HomePage> {
                   child: SelectableText(
                     _status,
                     style: const TextStyle(fontSize: 13, color: Colors.blue),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 16),
+                  child: Text(
+                    '识别状态',
+                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: SelectableText(
+                    _recognitionText(),
+                    style: const TextStyle(fontSize: 13, color: Colors.green),
                     textAlign: TextAlign.center,
                   ),
                 ),

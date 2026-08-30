@@ -1,60 +1,42 @@
 import 'package:flutter/material.dart';
 
-class Analysis extends StatefulWidget {
-  late final Map<String, dynamic>? incomingAnalysis;
+/// 向听数与点评展示。
+///
+/// 原实现在 build() 里调用 setState() —— 这会在运行时直接抛
+/// "setState() or markNeedsBuild() called during build" 异常。
+/// 该组件本身不需要保存状态，改为 StatelessWidget 即可。
+class Analysis extends StatelessWidget {
+  final Map<String, dynamic>? analysis;
 
-  Analysis(Map<String, dynamic>? analysis) {
-    incomingAnalysis = analysis;
-  }
-
-  @override
-  State<Analysis> createState() => _AnalysisState();
-}
-
-class _AnalysisState extends State<Analysis> {
-  Map<String, dynamic>? analysis = null;
+  const Analysis(this.analysis, {super.key});
 
   @override
   Widget build(BuildContext context) {
-    if (widget.incomingAnalysis != null) {
-      setState(() {
-        analysis = widget.incomingAnalysis;
-      });
-      analysis = widget.incomingAnalysis;
+    final Map<String, dynamic>? data = analysis;
+    if (data == null) {
+      return const SizedBox(height: 10);
     }
 
-    Widget textWidget = Container(height: 10);
-    if (analysis != null) {
-      int? shanten = analysis!['shanten'];
-      String? commentary = analysis!['commentary'];
-      textWidget = Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          Text("向听数：${shanten.toString()}"),
+    final int? shanten = data['shanten'] as int?;
+    final String? commentary = data['commentary'] as String?;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (shanten != null)
           Text(
-            commentary ?? "",
-            textAlign: TextAlign.end,
+            shanten == 0 ? '向听数：听牌' : '向听数：$shanten',
+            style: const TextStyle(color: Colors.white, fontSize: 13),
+          ),
+        if (commentary != null && commentary.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          Text(
+            commentary,
+            style: const TextStyle(color: Colors.white70, fontSize: 12),
           ),
         ],
-      );
-    }
-
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.lightBlue.withAlpha(200),
-        borderRadius: BorderRadius.all(Radius.circular(15)),
-      ),
-      child: DefaultTextStyle(
-        style: TextStyle(
-          color: Colors.white,
-          fontSize: 15,
-        ),
-        child: SizedBox(
-          width: 200,
-          child: Padding(padding: const EdgeInsets.all(8.0), child: textWidget),
-        ),
-      ),
+      ],
     );
   }
 }

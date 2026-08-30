@@ -43,15 +43,39 @@ public class ImageProcessor {
         TimedLog.i(TAG, "started Python");
     }
 
+    // 单帧处理（Python 推理）可能超过 500ms 的采集间隔。
+    // Timer 只有一个工作线程，不加保护的话任务会无限堆积，
+    // 队列越排越长、结果永远滞后，表现为"识别卡死"。
+    // 这里保证同一时刻只处理一帧，处理不完就直接跳过下一帧。
+    private final java.util.concurrent.atomic.AtomicBoolean busy =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
     public void start() {
         timer = new Timer();
         timer.schedule( new TimerTask() {
             public void run() {
-                Image image = callback.get();
-                if (image == null) {
+                if (!busy.compareAndSet(false, true)) {
+                    TimedLog.i(TAG, "上一帧尚未处理完，跳过本帧");
                     return;
                 }
-                processCapturedImage(image);
+                Image image = null;
+                try {
+                    image = callback.get();
+                    if (image == null) {
+                        return;
+                    }
+                    processCapturedImage(image);
+                } catch (Throwable t) {
+                    TimedLog.e(TAG, "处理帧时出错: " + t.toString());
+                } finally {
+                    if (image != null) {
+                        try {
+                            image.close();
+                        } catch (Exception ignore) {
+                        }
+                    }
+                    busy.set(false);
+                }
             }
         }, 0, 500);
     }
@@ -64,7 +88,7 @@ public class ImageProcessor {
     public void processCapturedImage(Image image) {
         TimedLog.i(TAG, "Got a new image, encoding...");
         byte[] encoded = ImageEncoder.encodeImageToByteArray(image);
-        image.close();
+        // 注意：Image 的关闭统一由 start() 里的 finally 负责，避免重复 close
         TimedLog.i(TAG, String.format("Length of encoded: %d, begin python processing...", encoded.length));
 
         byte[] bytes;
