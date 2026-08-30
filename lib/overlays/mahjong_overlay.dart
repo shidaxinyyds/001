@@ -33,13 +33,36 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // 初始仅显示“悬浮按钮”（收起态）；点击后展开为“分析小窗口”。
   bool panelVisible = false;
 
-  static const double _collapsed = 60;
-  static const double _expandedW = 266;
-  static const double _expandedH = 340;
+  static const double _collapsed = 56;
+  static const double _expandedW = 260;
+  static const double _expandedH = 320;
+
+  // 按 dp 设置悬浮窗尺寸。
+  // 注意：resizeOverlay 走的是悬浮窗引擎的通道（"x-slayer/overlay"），
+  // 只有【悬浮窗自身】调用才生效，主 App 里调用到不了。
+  // 服务尚未把视图挂上时该方法返回 false，故轮询重试直到成功。
+  Future<void> _applySize(double w, double h) async {
+    for (int i = 0; i < 40; i++) {
+      try {
+        final ok =
+            await FlutterOverlayWindow.resizeOverlay(w.toInt(), h.toInt(), true);
+        if (ok == true) return;
+      } catch (_) {}
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    print('悬浮窗尺寸校正失败（w=$w, h=$h）');
+  }
 
   @override
   void initState() {
     super.initState();
+
+    // 插件 showOverlay 时把 width/height 当作物理像素使用（未做 dp 转换），
+    // 56dp 的按钮在 3 倍密度屏上会被画成 56 像素（约 7mm，几乎看不见）。
+    // 因此这里由悬浮窗自身按 dp 重新设定一次尺寸。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _applySize(_collapsed, _collapsed);
+    });
 
     // 监听原生层通过本地 socket 发来的每帧分析结果（端口 12345 与 ImageProcessor 发送端一致）。
     // 即便 socket 启动失败也不能让悬浮窗引擎崩溃（否则按钮永远不渲染），因此整体 try/catch 兜底。
@@ -70,15 +93,12 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     setState(() {
       panelVisible = next;
     });
-    try {
-      if (next) {
-        await FlutterOverlayWindow.resizeOverlay(
-            _expandedW.toInt(), _expandedH.toInt(), true);
-      } else {
-        await FlutterOverlayWindow.resizeOverlay(
-            _collapsed.toInt(), _collapsed.toInt(), true);
-      }
-    } catch (_) {}
+    // 展开/收起时同样按 dp 调整窗口尺寸（由悬浮窗自身调用才生效）
+    if (next) {
+      await _applySize(_expandedW, _expandedH);
+    } else {
+      await _applySize(_collapsed, _collapsed);
+    }
   }
 
   // 悬浮窗内“停止”：通过 shareData 通知主 App 真正停止识别，并关闭整个悬浮窗。
