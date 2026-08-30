@@ -11,9 +11,10 @@ class Server {
     required int port,
   }) {
     print("分析服务已启动，监听 $host:$port");
+    // 监听本机回环地址即可（ImageProcessor 发送到 127.0.0.1），无需监听所有网卡。
     // shared: true -> SO_REUSEADDR，悬浮窗关闭后重新打开可复用端口，避免 TIME_WAIT 占用。
     Future<ServerSocket> serverFuture = ServerSocket.bind(
-      InternetAddress.anyIPv4,
+      InternetAddress.loopbackIPv4,
       port,
       shared: true,
     );

@@ -41,21 +41,26 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   void initState() {
     super.initState();
 
-    // 监听原生层通过本地 socket 发来的每帧分析结果（端口 12345 与 ImageProcessor 发送端一致）
-    Server(
-      callback: (data) {
-        final tup = parseEngineResult(data);
-        final json = tup.$1;
-        if (mounted) {
-          setState(() {
-            result = json;
-            ready = true;
-          });
-        }
-      },
-      host: "0.0.0.0",
-      port: 12345,
-    );
+    // 监听原生层通过本地 socket 发来的每帧分析结果（端口 12345 与 ImageProcessor 发送端一致）。
+    // 即便 socket 启动失败也不能让悬浮窗引擎崩溃（否则按钮永远不渲染），因此整体 try/catch 兜底。
+    try {
+      Server(
+        callback: (data) {
+          final tup = parseEngineResult(data);
+          final json = tup.$1;
+          if (mounted) {
+            setState(() {
+              result = json;
+              ready = true;
+            });
+          }
+        },
+        host: "127.0.0.1",
+        port: 12345,
+      );
+    } catch (e) {
+      print("悬浮窗分析服务初始化失败（不影响按钮显示）：$e");
+    }
   }
 
   // 悬浮按钮点击：在“仅按钮”与“分析小窗口”之间切换（窗口始终常驻在屏幕上）
