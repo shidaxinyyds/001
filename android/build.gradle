@@ -1,0 +1,54 @@
+buildscript {
+    ext.kotlin_version = '1.8.10'
+    repositories {
+        google()
+        mavenCentral()
+        maven { url "https://plugins.gradle.org/m2/" } // eclipse
+        maven { url "https://chaquo.com/maven" }       // chaquopy
+    }
+
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.2.1'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+        classpath "gradle.plugin.io.reconquest.gradle-android-eclipse:gradle-android-eclipse:1.1"
+        classpath "com.chaquo.python:gradle:15.0.1"
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.buildDir = '../build'
+subprojects {
+    project.buildDir = "${rootProject.buildDir}/${project.name}"
+    afterEvaluate { project ->
+       if (project.hasProperty('android')) {
+           project.android {
+               if (namespace == null) {
+                   namespace project.group
+               }
+           }
+       }
+   }
+}
+subprojects {
+    project.evaluationDependsOn(':app')
+}
+
+
+tasks.register("clean", Delete) {
+    delete rootProject.buildDir
+}
+
+apply plugin: 'io.reconquest.gradle-android-eclipse'
+apply plugin: 'eclipse'
+
+eclipse {
+    classpath {
+        downloadSources = true
+    }
+}
