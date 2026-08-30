@@ -16,15 +16,13 @@
 -->
 
 <resources>
-    <string name="app_name">ScreenCapture</string>
+    <string name="app_name">麻将训练器</string>
     <string name="intro_message">
         <![CDATA[
-        
 
-This sample demonstrates how to use Media Projection API introduced in Android 5.0 Lollipop. Press
-"Start" to start capturing the screen.
+本示例演示如何使用 Android 5.0（Lollipop）引入的 Media Projection API。
+点击“开始”即可开始录制屏幕。
 
-        
         ]]>
     </string>
 </resources>

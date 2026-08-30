@@ -1,48 +1,20 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:realtime_mahjong_trainer/home_page.dart';
 import 'package:realtime_mahjong_trainer/overlays/mahjong_overlay.dart';
 
-void main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const MyApp());
-  final server = await ServerSocket.bind(InternetAddress.anyIPv4, 4567);
-
-  // listen for clent connections to the server
-  server.listen((client) {
-    print("got a connection");
-    client.listen((List<int> data) {
-        String result = new String.fromCharCodes(data);
-        print(result.substring(0, result.length - 1));
-      });
-  });
 }
 
+// 悬浮窗入口：flutter_overlay_window 会在独立的 Flutter 引擎中以该函数作为入口点启动。
 @pragma("vm:entry-point")
 void overlayMain() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(
     MaterialApp(
       debugShowCheckedModeBanner: false,
-      home: LayoutBuilder(
-          builder: (BuildContext context, BoxConstraints constraints) {
-        double correction = 24;
-        return Column(
-          children: [
-            SizedBox(
-              width: constraints.maxWidth,
-              height: constraints.maxHeight - correction,
-              child: OverflowBox(
-                alignment: Alignment.bottomCenter,
-                maxHeight: constraints.maxHeight,
-                child: MahjongOverlay(),
-              ),
-            ),
-            Container(color: Colors.orange, height: correction),
-          ],
-        );
-      }),
+      home: MahjongOverlay(),
     ),
   );
 }

@@ -28,8 +28,8 @@ public class MediaProjectionService extends Service {
         //NotificationCompat.Builder notificationBuilder = new NotificationCompat.Builder(this, channelId);
         //Notification notification = notificationBuilder.setOngoing(true)
         Notification notification = new NotificationCompat.Builder(this, channelId)
-                .setContentTitle("Filming screen...")
-                .setContentText("This is needed to analyse the tiles.")
+                .setContentTitle("正在识别牌局…")
+                .setContentText("用于在屏幕上分析麻将牌")
                 .setSmallIcon(R.drawable.stream)
                 .setOngoing(true)
                 .setPriority(Notification.PRIORITY_MAX)
@@ -49,7 +49,7 @@ public class MediaProjectionService extends Service {
 
     private String createNotificationChannel() {
         String channelId = "Default";
-        String channelName = "Foreground notification";
+        String channelName = "前台通知";
         NotificationChannel channel = new NotificationChannel(channelId, channelName, NotificationManager.IMPORTANCE_HIGH);
         NotificationManager manager = getSystemService(NotificationManager.class);
 

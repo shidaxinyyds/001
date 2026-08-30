@@ -1,0 +1,65 @@
+name: 构建 Android APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 配置 Flutter 3.29.0
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.29.0'
+          channel: 'stable'
+          cache: true
+
+      - name: 配置 Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 安装 SDK / NDK 组件并同意协议
+        run: |
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;27.0.12077973"
+          yes | sdkmanager --licenses
+
+      - name: 写入 local.properties（flutter.sdk）
+        run: |
+          echo "flutter.sdk=$FLUTTER_ROOT" > android/local.properties
+          echo "flutter.versionName=1.0.0" >> android/local.properties
+          echo "flutter.versionCode=1" >> android/local.properties
+
+      - name: 确保 gradle wrapper 存在
+        working-directory: android
+        run: |
+          if [ ! -f gradlew ]; then
+            curl -L -o gradle.zip https://services.gradle.org/distributions/gradle-8.4-all.zip
+            unzip -q gradle.zip
+            mv gradle-8.4 gradle-dist
+            ./gradle-dist/bin/gradle wrapper --gradle-version 8.4
+            rm -rf gradle-dist gradle.zip
+          fi
+
+      - name: 获取 Flutter 依赖
+        run: flutter pub get
+
+      - name: 构建 APK（release，使用 debug 签名，可直接安装）
+        run: flutter build apk
+
+      - name: 上传 APK 制品
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk

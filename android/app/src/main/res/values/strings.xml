@@ -15,8 +15,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 <resources>
-    <string name="start">Start</string>
-    <string name="stop">Stop</string>
-    <string name="user_cancelled">User denied screen sharing permission</string>
-    <string name="hello_world">Hello world!</string>
+    <string name="start">开始</string>
+    <string name="stop">停止</string>
+    <string name="user_cancelled">用户拒绝了屏幕共享权限</string>
+    <string name="hello_world">你好，世界！</string>
 </resources>

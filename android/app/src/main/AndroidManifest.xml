@@ -6,7 +6,7 @@
 
 
     <application
-        android:label="realtime_mahjong_trainer"
+        android:label="麻将训练器"
         android:icon="@mipmap/ic_launcher"
         android:name="${applicationName}"
         android:usesCleartextTraffic="true">

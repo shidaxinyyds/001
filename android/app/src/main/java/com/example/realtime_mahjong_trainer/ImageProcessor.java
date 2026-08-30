@@ -17,8 +17,8 @@ public class ImageProcessor {
     private static final String TAG = "ImageProcessor" ;
     private PyObject engine;
 
-    private NetworkClient client = new NetworkClient("127.0.0.1", 55555);
-    private NetworkClient debugClient = new NetworkClient("192.168.1.1", 55555);
+    // 与 Dart 悬浮窗（MahjongOverlay）监听的端口保持一致
+    private NetworkClient client = new NetworkClient("127.0.0.1", 12345);
 
     private Supplier<Image> callback;
 
@@ -78,11 +78,6 @@ public class ImageProcessor {
         bytes = engineResult.callAttr("to_bytes").toJava(byte[].class);
         TimedLog.i(TAG, "Sending bytes to localhost:" + bytes.length);
         client.send(bytes);
-
-        bytes = engineResult.callAttr("dumps").toJava(byte[].class);
-//        bytes = Arrays.copyOfRange(bytes, 0, 1000);
-        TimedLog.i(TAG, "Sending bytes to debug server:" + bytes.length);
-        debugClient.send(bytes);
 
         return;
     }

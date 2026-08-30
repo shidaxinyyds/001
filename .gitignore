@@ -58,3 +58,6 @@ annotations.zip
 
 # WorkBuddy local memory (private, do not publish)
 .workbuddy/
+
+# 本地构建产出的大体积 APK / 压缩包，不纳入版本控制
+build-output/

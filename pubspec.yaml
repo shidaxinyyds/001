@@ -1,5 +1,5 @@
 name: realtime_mahjong_trainer
-description: Demonstrates how to use the flutter_screen_recording plugin.
+description: 实时麻将训练器：通过屏幕录制与机器学习识别牌面，并在悬浮窗中给出弃牌策略建议。
 publish_to: "none"
 
 environment:

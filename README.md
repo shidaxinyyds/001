@@ -1,79 +1,79 @@
-# TileTrainer
+# 麻将训练器（TileTrainer）
 
-TileTrainer is designed to enhance your [Let's Mahjong](https://play.google.com/store/apps/details?id=com.gdapp.mjlafree&hl=en&gl=US) gameplay experience by providing real-time insights into strategic tile discards.
+麻将训练器（TileTrainer）旨在提升你在 [Let's Mahjong](https://play.google.com/store/apps/details?id=com.gdapp.mjlafree&hl=en&gl=US) 中的对局体验，通过实时分析，给出每一手“打哪张牌更优”的策略建议。
 
-![Example screenshot of app](docs/screenshot.jpg)
-_Screenshot: Analysis shown while playing a match in Let's Mahjong_
+![应用截图示例](docs/screenshot.jpg)
+_截图：在 Let's Mahjong 对局过程中显示的分析建议_
 
-It is inspired by [Euophrys's Mahjong Efficiency Trainer](https://euophrys.itch.io/mahjong-efficiency-trainer).
+它的灵感来自 [Euophrys 的麻将效率训练器](https://euophrys.itch.io/mahjong-efficiency-trainer)。
 
+## 功能
 
-## Features
+- **优化对局决策：** 评估每一张舍牌的策略价值（进张数 / ukeire），帮助你在麻将对局中做出更优的弃牌选择。
+- **机器学习技术：** 尝试并实现了多种机器学习方法来定位、检测并分类屏幕上的麻将牌。
 
-- **Optimized Gameplay:** Evaluate the strategic value (ukeire) of each tile discard to enhance your decision-making during Mahjong games.
+## 使用的技术
 
-- **Machine Learning Techniques:** Experimented with and implemented various machine learning techniques to locate, detect, and classify on-screen Mahjong tiles.
+- **Flutter：** 用于构建 App 的用户界面，包括显示分析建议的悬浮窗层。
+- **Python（通过 [Chaquopy](https://chaquo.com/chaquopy/)）：** 每一帧屏幕画面的处理（检测、识别麻将牌）都在设备本地用 Python 完成。
+- **OpenCV：** 用于在屏幕上检测和分类麻将牌。
 
+在麻将中，一手牌通常由 13 张组成（轮到你舍牌时为 14 张），牌的种类共 34 种。
 
-## Technologies Used
+为了定位所有牌，程序使用 OpenCV 的 `findContours` 函数寻找轮廓。对全部轮廓的中心点做概率 [霍夫直线变换](https://docs.opencv.org/3.4/d9/db0/tutorial_hough_lines.html)，可以检测出排成一条直线（很可能是玩家手牌）的轮廓。
 
-- **Flutter**: For creating the app user interface, including the overlay layer for the commentary.
-- **Python via [Chaquopy](https://chaquo.com/chaquopy/)**: The processing of each frame of the screen recording is done on-device in Python.
-- **OpenCV**: For detection and classification of mahjong tiles on screen.
+为了对每张牌进行分类，作者最初尝试了 [SIFT](https://www.wikipedia.com/en/Scale-invariant_feature_transform)（尺度不变特征变换）检测器。但由于不同牌之间（尤其同花色内）存在大量重复图案，分类经常出错。最终采用了**模板匹配**：为 34 种牌分别手动截取游戏内牌面作为模板。
 
-In Mahjong, a hand is made up of 13 tiles (or 14 when choosing to discard), with 34 different types of tiles.
+未来希望能探索少样本学习（few-shot learning）和孪生神经网络（Siamese network）。
 
-To locate all the tiles, OpenCV's `findContours` function is used. By applying a probabilistic [Hough Line Transform](https://docs.opencv.org/3.4/d9/db0/tutorial_hough_lines.html) on the centers of all the contours,
-we can detect contours that are lined up in a straight line, which is likely to be the player's hand.
+## 麻将术语表
 
-In order to classify each tile, I initially tried to use a [SIFT](https://www.wikipedia.com/en/Scale-invariant_feature_transform) (Scale-Invariant Feature Transform) detector. However, as there are many repeating patterns
-among the tiles (especially within each suit of tiles), the app kept classifying tiles wrongly. I eventually settled on template matching,
-where for each of the 34 tiles a template is taken by manually cropping images of the in-app tiles.
-
-In the future, I would like to explore using few-shot learning and Siamese neural networks.
-
-
-## Mahjong Glossary
-|Term|Explaination|
+| 术语 | 说明 |
 |---|---|
-|[Ukeire](https://riichi.wiki/Ukeire)|Also known as tile acceptance, it is the number of tiles that the current hand can accept to improve it (which increases shanten). This is what the app is training the user. (larger is better)|
-|[Shanten](https://riichi.wiki/Shanten)|The number of tiles to attain tenpai. Any discard made by the user that increases shanten will be flagged out by the app. (smaller is better)
-|[Tenpai](https://riichi.wiki/Tenpai)|When the hand is ready, i.e. requires only one tile to complete the hand|
-|MPSZ notation|A shorthand used to describe tiles, e.g. `4788m12446s34p26z`. See this reddit post for more infomation: [Link](https://www.reddit.com/r/Mahjong/comments/dgth5z/is_there_a_standard_notation_for_tiles/)|
+| [向听数（Ukeire / 进张）](https://riichi.wiki/Ukeire) | 也称“进张数”，指当前手牌还能接收多少张牌来改善牌型（即降低向听数）。本应用正是以此训练用户。（数值越大越好） |
+| [向听（Shanten）](https://riichi.wiki/Shanten) | 距离听牌还差几张。任何导致向听数增加的舍牌都会被本应用标出。（数值越小越好） |
+| [听牌（Tenpai）](https://riichi.wiki/Tenpai) | 手牌已就绪，即只差一张牌即可和牌 |
+| MPSZ 记法 | 描述牌面的简写，例如 `4788m12446s34p26z`。详见此 Reddit 帖子：[链接](https://www.reddit.com/r/Mahjong/comments/dgth5z/is_there_a_standard_notation_for_tiles/) |
 
+> 应用内界面已自动将 MPSZ 记法转换为中文牌名，例如 `4788m12446s34p26z` 会显示为“4万7万8万8万1万2万4万4万6万3筒4筒2字6字”。
 
-## Try it out!
+## 使用说明
 
-1. Install the Let's Mahjong app on the Google Play store: [Link](https://play.google.com/store/apps/details?id=com.gdapp.mjlafree&hl=en&gl=US)
+1. 在 Google Play 商店安装 Let's Mahjong App：[链接](https://play.google.com/store/apps/details?id=com.gdapp.mjlafree&hl=en&gl=US)
+1. 安装本应用“麻将训练器”（可从 Releases 页面获取 APK）。
+1. 打开“麻将训练器”，点击“授权通知”以允许显示通知。这是因为 Android 要求前台服务必须显示一条常驻通知（前台服务用于录制屏幕）。
+1. 先确保手机处于横屏模式，再点击“开始识别”，并授予屏幕录制权限。
+1. 打开 Let's Mahjong 开始任意一局麻将。快速开始的方法：点击 开始 → 自由对战（Freeplay）进行离线对局。
+1. 正常进行对局。每次轮到你舍牌时，屏幕右上角都会出现分析建议。
 
-1. Install TileTrainer. You can get the apk from the Releases page.
+### 悬浮按钮与悬浮窗
 
-1. Open TileTrainer. Click on "Grant permissions" to allow showing of notifications. This is because Android requires foreground services to show a persistent notification. (The foreground service is needed for the app to record the screen.)
+开启识别后，屏幕右上角会出现一个**橙色圆形悬浮按钮（可拖动）**，这就是“悬浮窗按钮”：
 
-1. Ensure phone is in landscape mode first, then click "Start Streaming". Grant permission for the app to record the sceeen.
+- 识别尚未出结果时，按钮内显示转圈加载；一旦识别到牌局，按钮内变为眼睛图标。
+- **点击该悬浮按钮**会展开为“分析悬浮窗”，显示当前手牌、向听数以及针对你上一手舍牌的中文点评。
+- 在悬浮窗内点击“收起”可缩回为悬浮按钮；点击“停止”会结束识别并关闭悬浮窗。
 
-1. Open the Let's Mahjong app and start any game of Mahjong. A quick way is to click Start -> Freeplay -> to play an offline game.
+## 编译说明
 
-1. Play the game as per normal. On every discard, commentary about your choice of discard will be shown on the top right of the screen.
+1. 确保已具备以下构建环境（使用 [Nix 包管理器](https://www.wikipedia.com/en/Nix_(package_manager)) 的用户可直接运行 `nix develop` 一键安装）：
+   - Flutter SDK
+   - Android SDK
+   - Python 3
+1. 下载 Flutter 依赖：
+   ```
+   dart pub get
+   ```
+1. 编译 APK：
+   ```
+   flutter build apk --debug
+   ```
+   生成的 APK 位于 `build/app/outputs/apk/` 目录下。
 
-_Happy gaming and strategic tile discarding!_
+> 说明：由于本应用通过 Chaquopy 在 Android 内运行 Python，首次构建时 Gradle 会自动下载 OpenCV（约 4.5.1）、Pillow、mahjong 等 Python 包，耗时较长，请耐心等待；请确保网络可访问 Chaquopy 的 PyPI 镜像。
 
+## 已知限制
 
-## Compiling instructions
-
-1. Ensure the following build requirements are present. Users of the [Nix package manager](https://www.wikipedia.com/en/Nix_(package_manager)) can run the one-liner `nix develop` to install these requirements.
-    - Flutter
-    - Android SDK
-    - Python
-
-1.  Download required Flutter dependencies:
-    ```
-    dart pub get
-    ```
-
-1. Compile!
-    ```
-    flutter build apk --debug
-    ```
-    The resulting apk will be found under the `build/app/outputs/apk/` folder.
-
+- 牌面识别依赖针对 Let's Mahjong 内置牌面裁剪的模板，对其他麻将 App 或不同主题的牌面可能识别不准。
+- 屏幕录制与悬浮窗权限由系统弹窗申请，弹窗文案跟随系统语言，无法通过本应用修改。
+- 本应用仅用于练习与分析，不影响游戏本身的逻辑与结果。

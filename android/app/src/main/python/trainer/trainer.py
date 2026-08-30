@@ -3,6 +3,7 @@ from .objects.tile import Tile
 from .objects.tile_collection import TileCollection
 from .utils.shanten import calculate_shanten
 from .utils.ukeire import calculate_ukeire
+from .utils.convert import tile_to_chinese
 
 class Trainer:
     def __init__(self, hand: TileCollection):
@@ -37,30 +38,33 @@ class Trainer:
             elif ukeire == best_ukeire:
                 best_discards.append(discard)
 
+        tile_cn = tile_to_chinese(str(tile))
+        best_cn = '、'.join(tile_to_chinese(str(e)) for e in best_discards)
+
         if tile not in valid_discards:
             message = (
-                f"You discarded {tile}, which increases your shanten!" + '\n'
-                "You are now further from ready.")
+                f"你打出了{tile_cn}，这会导致向听数增加！" + '\n'
+                "你离听牌更远了。")
         elif valid_discards[tile] != best_ukeire:
             message = (
-                f"You discarded {tile} which results in {valid_discards[tile]} tiles that can improve your hand." + '\n'
-                f"The most efficient tiles are {','.join(str(e) for e in best_discards)}, which results in {best_ukeire}.")
+                f"你打出了{tile_cn}，此时可进张 {valid_discards[tile]} 张。" + '\n'
+                f"最高效的打法是 {best_cn}，可进张 {best_ukeire} 张。")
         else:
             alternatives = best_discards.copy()
             alternatives.remove(tile)
             message = (
-                f"You discarded {tile} which results in {valid_discards[tile]} tiles that can improve your hand." + '\n'
-                f"That was the best choice!")
+                f"你打出了{tile_cn}，此时可进张 {valid_discards[tile]} 张。" + '\n'
+                "这是当前最优的选择！")
 
             if len(best_discards) > 1:
-                message += '\n' + f"Other discards include {','.join(str(e) for e in alternatives)}"
+                message += '\n' + f"其他同等高效的打法：{('、'.join(tile_to_chinese(str(e)) for e in alternatives))}"
 
         self.hand = self.hand.remove_tile(tile)
         return message
 
     def draw(self, tile: Tile) -> str:
         self.hand = self.hand.add_tile(tile)
-        return f"You drew a {tile}."
+        return f"你摸到了 {tile_to_chinese(str(tile))}。"
 
 
 

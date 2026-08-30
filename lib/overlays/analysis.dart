@@ -31,7 +31,7 @@ class _AnalysisState extends State<Analysis> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          Text("Shanten: ${shanten.toString()}"),
+          Text("向听数：${shanten.toString()}"),
           Text(
             commentary ?? "",
             textAlign: TextAlign.end,

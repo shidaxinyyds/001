@@ -24,13 +24,17 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
 
-    channel.setMethodCallHandler((MethodCall call) async {
-      if (call.method == 'deliverAnalysis') {
-        // Note: It is only possible to shareData from main to overlay with thi
-        await FlutterOverlayWindow.shareData(call.arguments);
-        return 0;
+    // 接收悬浮窗内“停止”按钮发来的指令（悬浮窗与主 App 通过 shareData 通信）
+    FlutterOverlayWindow.overlayListener.listen((event) {
+      if (event == 'stop') {
+        setProcessingState(false);
+        hideOverlay();
+        if (mounted) {
+          setState(() {
+            isProcessing = false;
+          });
+        }
       }
-      return null;
     });
   }
 
@@ -48,31 +52,34 @@ class _HomePageState extends State<HomePage> {
 
   void showOverlay() async {
     if (await FlutterOverlayWindow.isActive()) {
-      print("Overlay already open.");
+      print("悬浮窗已开启");
       return;
     }
     if (await FlutterOverlayWindow.isPermissionGranted() != true) {
       if (await FlutterOverlayWindow.requestPermission() != true) {
-        print("Permission not granted");
+        print("未授予悬浮窗权限");
         return;
       }
     }
 
+    // 以 266x340 打开：悬浮窗内“悬浮按钮 + 分析面板”两块区域同时常驻，整窗可拖动。
     await FlutterOverlayWindow.showOverlay(
       enableDrag: true,
-      overlayTitle: "X-SLAYER",
-      overlayContent: 'Overlay Enabled',
-      flag: OverlayFlag.clickThrough,
+      overlayTitle: "麻将助手",
+      overlayContent: '悬浮窗已开启',
+      flag: OverlayFlag.defaultFlag,
       visibility: NotificationVisibility.visibilityPublic,
       positionGravity: PositionGravity.auto,
-      width: WindowSize.matchParent,
-      height: WindowSize.matchParent,
-      alignment: OverlayAlignment.bottomCenter,
+      alignment: OverlayAlignment.topRight,
+      width: 266,
+      height: 340,
     );
   }
 
   void hideOverlay() async {
-    await FlutterOverlayWindow.closeOverlay();
+    try {
+      await FlutterOverlayWindow.closeOverlay();
+    } catch (_) {}
   }
 
   void permissions() async {
@@ -86,13 +93,9 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-    double width = MediaQuery.of(context).size.width;
-    double height = MediaQuery.of(context).size.height;
-    double devicePixelRatio = MediaQuery.of(context).devicePixelRatio;
-
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Mahjong"),
+        title: const Text("麻将训练器"),
       ),
       body: LayoutBuilder(
         builder: (BuildContext context, BoxConstraints constraints) {
@@ -103,7 +106,7 @@ class _HomePageState extends State<HomePage> {
                   onPressed: () {
                     permissions();
                   },
-                  child: Text("Grant permissions"),
+                  child: const Text("授权通知"),
                 ),
                 (isProcessing
                     ? TextButton(
@@ -114,7 +117,7 @@ class _HomePageState extends State<HomePage> {
                             isProcessing = false;
                           });
                         },
-                        child: Text("Stop Streaming"),
+                        child: const Text("停止识别"),
                       )
                     : TextButton(
                         onPressed: () {
@@ -124,7 +127,7 @@ class _HomePageState extends State<HomePage> {
                             isProcessing = true;
                           });
                         },
-                        child: Text("Start Streaming"),
+                        child: const Text("开始识别"),
                       )),
                 Clock(),
               ],

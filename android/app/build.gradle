@@ -29,7 +29,8 @@ apply from: "$flutterRoot/packages/flutter_tools/gradle/flutter.gradle"
 android {
     namespace "com.example.realtime_mahjong_trainer"
     compileSdkVersion 34
-    ndkVersion flutter.ndkVersion
+    // 固定 NDK 版本，确保 CI（GitHub Actions）构建确定可复现
+    ndkVersion "27.0.12077973"
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8
