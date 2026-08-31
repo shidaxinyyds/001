@@ -4,7 +4,6 @@
 // 本项目从未有过该文本，所以它一直是失败状态。现替换为真正有意义的断言。
 
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:realtime_mahjong_trainer/overlays/mahjong_overlay.dart';
@@ -12,10 +11,16 @@ import 'package:realtime_mahjong_trainer/overlays/mahjong_overlay.dart';
 /// 判定一个颜色是否"看起来是红/橙系"。
 /// 判据：红通道明显高于绿和蓝，且红通道本身较亮。
 /// 覆盖 Colors.red / deepOrange / orange / amber / 0xFFD32F2F / 0xFFD84315 等。
+///
+/// 注意：这里用 `Color.value` 做位分解，而不是 `Color.r/.g/.b`。
+/// 后者是 Flutter 3.27+ 才引入的 API，而 CI 固定使用 Flutter 3.13.0，
+/// 在 3.13 上 `.r/.g/.b` 是"未定义 getter"级错误，会直接构建失败。
 bool looksRedOrOrange(Color c) {
-  final int r = (c.r * 255).round();
-  final int g = (c.g * 255).round();
-  final int b = (c.b * 255).round();
+  // ignore: deprecated_member_use
+  final int argb = c.value;
+  final int r = (argb >> 16) & 0xFF;
+  final int g = (argb >> 8) & 0xFF;
+  final int b = argb & 0xFF;
   return r >= 140 && r - g >= 40 && r - b >= 40;
 }
 
