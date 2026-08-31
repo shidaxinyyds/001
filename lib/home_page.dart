@@ -7,6 +7,12 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:realtime_mahjong_trainer/channel.dart';
 import 'package:realtime_mahjong_trainer/mode_store.dart';
 
+/// 主色调：青绿。
+/// 全局禁用红/橙/琥珀系，避免用户把"强调色"误读为"错误提示"。
+/// 弹窗层（mahjong_overlay.dart）同样遵循此约定。
+const Color _kAccent = Color(0xFF00695C); // teal 800
+const Color _kAccentBg = Color(0xFFE0F2F1); // teal 50
+
 class HomePage extends StatefulWidget {
   const HomePage({Key? key}) : super(key: key);
 
@@ -304,9 +310,7 @@ class _HomePageState extends State<HomePage> {
                 height: 52,
                 child: ElevatedButton(
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: canStart
-                        ? Colors.deepOrange
-                        : Colors.grey.shade400,
+                    backgroundColor: canStart ? _kAccent : Colors.grey.shade400,
                     foregroundColor: Colors.white,
                     disabledBackgroundColor: Colors.grey.shade300,
                     disabledForegroundColor: Colors.grey.shade600,
@@ -379,9 +383,9 @@ class _HomePageState extends State<HomePage> {
             margin: const EdgeInsets.symmetric(horizontal: 4),
             height: 64,
             decoration: BoxDecoration(
-              color: sel ? Colors.deepOrange.shade50 : Colors.white,
+              color: sel ? _kAccentBg : Colors.white,
               border: Border.all(
-                color: sel ? Colors.deepOrange : Colors.grey.shade400,
+                color: sel ? _kAccent : Colors.grey.shade400,
                 width: sel ? 2 : 1,
               ),
               borderRadius: BorderRadius.circular(10),
@@ -395,7 +399,7 @@ class _HomePageState extends State<HomePage> {
                   style: TextStyle(
                     fontSize: 16,
                     fontWeight: sel ? FontWeight.w700 : FontWeight.w500,
-                    color: sel ? Colors.deepOrange : Colors.black87,
+                    color: sel ? _kAccent : Colors.black87,
                   ),
                 ),
                 const SizedBox(height: 2),

@@ -251,8 +251,31 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   double panelW = 296;
   double panelH = 380;
 
+  // ── 固定三段布局的尺寸常量 ────────────────────────────────────────────
+  // 这组常量同时决定"每段多高"和"面板最矮能拖到多少"（minPanelH 由它们推导）。
+  // 必须同源推导，否则一旦 minPanelH 小于固定部分之和，外层 Column 就会
+  // overflow —— debug 构建下会在越界侧画出红色 "BOTTOM OVERFLOWED BY x
+  // PIXELS" 文字。这正是"弹窗缩到一定尺寸就冒红字"的直接原因。
+  static const double _kPanelPadV = 16; // 上下内边距各 8
+  static const double _kTitleBarH = 26; // 顶部「麻将助手 / 收起」行
+  static const double _kTitleGap = 8;
+  static const double _kSectionH = 110; // 建议段、牌河段（固定）
+  static const double _kSectionGap = 6;
+  static const double _kMinHandH = 84; // 手牌段的最小可读高度
+
   static const double minPanelW = 220;
-  static const double minPanelH = 180;
+
+  /// 固定布局下的硬性最小高度 = 16+26+8+110+6+110+6+84 = 366。
+  /// 低于此值三段就放不下，因此不允许再拖小（而不是让它溢出报红字）。
+  static const double minPanelH = _kPanelPadV +
+      _kTitleBarH +
+      _kTitleGap +
+      _kSectionH +
+      _kSectionGap +
+      _kSectionH +
+      _kSectionGap +
+      _kMinHandH;
+
   static const double maxPanelW = 440;
   static const double maxPanelH = 680;
 
@@ -634,53 +657,58 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // 顶部栏：标题 + 收起
-                Row(
-                  children: [
-                    const MahjongTileIcon(size: 16),
-                    const SizedBox(width: 5),
-                    const Expanded(
-                      child: Text(
-                        '麻将助手',
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 13,
-                          letterSpacing: 0.5,
+                // 顶部栏：标题 + 收起。
+                // 固定高度而非自然高度：minPanelH 的推导依赖这个确定值，
+                // 若让它随字体/图标自然变化，算术就不再成立。
+                SizedBox(
+                  height: _kTitleBarH,
+                  child: Row(
+                    children: [
+                      const MahjongTileIcon(size: 16),
+                      const SizedBox(width: 5),
+                      const Expanded(
+                        child: Text(
+                          '麻将助手',
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 13,
+                            letterSpacing: 0.5,
+                          ),
                         ),
                       ),
-                    ),
-                    GestureDetector(
-                      onTap: _togglePanel,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 3),
-                        color: Colors.white.withAlpha(28),
-                        child: const Text(
-                          '收起',
-                          style: TextStyle(color: Colors.white, fontSize: 11),
+                      GestureDetector(
+                        onTap: _togglePanel,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 3),
+                          color: Colors.white.withAlpha(28),
+                          child: const Text(
+                            '收起',
+                            style: TextStyle(color: Colors.white, fontSize: 11),
+                          ),
                         ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: _kTitleGap),
                 // 三段严格按"建议 / 牌河 / 手牌"顺序，自上而下排列。
                 // 不再做任何横竖屏判断、不再 Wrap 高度自动平衡：每段都是
                 // 固定高度的可滚动内容；超出段高时该段自身滚动，不影响其他段。
                 _section(
                   title: '建议',
                   child: _adviceSection(advice, best, count),
-                  height: 110,
+                  height: _kSectionH,
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: _kSectionGap),
                 _section(
                   title: '牌河',
                   child: _discardSection(discards, discardCount),
-                  height: 110,
+                  height: _kSectionH,
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: _kSectionGap),
                 Expanded(
                   child: _section(
                     title: '手牌',
@@ -731,7 +759,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           ),
         ),
         const SizedBox(height: 4),
-        body,
+        // 必须 Expanded：body 内是 SingleChildScrollView，在 Column 中若不给出
+        // 有界高度，它会取"子内容的完整高度"。牌河牌多时子内容远高于段高，
+        // Column 随即 overflow 并画出红色越界文字 —— 且与窗口尺寸无关。
+        // 包上 Expanded 后滚动区被限制在剩余空间内，超出部分改为段内滚动。
+        Expanded(child: body),
       ],
     );
     if (fillHeight) {
