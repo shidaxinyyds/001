@@ -1,9 +1,22 @@
 import 'dart:convert';
+import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'package:realtime_mahjong_trainer/overlays/tile_labels.dart';
 import 'package:realtime_mahjong_trainer/server.dart';
+
+/// 与 python/modes.py 完全一致的玩法共享文件路径。
+/// 悬浮窗写入、Python 引擎每帧读取，用于跨层切换二/三/四麻。
+const String kMahjongModePath =
+    '/storage/emulated/0/Android/data/com.example.realtime_mahjong_trainer/files/mahjong_mode.json';
+
+const Map<String, String> kModeOptions = {
+  '2p': '二麻',
+  '3p': '三麻',
+  '4p': '四麻',
+};
 
 // 解析原生层发来的分析结果：前 10('\n') 之前为 JSON，之后为 PNG 预览图字节。
 // 预览图当前不在界面上展示（仅保留字节以备扩展），因此这里不做解码，
@@ -22,6 +35,219 @@ Map<String, dynamic>? parseEngineResult(List<int> b) {
   }
 }
 
+/// 单张麻将牌的小卡片。横排展示用，整体不依赖任何游戏资源。
+class TileChip extends StatelessWidget {
+  final String tile; // mpsz 形式，如 "5m" "7p" "1z"
+  final double size;
+  final bool dim;
+
+  const TileChip({super.key, required this.tile, this.size = 26, this.dim = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final cn = tileToChinese(tile);
+    final suit = tile.endsWith('m')
+        ? 'm'
+        : tile.endsWith('p')
+            ? 'p'
+            : tile.endsWith('s')
+                ? 's'
+                : 'z';
+    final Color charColor;
+    if (suit == 'm' || suit == 'p') {
+      // 万/筒：蓝绿色（中国主流牌面配色）
+      charColor = const Color(0xFF1E6B7A);
+    } else if (suit == 's') {
+      // 条：草绿色
+      charColor = const Color(0xFF2E7D32);
+    } else {
+      // 字牌：东 南 西 北 黑；中 红；发 绿
+      switch (cn) {
+        case '中':
+          charColor = const Color(0xFFD32F2F);
+          break;
+        case '發':
+          charColor = const Color(0xFF2E7D32);
+          break;
+        default:
+          charColor = const Color(0xFF202124);
+      }
+    }
+
+    return Opacity(
+      opacity: dim ? 0.45 : 1.0,
+      child: Container(
+        width: size,
+        height: size * 1.18,
+        margin: const EdgeInsets.only(right: 2),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF7F3E8),
+          borderRadius: BorderRadius.circular(3),
+          border: Border.all(color: const Color(0xFFB7A98F), width: 0.6),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withAlpha(40),
+              blurRadius: 1,
+              offset: const Offset(0, 0.5),
+            ),
+          ],
+        ),
+        alignment: Alignment.center,
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            cn,
+            style: TextStyle(
+              color: charColor,
+              fontWeight: FontWeight.w800,
+              fontSize: size * 0.62,
+              height: 1.0,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 一排手牌 chip（最多 14 张）。多余空间自动 wrap。
+class HandChipRow extends StatelessWidget {
+  final String hand; // mpsz 形式
+  final double chipSize;
+  const HandChipRow({super.key, required this.hand, this.chipSize = 24});
+
+  @override
+  Widget build(BuildContext context) {
+    final tiles = _mpszToTiles(hand);
+    if (tiles.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return Wrap(
+      spacing: 1,
+      runSpacing: 3,
+      children: tiles.map((t) => TileChip(tile: t, size: chipSize)).toList(),
+    );
+  }
+}
+
+/// 把 "1m2m3p4p5z" 拆成 ["1m","2m","3p","4p","5z"]。
+List<String> _mpszToTiles(String mpsz) {
+  final out = <String>[];
+  var buf = StringBuffer();
+  for (final ch in mpsz.split('')) {
+    if (RegExp(r'[0-9]').hasMatch(ch)) {
+      buf.write(ch);
+    } else if ('mpsz'.contains(ch)) {
+      if (buf.isNotEmpty) {
+        out.add('${buf.toString()}$ch');
+        buf.clear();
+      }
+    }
+  }
+  return out;
+}
+
+/// 切分手牌为 m/p/s/z 各一组、组内按数字排序（人眼好读）。
+Map<String, List<String>> _groupHand(String hand) {
+  final tiles = _mpszToTiles(hand);
+  final groups = <String, List<String>>{
+    'm': <String>[],
+    'p': <String>[],
+    's': <String>[],
+    'z': <String>[],
+  };
+  for (final t in tiles) {
+    final s = t[1];
+    if (groups.containsKey(s)) groups[s]!.add(t);
+  }
+  for (final k in groups.keys) {
+    groups[k]!.sort((a, b) => int.parse(a[0]).compareTo(int.parse(b[0])));
+  }
+  return groups;
+}
+
+/// "推荐打这张"卡片。打 [牌] → 进张 N 张。
+class AdviceCard extends StatelessWidget {
+  final String tile;
+  final int ukeire;
+  final bool best;
+  const AdviceCard({
+    super.key,
+    required this.tile,
+    required this.ukeire,
+    this.best = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = best
+        ? const Color(0x331B5E20)
+        : const Color(0x22FFFFFF);
+    final border = best
+        ? const Color(0xFF66BB6A)
+        : const Color(0x33FFFFFF);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: border, width: 0.6),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            '打',
+            style: const TextStyle(
+              color: Colors.white70,
+              fontSize: 11,
+            ),
+          ),
+          const SizedBox(width: 4),
+          TileChip(tile: tile, size: 22),
+          const SizedBox(width: 6),
+          RichText(
+            text: TextSpan(
+              children: [
+                TextSpan(
+                  text: '进张 ',
+                  style: const TextStyle(color: Colors.white70, fontSize: 11),
+                ),
+                TextSpan(
+                  text: '$ukeire',
+                  style: TextStyle(
+                    color: best ? Colors.greenAccent : Colors.amber,
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                TextSpan(
+                  text: ' 张',
+                  style: const TextStyle(color: Colors.white70, fontSize: 11),
+                ),
+              ],
+            ),
+          ),
+          if (best) ...[
+            const SizedBox(width: 6),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+              decoration: BoxDecoration(
+                color: const Color(0xFF2E7D32),
+                borderRadius: BorderRadius.circular(3),
+              ),
+              child: const Text(
+                '最优',
+                style: TextStyle(color: Colors.white, fontSize: 9),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
 class MahjongOverlay extends StatefulWidget {
   const MahjongOverlay({super.key});
 
@@ -37,14 +263,17 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // 收起态 = 悬浮按钮；展开态 = 分析面板（可自由缩放）
   bool panelVisible = false;
 
-  static const double collapsed = 56;
-  double panelW = 264;
-  double panelH = 300;
+  // 当前玩法：悬浮窗写入共享文件，Python 引擎每帧读取。默认四麻。
+  String selectedMode = '4p';
 
-  static const double minPanelW = 200;
-  static const double minPanelH = 160;
-  static const double maxPanelW = 420;
-  static const double maxPanelH = 640;
+  static const double collapsed = 56;
+  double panelW = 296;
+  double panelH = 380;
+
+  static const double minPanelW = 220;
+  static const double minPanelH = 180;
+  static const double maxPanelW = 440;
+  static const double maxPanelH = 680;
 
   // 缩放中：此期间关闭原生拖动，避免"拖把手时整窗跟着跑"
   bool _draggingResize = false;
@@ -65,6 +294,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             setState(() {
               result = json;
               ready = true;
+              // 引擎已读到玩法文件并回传，与本地选择不一致时以回传为准，保持两端同步。
+              final m = json['mode'];
+              if (m is String && kModeOptions.containsKey(m) && m != selectedMode) {
+                selectedMode = m;
+              }
             });
           }
           _maybeShareStatus(json);
@@ -83,6 +317,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _ensureSize(collapsed, collapsed);
     });
+
+    // 启动时读取一次玩法文件，使悬浮窗初始选择与服务端一致（用户之前切换过则沿用）。
+    _loadMode();
   }
 
   // 只在识别内容真正变化时回传一次摘要给主 App，
@@ -91,7 +328,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
   void _maybeShareStatus(Map<String, dynamic> json) {
     final key =
-        "${json['hand']}|${json['shanten']}|${json['status']}|${json['count']}";
+        "${json['hand']}|${json['shanten']}|${json['status']}|${json['count']}|${json['best']}";
     if (key == _lastSharedKey) return;
     _lastSharedKey = key;
     FlutterOverlayWindow.shareData({
@@ -100,12 +337,12 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       'count': json['count'] ?? 0,
       'status': json['status'] ?? '',
       'shanten': json['shanten'],
-      // 诊断用：最高模板匹配分与截屏分辨率。
-      // 分数长期 <0.2 => 屏幕里没有牌；0.2~0.45 => 有牌但样式跟模板差异大。
+      'mode': json['mode'] ?? selectedMode,
       'top_score': json['top_score'] ?? 0,
       'screen': (json['screen'] as List?)?.join('x') ?? '',
-      // 链路错误详情（py_error/java_error/no_frames 等状态附带）
       'message': json['message'] ?? '',
+      'best': json['best'] ?? '',
+      'advice': json['advice'] ?? const [],
     }).catchError((_) {});
   }
 
@@ -164,6 +401,169 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     } else {
       await _ensureSize(collapsed, collapsed);
     }
+  }
+
+  // 读取玩法共享文件（与 python/modes.py 同一份路径），初始化本地选择。
+  Future<void> _loadMode() async {
+    try {
+      final f = File(kMahjongModePath);
+      if (await f.exists()) {
+        final data = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
+        final m = data['mode'] as String?;
+        if (m != null && kModeOptions.containsKey(m) && mounted) {
+          setState(() => selectedMode = m);
+        }
+      }
+    } catch (_) {
+      // 读取失败就沿用默认四麻，不阻塞界面。
+    }
+  }
+
+  // 切换玩法：更新本地状态并把选择写入共享文件，Python 引擎下一帧就会读到。
+  Future<void> _setMode(String m) async {
+    if (m == selectedMode) return;
+    if (mounted) setState(() => selectedMode = m);
+    try {
+      final f = File(kMahjongModePath);
+      await f.parent.create(recursive: true);
+      await f.writeAsString(jsonEncode({'mode': m}));
+    } catch (e) {
+      print('写入玩法文件失败：$e');
+    }
+  }
+
+  // 玩法切换分段控件（二麻 / 三麻 / 四麻）
+  Widget _modeSwitch() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 3),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(12),
+        borderRadius: BorderRadius.circular(7),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: kModeOptions.entries.map((e) {
+          final active = e.key == selectedMode;
+          return GestureDetector(
+            onTap: () => _setMode(e.key),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 4),
+              margin: const EdgeInsets.symmetric(horizontal: 1.5),
+              decoration: BoxDecoration(
+                color: active ? const Color(0xFFFF8F00) : Colors.transparent,
+                borderRadius: BorderRadius.circular(5),
+              ),
+              child: Text(
+                e.value,
+                style: TextStyle(
+                  color: active ? Colors.white : Colors.white70,
+                  fontSize: 11,
+                  fontWeight: active ? FontWeight.bold : FontWeight.normal,
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  // 牌河（所有玩家打出的牌）展示，按花色分组，与手牌同款 chip
+  Widget _discardSection(String discards, int discardCount) {
+    if (discards.isEmpty) return const SizedBox.shrink();
+    final grouped = _groupHand(discards);
+    final tilesAll = grouped.values.fold<int>(0, (s, l) => s + l.length);
+    if (tilesAll == 0) return const SizedBox.shrink();
+    final order = ['m', 'p', 's', 'z'];
+    return Container(
+      padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(8),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              _sectionTitle('牌河'),
+              const Spacer(),
+              Text('$discardCount 张',
+                  style: const TextStyle(color: Colors.white54, fontSize: 10)),
+            ],
+          ),
+          const SizedBox(height: 4),
+          for (final k in order)
+            if (grouped[k]!.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    SizedBox(
+                      width: 14,
+                      child: Text(
+                        k == 'z' ? '字' : (k == 'm' ? '万' : (k == 'p' ? '筒' : '条')),
+                        style: TextStyle(
+                          color: k == 'z'
+                              ? const Color(0xFFB0BEC5)
+                              : (k == 'm'
+                                  ? const Color(0xFF1E6B7A)
+                                  : (k == 'p'
+                                      ? const Color(0xFF1E6B7A)
+                                      : const Color(0xFF66BB6A))),
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                        child: HandChipRow(
+                            hand: grouped[k]!.join(), chipSize: 18)),
+                  ],
+                ),
+              ),
+        ],
+      ),
+    );
+  }
+
+  // 剩余 / 绝张 统计条
+  Widget _statsRow(int remaining, int dead) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        _statBox('剩余', '$remaining', Colors.cyanAccent),
+        const SizedBox(width: 6),
+        _statBox('绝张', '$dead', dead > 0 ? Colors.redAccent : Colors.white54),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            '剩余＝墙内未现的牌数；绝张＝4 张已全在桌面，摸不到、也不该打',
+            style: const TextStyle(color: Colors.white38, fontSize: 9, height: 1.3),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _statBox(String label, String value, Color c) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: c.withAlpha(28),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: c.withAlpha(110), width: 0.6),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(value,
+              style: TextStyle(color: c, fontSize: 14, fontWeight: FontWeight.bold)),
+          Text(label, style: const TextStyle(color: Colors.white54, fontSize: 9)),
+        ],
+      ),
+    );
   }
 
   // 缩放把手：右下角，可自由改变弹窗长宽
@@ -252,204 +652,175 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    if (!panelVisible) {
-      return SizedBox.expand(child: _floatingButton());
+  // ---------- 内容区小部件 ----------
+
+  Widget _handSection(String hand, int count) {
+    final grouped = _groupHand(hand);
+    // 顺序固定：万 → 筒 → 条 → 字。空组不渲染。
+    final order = ['m', 'p', 's', 'z'];
+    final tilesAll = grouped.values.fold<int>(0, (s, l) => s + l.length);
+    if (tilesAll == 0) {
+      return const SizedBox.shrink();
     }
-
-    final String status = (result?['status'] ?? '') as String;
-    final String hand = (result?['hand'] ?? '') as String;
-    final int count = (result?['count'] ?? 0) as int;
-    final shanten = result?['shanten'];
-    final String? commentary = result?['commentary'] as String?;
-    final List<dynamic> advice = (result?['advice'] ?? const []) as List<dynamic>;
-    final double topScore =
-        (result?['top_score'] as num?)?.toDouble() ?? 0.0;
-    final String message = (result?['message'] ?? '') as String;
-
-    return SizedBox.expand(
-      child: Stack(
+    return Container(
+      padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(8),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            decoration: BoxDecoration(
-              color: const Color(0xE61C1C1E),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                color: Colors.white.withAlpha(31),
+          Row(
+            children: [
+              _sectionTitle('手牌'),
+              const Spacer(),
+              Text(
+                '$count / 14',
+                style: const TextStyle(color: Colors.white54, fontSize: 10),
               ),
-            ),
-            padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // 顶部栏：标题 + 收起 + 停止
-                Row(
+            ],
+          ),
+          const SizedBox(height: 4),
+          for (final k in order)
+            if (grouped[k]!.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
-                    const MahjongTileIcon(size: 16),
-                    const SizedBox(width: 5),
-                    const Expanded(
+                    SizedBox(
+                      width: 14,
                       child: Text(
-                        '麻将助手',
-                        overflow: TextOverflow.ellipsis,
+                        k == 'z' ? '字' : (k == 'm' ? '万' : (k == 'p' ? '筒' : '条')),
                         style: TextStyle(
-                          color: Colors.white,
+                          color: k == 'z'
+                              ? const Color(0xFFB0BEC5)
+                              : (k == 'm'
+                                  ? const Color(0xFF1E6B7A)
+                                  : (k == 'p'
+                                      ? const Color(0xFF1E6B7A)
+                                      : const Color(0xFF66BB6A))),
+                          fontSize: 10,
                           fontWeight: FontWeight.bold,
-                          fontSize: 13,
                         ),
                       ),
                     ),
-                    GestureDetector(
-                      onTap: _togglePanel,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 7, vertical: 3),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withAlpha(36),
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: const Text('收起',
-                            style:
-                                TextStyle(color: Colors.white, fontSize: 11)),
-                      ),
-                    ),
+                    Expanded(child: HandChipRow(hand: grouped[k]!.join(), chipSize: 20)),
                   ],
                 ),
-                const SizedBox(height: 6),
-                // 内容区
-                Expanded(
-                  child: SingleChildScrollView(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        _StatusLine(status: status, count: count),
-                        const SizedBox(height: 6),
-                        if (hand.isNotEmpty) ...[
-                          const _Label('手牌'),
-                          const SizedBox(height: 2),
-                          Text(
-                            handToChinese(hand),
-                            style: const TextStyle(
-                                color: Colors.white, fontSize: 13, height: 1.4),
-                          ),
-                          const SizedBox(height: 8),
-                        ],
-                        if (shanten != null) ...[
-                          Row(
-                            children: [
-                              const _Label('向听'),
-                              const SizedBox(width: 6),
-                              Text(
-                                shanten == 0
-                                    ? '听牌'
-                                    : '$shanten 向听',
-                                style: TextStyle(
-                                  color: (shanten as int) <= 0
-                                      ? Colors.greenAccent
-                                      : Colors.amber,
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                        ],
-                        if (advice.isNotEmpty) ...[
-                          const _Label('推荐打法'),
-                          const SizedBox(height: 3),
-                          Wrap(
-                            spacing: 5,
-                            runSpacing: 5,
-                            children: advice.map((e) {
-                              final m = e as Map<String, dynamic>;
-                              return _AdviceChip(
-                                tile: (m['tile'] ?? '') as String,
-                                ukeire: (m['ukeire'] ?? 0) as int,
-                              );
-                            }).toList(),
-                          ),
-                          const SizedBox(height: 8),
-                        ],
-                        if (commentary != null && commentary.isNotEmpty) ...[
-                          const _Label('上一手点评'),
-                          const SizedBox(height: 3),
-                          Text(
-                            commentary,
-                            style: const TextStyle(
-                                color: Colors.white70, fontSize: 12, height: 1.45),
-                          ),
-                        ],
-                        const SizedBox(height: 8),
-                        _DiagLine(topScore: topScore),
-                        if (message.isNotEmpty) ...[
-                          const SizedBox(height: 4),
-                          Text(
-                            message,
-                            style: const TextStyle(
-                                color: Colors.redAccent, fontSize: 10),
-                          ),
-                        ],
-                        const SizedBox(height: 14),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          _resizeHandle(),
+              ),
         ],
       ),
     );
   }
-}
 
-class _Label extends StatelessWidget {
-  final String text;
-  const _Label(this.text);
+  Widget _sectionTitle(String t) => Text(
+        t,
+        style: const TextStyle(
+          color: Colors.white54,
+          fontSize: 10,
+          fontWeight: FontWeight.bold,
+          letterSpacing: 0.5,
+        ),
+      );
 
-  @override
-  Widget build(BuildContext context) {
-    return Text(
-      text,
-      style: const TextStyle(
-          color: Colors.white54, fontSize: 10, fontWeight: FontWeight.bold),
+  Widget _shantenSection(int shanten) {
+    final Color c;
+    final String label;
+    if (shanten < 0) {
+      c = Colors.greenAccent;
+      label = '已和牌';
+    } else if (shanten == 0) {
+      c = Colors.greenAccent;
+      label = '听牌';
+    } else {
+      c = Colors.amber;
+      label = '$shanten 向听';
+    }
+    return Row(
+      children: [
+        _sectionTitle('向听'),
+        const SizedBox(width: 8),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          decoration: BoxDecoration(
+            color: c.withAlpha(40),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: c.withAlpha(120), width: 0.6),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              color: c,
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+      ],
     );
   }
-}
 
-class _StatusLine extends StatelessWidget {
-  final String status;
-  final int count;
-  const _StatusLine({required this.status, required this.count});
+  Widget _adviceSection(List<dynamic> advice, String best, int count) {
+    if (advice.isEmpty) {
+      // 即使 advice 为空也展示一行说明，给用户明确反馈
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: Text(
+          count >= 14
+              ? '暂无可推荐打法（手牌需要调整）'
+              : '识别 $count 张，不足以给出推荐（建议等手牌完整时再看）',
+          style: const TextStyle(color: Colors.white38, fontSize: 11),
+        ),
+      );
+    }
+    // best 第一张，其余按 ukeire 降序展示
+    final sorted = [...advice];
+    sorted.sort((a, b) => ((b['ukeire'] ?? 0) as int)
+        .compareTo(((a['ukeire'] ?? 0) as int)));
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            _sectionTitle('推荐打法'),
+            const Spacer(),
+            Text(
+              sorted.length > 1 ? '共 ${sorted.length} 个候选' : '',
+              style: const TextStyle(color: Colors.white38, fontSize: 10),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Wrap(
+          spacing: 4,
+          runSpacing: 4,
+          children: [
+            for (var i = 0; i < sorted.length && i < 4; i++)
+              AdviceCard(
+                tile: (sorted[i]['tile'] ?? '') as String,
+                ukeire: (sorted[i]['ukeire'] ?? 0) as int,
+                best: best.isNotEmpty && sorted[i]['tile'] == best,
+              ),
+          ],
+        ),
+      ],
+    );
+  }
 
-  static const Set<String> _knownStatuses = {
-    'ok',
-    'incomplete',
-    'no_tiles',
-    'engine_ready',
-    'no_frames',
-    'projection_stopped',
-    'send_error',
-    'py_error',
-    'decode_error',
-    'java_error',
-    'capture_error',
-    'start_failed',
-  };
-
-  @override
-  Widget build(BuildContext context) {
+  // 状态文案：每种 status 一行短描述
+  Widget _statusChip(String status, int count, double topScore) {
     String text;
     Color color;
     switch (status) {
       case 'ok':
-        text = '已识别 $count 张';
+        text = '✓ 已识别 $count 张';
         color = Colors.greenAccent;
         break;
       case 'incomplete':
-        text = '识别到 $count 张，需 13/14 张才完整';
+        final missing = math.max(0, 13 - count);
+        text = '识别到 $count 张，还差约 $missing 张（可能被遮挡或漏检）';
         color = Colors.orangeAccent;
         break;
       case 'no_tiles':
@@ -461,7 +832,6 @@ class _StatusLine extends StatelessWidget {
         color = Colors.greenAccent;
         break;
       case 'no_frames':
-        // 已授权但一帧都收不到：录屏会话失效或屏幕完全静止
         text = '已授权，未采集到画面';
         color = Colors.orangeAccent;
         break;
@@ -478,85 +848,223 @@ class _StatusLine extends StatelessWidget {
       case 'java_error':
       case 'capture_error':
       case 'start_failed':
-        text = '识别链路异常（见下方详情）';
+        text = '识别链路异常（见下方）';
         color = Colors.redAccent;
         break;
       default:
-        text = '未识别到牌面';
+        text = '等待识别…';
         color = Colors.white38;
     }
-    if (!_knownStatuses.contains(status)) {
-      text = '等待识别…';
-      color = Colors.white38;
-    }
-    return Row(
+    final String diagHint = _diagHint(status, topScore);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Container(
-          width: 6,
-          height: 6,
-          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-        ),
-        const SizedBox(width: 5),
-        Expanded(
-          child: Text(text,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(color: color, fontSize: 11)),
-        ),
-      ],
-    );
-  }
-}
-
-/// 诊断行：仅显示匹配状态提示（不显示屏幕尺寸，符合简洁要求）。
-/// 识别不出牌时，这一行能区分"屏幕里没牌"和"有牌但样式与模板差异较大"。
-class _DiagLine extends StatelessWidget {
-  final double topScore;
-  const _DiagLine({required this.topScore});
-
-  @override
-  Widget build(BuildContext context) {
-    final String hint;
-    if (topScore < 0.20) {
-      hint = '屏幕里没找到麻将牌（确认已打开牌局）';
-    } else if (topScore < 0.45) {
-      hint = '有牌但匹配分偏低，牌面样式与模板差异较大';
-    } else {
-      hint = '匹配正常';
-    }
-    return Text(
-      hint,
-      style: const TextStyle(color: Colors.white38, fontSize: 10),
-    );
-  }
-}
-
-class _AdviceChip extends StatelessWidget {
-  final String tile;
-  final int ukeire;
-  const _AdviceChip({required this.tile, required this.ukeire});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-      decoration: BoxDecoration(
-        color: Colors.white.withAlpha(26),
-        borderRadius: BorderRadius.circular(5),
-        border: Border.all(color: Colors.white.withAlpha(46)),
-      ),
-      child: RichText(
-        text: TextSpan(
+        Row(
           children: [
-            TextSpan(
-              text: tileToChinese(tile),
-              style: const TextStyle(color: Colors.white, fontSize: 12),
+            Container(
+              width: 6,
+              height: 6,
+              decoration: BoxDecoration(color: color, shape: BoxShape.circle),
             ),
-            TextSpan(
-              text: ' $ukeire',
-              style: const TextStyle(color: Colors.amber, fontSize: 11),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                text,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w600),
+              ),
             ),
           ],
         ),
+        if (diagHint.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(left: 12, top: 2),
+            child: Text(
+              diagHint,
+              style: const TextStyle(color: Colors.white38, fontSize: 10),
+            ),
+          ),
+      ],
+    );
+  }
+
+  String _diagHint(String status, double topScore) {
+    if (status == 'ok' || status == 'engine_ready') return '';
+    if (topScore < 0.20) return '屏幕里没找到麻将牌（确认已打开牌局）';
+    if (topScore < 0.45) return '匹配分偏低，牌面样式与模板差异较大';
+    return '';
+  }
+
+  Widget _boundaryNote() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      decoration: BoxDecoration(
+        color: Colors.blueGrey.withAlpha(60),
+        borderRadius: BorderRadius.circular(5),
+      ),
+      child: const Text(
+        '说明：识别你自己的 13/14 张手牌 + 全场牌河，'
+        '据此推算剩余/绝张并给出推荐打法。'
+        '别家手牌在多数麻将 App 是反扣的（看不见）。'
+        '切换上方玩法会同步可用牌集。',
+        style: TextStyle(color: Colors.white70, fontSize: 10, height: 1.35),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!panelVisible) {
+      return SizedBox.expand(child: _floatingButton());
+    }
+
+    final String status = (result?['status'] ?? '') as String;
+    final String hand = (result?['hand'] ?? '') as String;
+    final int count = (result?['count'] ?? 0) as int;
+    final int? shanten = result?['shanten'] as int?;
+    final String? commentary = result?['commentary'] as String?;
+    final List<dynamic> advice = (result?['advice'] ?? const []) as List<dynamic>;
+    final double topScore =
+        (result?['top_score'] as num?)?.toDouble() ?? 0.0;
+    final String message = (result?['message'] ?? '') as String;
+    final String best = (result?['best'] ?? '') as String;
+    final String discards = (result?['discards'] ?? '') as String;
+    final int discardCount = (result?['discard_count'] ?? 0) as int;
+    final int remaining = (result?['remaining'] ?? 0) as int;
+    final int dead = (result?['dead'] ?? 0) as int;
+
+    return SizedBox.expand(
+      child: Stack(
+        children: [
+          // 主面板：半透明深色 + 圆角 + 细边框（毛玻璃观感）
+          Container(
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [Color(0xF01E2126), Color(0xF0111418)],
+              ),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.white.withAlpha(28)),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withAlpha(80),
+                  blurRadius: 12,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // 顶部栏：标题 + 收起
+                Row(
+                  children: [
+                    const MahjongTileIcon(size: 16),
+                    const SizedBox(width: 5),
+                    const Expanded(
+                      child: Text(
+                        '麻将助手',
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 13,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                    ),
+                    GestureDetector(
+                      onTap: _togglePanel,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withAlpha(28),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: const Text(
+                          '收起',
+                          style: TextStyle(color: Colors.white, fontSize: 11),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                // 滚动内容区
+                Expanded(
+                  child: SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _statusChip(status, count, topScore),
+                        if (message.isNotEmpty) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            message,
+                            style: const TextStyle(
+                                color: Colors.redAccent, fontSize: 10),
+                          ),
+                        ],
+                        const SizedBox(height: 8),
+                        // 玩法切换：二麻 / 三麻 / 四麻
+                        Center(child: _modeSwitch()),
+                        const SizedBox(height: 8),
+                        // 牌河（所有玩家打出的牌）
+                        _discardSection(discards, discardCount),
+                        const SizedBox(height: 8),
+                        // 剩余 / 绝张 统计
+                        _statsRow(remaining, dead),
+                        const SizedBox(height: 8),
+                        if (hand.isNotEmpty && count > 0) ...[
+                          _handSection(hand, count),
+                          const SizedBox(height: 8),
+                        ],
+                        if (shanten != null) ...[
+                          _shantenSection(shanten),
+                          const SizedBox(height: 8),
+                        ],
+                        _adviceSection(advice, best, count),
+                        if (commentary != null && commentary.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 5),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withAlpha(10),
+                              borderRadius: BorderRadius.circular(5),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                _sectionTitle('上一手点评'),
+                                const SizedBox(height: 3),
+                                Text(
+                                  commentary,
+                                  style: const TextStyle(
+                                    color: Colors.white70,
+                                    fontSize: 11,
+                                    height: 1.45,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                        const SizedBox(height: 8),
+                        _boundaryNote(),
+                        const SizedBox(height: 8),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          _resizeHandle(),
+        ],
       ),
     );
   }

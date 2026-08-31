@@ -1475,6 +1475,9 @@ class StructuralDetector(Detector):
                             for (r, l, c) in d2]
                     break
 
+        # detect() 只取手牌行（张数最接近 13/14）；detect_all_rows() 用全部行。
+        dets = self._pick_rows(dets)
+
         # 先按 x 排序，再拆出 confs / result，保证两者下标严格一一对应。
         # 旋转分支会重排顺序：若先取 confs 再排序，会把 conf 与牌位错位配对。
         dets.sort(key=lambda d: d[0][0])
@@ -1496,6 +1499,47 @@ class StructuralDetector(Detector):
             return canvas
 
         return Stage(result=result, image=image, display_callback=display)
+
+    def detect_all_rows(self, image: CVImage) -> List[List[Tuple[Rect, Optional[str], float]]]:
+        """返回所有检测到的牌行（不挑选手牌行）。
+
+        每行是一组 [(rect, label, conf), ...]，已由 x 排序。
+        引擎据此区分「自己手牌行」（张数最接近 13/14、牌最大）与
+        「各家牌河行」（其余行），从而把所有打出的牌纳入剩余牌计算。
+        """
+        img = image if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        ih, iw = img.shape[:2]
+        self.last_screen = (iw, ih)
+        dets = self._detect_once(img)
+        if len(dets) < 4:
+            for rot in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE):
+                try:
+                    rot_img = cv2.rotate(img, rot)
+                except cv2.error:
+                    continue
+                d2 = self._detect_once(rot_img)
+                if len(d2) > len(dets):
+                    dets = [(self._unrotate_rect(r, rot, iw, ih), l, c)
+                            for (r, l, c) in d2]
+                    break
+        return self._group_rows(dets)
+
+    @staticmethod
+    def _group_rows(dets):
+        """把检测到的牌按 y（行）分组，每组内按 x 排序。"""
+        if not dets:
+            return []
+        rows: Dict[int, list] = {}
+        for d in dets:
+            rh = d[0][3]
+            key = d[0][1] // max(8, rh)
+            rows.setdefault(key, []).append(d)
+        out = []
+        for g in rows.values():
+            g.sort(key=lambda d: d[0][0])
+            out.append(g)
+        out.sort(key=lambda g: g[0][0][1])
+        return out
 
     def _detect_once(self, img: np.ndarray) -> List[Tuple[Rect, Optional[str], float]]:
         h, w = img.shape[:2]
@@ -1566,8 +1610,8 @@ class StructuralDetector(Detector):
                     conf *= 0.55  # 牌形不对，降置信
                 dets.append(((fx1, fy1, fw_f, fh_f), label, conf))
 
-        # 手牌行 = 张数最接近 13/14 的行（其余行丢弃，见 _pick_rows 注释）
-        dets = self._pick_rows(dets)
+        # 注意：这里返回「所有检测到的牌」，不做行挑选。
+        # detect() 仍只取手牌行（兼容旧测试）；detect_all_rows() 用全部行识别牌河。
         return dets
 
     @staticmethod
