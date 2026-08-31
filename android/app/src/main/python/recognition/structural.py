@@ -28,6 +28,7 @@ from utils.stubs import CVImage, Rect
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _GLYPH_DIR = os.path.join(_HERE, "images", "glyphs")
+_STYLE_DIR = os.path.join(_HERE, "images", "styles")
 
 # ---------------------------------------------------------------- 排列表
 # 元素位置全部为牌面内的归一化坐标 (x, y)。
@@ -65,7 +66,7 @@ SOU_PATTERNS: Dict[str, List[Tuple[float, float]]] = {
 }
 
 # 字牌字形文件的 ASCII 键（gen_glyphs.py 生成）：東E 南S 西W 北N 中C 發F
-_HONOR_GLYPH = {"1z": "E", "2z": "S", "3z": "W", "4z": "N", "6z": "F", "7z": "C"}
+_HONOR_GLYPH = {"1z": "E", "2z": "S", "3z": "W", "4z": "N", "5z": "H", "6z": "F", "7z": "C"}
 _GLYPH_TO_LABEL = {v: k for k, v in _HONOR_GLYPH.items()}
 
 # ------------------------------------------------------- 相对阈值（常量）
@@ -77,6 +78,21 @@ MAX_TILE_ASPECT = 0.95       # 牌宽/牌高 合理上限（超界当误检丢�
 MAX_WORKING_EDGE = 1100      # 长边超过则降采样（性能）
 OUT_PENALTY = 0.6            # 排列掩码外墨迹的罚系数
 MIN_CONF = 0.30              # 低于此置信度的牌标记为低置信
+# 万牌硬门槛：萬字形匹配分低于此值就判定"不是万牌"。
+# 没有这个门槛时，1p 的大圆下缘会被当成"萬块"、上缘被数字字形匹配上，
+# 从而把 1p 误判成 4m/1m（多风格测试中稳定复现）。
+MIN_WAN_SCORE = 0.30
+# 字牌字形匹配阈值。
+MIN_HONOR_SCORE = 0.45
+# 排列队形分门槛：筒/条数对了还要「排得像」才认。
+# 这是把字牌（東/發 笔画峰值）挡在筒/条之外的主要闸门。
+# 数值由三风格基准标定：真筒/条普遍 >=0.7，字牌伪 motif 普遍 <0.6。
+MIN_ARR_SCORE = 0.62
+# 同风格模板相似度门槛：达到即采信模板结果。
+# 分值标定：同风格 ≈0.85~0.97，跨风格汉字 ≈0.5~0.7（见 _StyleBank 注释）。
+# 取 0.74 可确保只有"确实是同一套牌面美术"时才覆盖几何判定结果，
+# 未注册的风格仍走几何不变量路径（仍可识别筒/条）。
+MIN_STYLE_SCORE = 0.74
 NUMERAL_REGION = 0.58        # 万牌数字区（占牌高）
 # 萬字块起始（占牌高）。设 0.60 而非 0.55，给数字"三"的最下横杠留出 0.05 余量，
 # 避免 0.55~0.58 区间的数字笔画被圈进 bottom 把 bbox 拉大、密度拉低、萬检测失败。
@@ -258,12 +274,94 @@ class _GlyphBank:
         return max(self._match_tolerant(a, t) for t in self.wans)
 
 
+class _StyleBank:
+    """按「美术风格」组织的整牌模板库：images/styles/<style>/<label>.png。
+
+    存在理由（实测结论，勿删）：
+      筒/条可以靠几何不变量（数圆心 / 数竹棒）跨风格稳健识别，但
+      万牌数字(一~九)与字牌(東南西北中發白)是**汉字**——
+      同一字在不同字体下的形状差异，与不同字之间的差异是同一量级。
+      实测：多字体字形库上，硬 IoU 与软相似度的 top-1 都只有 50~60%，
+      且正确项与次优项分差 <0.05，调阈值毫无意义。
+      而一款麻将 App 的牌面美术是**固定**的，所以"同风格精确模板匹配"
+      是唯一能达到可用精度的路径（同风格相似度普遍 0.85+）。
+
+    模板由 localtest/build_style_bank.py 生成：裁墨迹外接框 + 等比归一化，
+    因此风格之间的留白/比例差异不影响匹配。
+    """
+
+    TW, TH = 40, 56
+    SIGMA = 4.0
+
+    def __init__(self, path: str):
+        self.tpls: List[Tuple[str, np.ndarray]] = []   # (label, soft_map)
+        if not os.path.isdir(path):
+            return
+        for style in sorted(os.listdir(path)):
+            sdir = os.path.join(path, style)
+            if not os.path.isdir(sdir):
+                continue
+            for name in sorted(os.listdir(sdir)):
+                if not name.endswith(".png"):
+                    continue
+                img = cv2.imread(os.path.join(sdir, name), cv2.IMREAD_GRAYSCALE)
+                if img is None:
+                    continue
+                binm = (img > 100).astype(np.uint8)
+                if not binm.any():
+                    continue
+                self.tpls.append((name[:-4], self._soft(binm)))
+
+    @classmethod
+    def _soft(cls, binm: np.ndarray) -> np.ndarray:
+        """笔画软映射：笔画处≈1，向外按 SIGMA 指数衰减。
+
+        比硬 IoU 更能容忍 1~2px 的切分错位与描边粗细差异。
+        """
+        bg = (1 - binm).astype(np.uint8) * 255
+        d = cv2.distanceTransform(bg, cv2.DIST_L2, 3)
+        return np.exp(-d / float(cls.SIGMA)).astype(np.float32)
+
+    def _norm_face(self, m: np.ndarray) -> Optional[np.ndarray]:
+        """墨迹掩码 -> 裁外接框 + 归一化到模板尺寸的软映射。"""
+        ys, xs = np.where(m > 0)
+        if len(ys) == 0:
+            return None
+        crop = m[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+        r = cv2.resize(crop, (self.TW, self.TH), interpolation=cv2.INTER_AREA)
+        binm = (r > 100).astype(np.uint8)
+        if not binm.any():
+            return None
+        return self._soft(binm)
+
+    def match(self, m: np.ndarray) -> Tuple[Optional[str], float]:
+        """返回 (最佳标签, 相似度 0~1)。无模板或非匹配时返回 (None, 0)。"""
+        q = self._norm_face(m)
+        if q is None or not self.tpls:
+            return None, 0.0
+        qf = q.ravel()
+        qn = float(np.sqrt((qf * qf).sum()))
+        if qn <= 0:
+            return None, 0.0
+        best_l, best = None, 0.0
+        for label, t in self.tpls:
+            tf = t.ravel()
+            den = float(np.sqrt((tf * tf).sum())) * qn
+            if den <= 0:
+                continue
+            s = float((qf * tf).sum()) / den
+            if s > best:
+                best_l, best = label, s
+        return best_l, best
+
+
 class StructuralDetector(Detector):
     """结构识别器：排列掩码评分 + 字形匹配，接口与 TemplateDetector 一致。"""
 
     def __init__(self, targets=None) -> None:
         super().__init__(targets or {})
         self._glyphs = _GlyphBank(_GLYPH_DIR)
+        self._styles = _StyleBank(_STYLE_DIR)
         self._mask_cache: Dict[Tuple[str, int, int], np.ndarray] = {}
         # 诊断信息（与 TemplateDetector 字段名保持一致）
         self.last_top_score: float = 0.0
@@ -292,9 +390,19 @@ class StructuralDetector(Detector):
 
     @staticmethod
     def _ink_mask(face: np.ndarray) -> np.ndarray:
-        """相对墨迹掩码：V/Otsu 与 S/Otsu 的并集。"""
+        """相对墨迹掩码：V/Otsu 与 S/Otsu 的并集。
+
+        对比度守卫：白板/空白牌面是单一均匀色块，Otsu 在没有双峰时会把
+        JPEG 噪声硬劈成两半，产生大面积伪墨迹（实测可达 100%），
+        导致白板既认不出、又会被当成字牌。因此先检查明暗动态范围，
+        过小则直接判定"无墨"。
+        """
         hsv = cv2.cvtColor(face, cv2.COLOR_BGR2HSV)
         v, s = hsv[:, :, 2], hsv[:, :, 1]
+        lo = float(np.percentile(v, 5))
+        hi = float(np.percentile(v, 95))
+        if hi - lo < 12.0:
+            return np.zeros(v.shape, np.uint8)
         _, bv = cv2.threshold(v, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         dark = (bv == 0).astype(np.uint8)
         _, bs = cv2.threshold(s, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -326,8 +434,30 @@ class StructuralDetector(Detector):
         return out
 
     @staticmethod
+    def _min_area(min_area_frac: float, face_area: int) -> float:
+        """统一把「面积门槛」换算成绝对像素数。
+
+        _blobs 的历史调用里既有传比例（0.01）也有传绝对像素（0.01*face_area）的
+        写法，二者混用会产生 `area < frac*face_area` 被放大成平方量级的静默失效
+        ——连通域全部被过滤掉，却没有任何报错，排查极难。
+        这里做容错：参数 > 1 视为绝对像素，<= 1 视为占牌面比例。
+        """
+        try:
+            v = float(min_area_frac)
+        except (TypeError, ValueError):
+            return 0.0
+        if v <= 1.0:
+            return v * float(face_area)
+        return v
+
+    @staticmethod
     def _blobs(m: np.ndarray, min_area_frac: float, face_area: int):
-        """外轮廓连通域（RETR_CCOMP），返回 [(area_px, x, y, w, h, holes)]。"""
+        """外轮廓连通域（RETR_CCOMP），返回 [(area_px, x, y, w, h, holes)]。
+
+        min_area_frac：面积门槛。<=1 表示占 face_area 的比例；>1 表示绝对像素数
+        （见 _min_area 的说明，防止调用方单位用错导致静默全过滤）。
+        """
+        min_area = StructuralDetector._min_area(min_area_frac, face_area)
         cnts, hier = cv2.findContours(m, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
         out = []
         if hier is None:
@@ -338,7 +468,7 @@ class StructuralDetector(Detector):
                 continue
             x, y, w, h = cv2.boundingRect(c)
             area = int((m[y:y + h, x:x + w] > 0).sum())
-            if area < min_area_frac * face_area:
+            if area < min_area:
                 continue
             holes = 0
             for j in range(len(cnts)):
@@ -378,6 +508,48 @@ class StructuralDetector(Detector):
         p = float(cv2.arcLength(c, True))
         return 4.0 * np.pi * a / (p * p) if p > 1 else 0.0
 
+    def _wan_is_multi_motif(self, sub: np.ndarray) -> bool:
+        """判断一块墨迹是否实为"多个圆点/多根竖棒"（数牌下半部），
+        而非单一萬字。用于防止筒/条牌被误判成万牌。
+
+        只对"明确的圆"或"明确的竖向贯穿墨柱"计数——萬字是笔画复杂的汉字，
+        既不会是圆、也不会是成排竖向贯穿的墨柱，故不会被误拒。
+        这是跨美术风格稳定的：万牌下半部永远是一个「萬」字块，而筒/条牌下半部
+        永远是若干圆点/竖棒。
+        """
+        fa = sub.shape[0] * sub.shape[1]
+        if int((sub > 0).sum()) < 10:
+            return False
+        blobs = self._blobs(sub, 0.01, fa)
+        rc = 0   # 圆点数量
+        sc = 0   # 竖棒数量
+        for b in blobs:
+            area, x, y, w, h, _ = b
+            if area < 0.008 * fa:
+                continue
+            circ = self._circularity(sub, x, y, w, h)
+            if circ > 0.55:
+                rc += 1
+                continue
+            # 非圆 blob：检查是否为成排竖棒（条牌）
+            subb = (sub[y:y + h, x:x + w] > 0).astype(np.uint8)
+            if int(subb.sum()) < 8:
+                continue
+            e = cv2.erode(subb, np.ones((1, 3), np.uint8))
+            e = cv2.erode(e, np.ones((3, 1), np.uint8))
+            cnts, _ = cv2.findContours(e, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for c in cnts:
+                xc, yc, wc, hc = cv2.boundingRect(c)
+                if wc < 3 or hc < 3:
+                    continue
+                a = float(cv2.contourArea(c))
+                if a < 0.01 * fa:
+                    continue
+                aspect = wc / max(1, hc)
+                if aspect < 0.62 and hc / max(1, wc) > 1.4 and a / float(max(1, wc * hc)) > 0.4:
+                    sc += 1
+        return rc >= 2 or sc >= 2
+
     def _shape_of(self, m: np.ndarray, blob) -> Tuple[str, float, float]:
         """blob -> (shape, circularity, bbox_fill)。shape ∈ {circle, stick, irregular}。
 
@@ -396,6 +568,239 @@ class StructuralDetector(Detector):
             return "stick", circ, bbox_fill
         return "irregular", circ, bbox_fill
 
+    # ---- 几何不变量计数（跨美术风格稳定）------------------------------------
+
+    def _peaks_in_blob(self, m: np.ndarray, blob) -> int:
+        """用距离变换的局部极大值（带最小间距抑制）估计一个粘连块里含几个圆点。
+
+        比"对阈值化距离变换做连通域"更稳：粘连圆之间距离变换脊线可能仍高于阈值
+        而被并成一个连通域，峰值法按"圆心局部极大 + 最小间距"逐一计数，6p/7p/8p/9p
+        的粘连圆都能数清。
+        """
+        area, x, y, w, h, _ = blob
+        if w < 3 or h < 3:
+            return 1
+        sub = (m[y:y + h, x:x + w] > 0).astype(np.uint8)
+        if int(sub.sum()) < 5:
+            return 0
+        dt = cv2.distanceTransform((1 - sub) * 255, cv2.DIST_L2, 3)
+        mx = float(dt.max())
+        if mx < 2.0:
+            return 1
+        dila = cv2.dilate(dt, np.ones((3, 3), np.uint8))
+        peaks = (dt == dila) & (dt > 0.35 * mx)
+        coords = np.column_stack(np.where(peaks))
+        mind = 0.55 * mx
+        keep = []
+        for yy, xx in sorted(coords, key=lambda c: -dt[c[0], c[1]]):
+            if all(((yy - ky) ** 2 + (xx - kx) ** 2) ** 0.5 > mind for ky, kx in keep):
+                keep.append((yy, xx))
+        return max(1, len(keep))
+
+    @staticmethod
+    def _dt_peaks(dt: np.ndarray, min_frac: float = 0.35,
+                  min_sep_frac: float = 0.50) -> List[Tuple[int, int]]:
+        """距离变换的局部极大值**坐标**（带最小间距抑制）。
+
+        dt 为「墨迹」的距离变换时（每个墨迹像素到最近背景的距离），
+        峰值即圆盘圆心；粘连圆盘之间会出现脊线低谷，峰值法能逐个点清。
+        """
+        mx = float(dt.max())
+        if mx < 1.2:
+            return []
+        dila = cv2.dilate(dt, np.ones((3, 3), np.uint8))
+        peaks = (dt == dila) & (dt > max(1.0, min_frac * mx))
+        coords = np.column_stack(np.where(peaks))
+        mind = max(2.0, min_sep_frac * mx)
+        keep: List[Tuple[int, int]] = []
+        for yy, xx in sorted(coords, key=lambda c: -dt[c[0], c[1]]):
+            if all(((yy - ky) ** 2 + (xx - kx) ** 2) ** 0.5 > mind
+                   for ky, kx in keep):
+                keep.append((int(yy), int(xx)))
+        return keep
+
+    def _pin_centers(self, m: np.ndarray, fw: int, fh: int) -> List[Tuple[float, float, float]]:
+        """返回检测到的圆心 [(cx, cy, r)]，已做填洞/去噪/DT 峰值/半径一致性闸门。"""
+        face_area = fw * fh
+        if int((m > 0).sum()) < 0.01 * face_area:
+            return []
+        mf = self._fill_holes(m)
+        mf = cv2.morphologyEx(mf, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+        cand: List[Tuple[float, float, float]] = []
+        min_span = 0.07 * min(fw, fh)
+        for b in self._blobs(mf, 0.004, face_area):
+            area, x, y, w, h, _ = b
+            if max(w, h) < min_span:
+                continue
+            ink = (mf[y:y + h, x:x + w] > 0).astype(np.uint8)
+            dt = cv2.distanceTransform(ink, cv2.DIST_L2, 3)
+            dmax = float(dt.max())
+            if dmax < 1.2:
+                cand.append((x + w / 2.0, y + h / 2.0, max(2.0, min(w, h) / 2.0)))
+                continue
+            for py, px in self._dt_peaks(dt):
+                cand.append((x + px + 0.5, y + py + 0.5, max(2.0, float(dt[py, px]))))
+        if not cand:
+            return []
+        cand.sort(key=lambda c: -c[2])
+        kept: List[Tuple[float, float, float]] = []
+        for cx, cy, r in cand:
+            if all(((cx - kx) ** 2 + (cy - ky) ** 2) ** 0.5 > 0.65 * max(r, kr)
+                   for kx, ky, kr in kept):
+                kept.append((cx, cy, r))
+        if len(kept) >= 3:
+            radii = np.array([r for _cx, _cy, r in kept], dtype=np.float32)
+            med = float(np.median(radii))
+            if med > 0:
+                good = int(np.sum((radii >= 0.60 * med) & (radii <= 1.60 * med)))
+                if good < int(0.70 * len(kept)):
+                    return []
+        return kept
+
+    def _count_pindots(self, m: np.ndarray, fw: int, fh: int) -> int:
+        """筒牌：统计圆点（填充圆盘 / 圆环）个数。返回 1-9；0 表示不是筒。"""
+        kept = self._pin_centers(m, fw, fh)
+        if not kept:
+            return 0
+        count = len(kept)
+        # 验证：圆心附近必须真是圆/环（按各自半径取样），
+        # 避免把萬字/字牌的笔画端点当圆心。
+        if 1 <= count <= 9 and self._pin_peak_sanity(m, fw, fh, kept):
+            return count
+        return 0
+
+    def _pin_peak_sanity(self, m: np.ndarray, fw: int, fh: int,
+                         centers) -> bool:
+        """按每个圆心自身的半径取样，验证局部确有「实心盘」或「圆环」。
+
+        早期版本用固定取样半径（0.12*min(fw,fh)），在大牌面上取样窗远小于真实圆，
+        把圆环内部空腔当成“无墨”而全部拒绝（duma520 9p 实测 0/9）。
+        """
+        ok = 0
+        for cx, cy, r in centers:
+            rad = max(3, int(round(r)))
+            x0, y0 = max(0, int(cx) - rad - 2), max(0, int(cy) - rad - 2)
+            x1, y1 = min(fw, int(cx) + rad + 3), min(fh, int(cy) + rad + 3)
+            if x1 <= x0 or y1 <= y0:
+                continue
+            patch = m[y0:y1, x0:x1]
+            ph, pw = patch.shape
+            cyy, cxx = int(cy) - y0, int(cx) - x0
+            Y, X = np.ogrid[:ph, :pw]
+            dist = np.sqrt((X - cxx) ** 2 + (Y - cyy) ** 2)
+            inner = dist < 0.55 * rad
+            rim = (dist >= 0.62 * rad) & (dist < 1.35 * rad)
+            if inner.sum() == 0 or rim.sum() == 0:
+                continue
+            i_ink = float((patch[inner] > 0).mean())
+            r_ink = float((patch[rim] > 0).mean())
+            # 实心盘：内部有墨；圆环：外缘有墨。二者满足其一即为圆。
+            if i_ink > 0.50 or r_ink > 0.30:
+                ok += 1
+        return ok >= max(1, (len(centers) + 1) // 2)
+
+    # ---------------------------------------------------- 排列验证（关键闸门）
+    # 筒/条的"有几个 motif"由 DT 峰值数给出，但**数对不等于队形对**：
+    # 字牌「東」的笔画端点也能数出 9 个峰值（实测被判成 9p）。
+    # 因此必须再验证这些 motif 是否真的排成该数字应有的队形
+    # （6p=2列×3行、8p=2列×4行、9s=3×3…… 这是全行业统一的排列不变量）。
+
+    @staticmethod
+    def _norm_arr(p: np.ndarray) -> np.ndarray:
+        """归一化到零均值/单位尺度，只保留"队形形状"，消除风格带来的位置与缩放差异。"""
+        c = p - p.mean(axis=0)
+        s = float(np.sqrt((c ** 2).sum(axis=1).mean()))
+        if s < 1e-6:
+            return c
+        return c / s
+
+    @staticmethod
+    def _chamfer(a: np.ndarray, b: np.ndarray) -> float:
+        """对称 Chamfer 距离：双向最近邻平均距离，对少量错位/抖动不敏感。"""
+        def one_way(x, y):
+            ds = [float(np.min(np.sum((y - xi) ** 2, axis=1))) for xi in x]
+            return float(np.mean(ds)) if ds else 0.0
+        return max(one_way(a, b), one_way(b, a))
+
+    def _arrangement_score(self, centers, patterns: Dict[str, list]) -> Tuple[Optional[str], float]:
+        """把 motif 中心与同数量的排列模板比对，返回 (最佳标签, 队形分 0~1)。
+
+        只与"motif 数量相同"的模板比对：对筒/条而言数量本身就唯一决定了点数，
+        这里比的是"队形对不对"，用来拒绝字牌/萬字的伪 motif。
+        """
+        if not centers:
+            return None, 0.0
+        pts = np.array([[c[0], c[1]] for c in centers], dtype=np.float32)
+        n = len(pts)
+        best_label, best_score = None, 0.0
+        for label, pat in patterns.items():
+            if len(pat) != n:
+                continue
+            a = self._norm_arr(pts)
+            b = self._norm_arr(np.array(pat, dtype=np.float32))
+            d = self._chamfer(a, b)
+            score = 1.0 / (1.0 + 8.0 * d)
+            if score > best_score:
+                best_label, best_score = label, score
+        return best_label, best_score
+
+    def _stick_centers(self, m: np.ndarray, fw: int, fh: int) -> List[Tuple[float, float]]:
+        """返回检测到的竹棒中心 [(cx, cy)]（face 绝对坐标）。"""
+        face_area = fw * fh
+        centers: List[Tuple[float, float]] = []
+        for b in self._blobs(m, 0.02, face_area):
+            area, x, y, w, h, _ = b
+            circ = self._circularity(m, x, y, w, h)
+            if circ > 0.60:
+                continue  # 圆形 -> 筒，不是条
+            sub = (m[y:y + h, x:x + w] > 0).astype(np.uint8)
+            if int(sub.sum()) < 8:
+                continue
+            # 横、纵各腐蚀一次，断开左右/上下相连的棒
+            e = cv2.erode(sub, np.ones((1, 3), np.uint8))
+            e = cv2.erode(e, np.ones((3, 1), np.uint8))
+            cnts, _ = cv2.findContours(e, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for c in cnts:
+                xc, yc, wc, hc = cv2.boundingRect(c)
+                if wc < 3 or hc < 3:
+                    continue
+                a = float(cv2.contourArea(c))
+                if a < 0.012 * face_area:
+                    continue
+                aspect = wc / max(1, hc)
+                hratio = hc / max(1, wc)
+                if aspect < 0.62 and hratio > 1.4 and a / float(max(1, wc * hc)) > 0.4:
+                    centers.append((x + xc + wc / 2.0, y + yc + hc / 2.0))
+        return centers
+
+    def _count_sticks(self, m: np.ndarray, fw: int, fh: int) -> int:
+        """条牌：统计竹棒个数。"""
+        total = len(self._stick_centers(m, fw, fh))
+        return total if 2 <= total <= 9 else 0
+
+    def _count_indep_blobs(self, m: np.ndarray, fw: int, fh: int, want_circle: bool) -> int:
+        """统计彼此独立的顶层元素块数（用于校验几何计数是否可信）。
+
+        want_circle=True 数筒牌圆点（circ>0.60）；False 数条牌竹棒（circ<=0.60）。
+        真实筒/条，每个元素是一个独立顶层 blob；若牌面因粘连把 N 个元素合并成
+        少数大块（如 duma 8s 把 8 根条粘成 2 大块、erode 后伪 4 中心），此处块数
+        会远小于 N，从而暴露伪计数、避免几何覆盖正确的风格模板。
+        """
+        face_area = fw * fh
+        n = 0
+        for b in self._blobs(m, 0.02, face_area):
+            area, x, y, w, h, _ = b
+            circ = self._circularity(m, x, y, w, h)
+            if want_circle and circ <= 0.60:
+                continue
+            if (not want_circle) and circ > 0.60:
+                continue
+            sub = (m[y:y + h, x:x + w] > 0).astype(np.uint8)
+            if int(sub.sum()) < 8:
+                continue
+            n += 1
+        return n
+
     def _classify_face(self, face: np.ndarray) -> Tuple[Optional[str], float]:
         """单张牌面 -> (标签, 置信度)。
 
@@ -403,13 +808,22 @@ class StructuralDetector(Detector):
         所有 IoU 都掉到 0.2–0.4，正确与错误标签分不开）。改为：
           a) 万牌优先（字形 + 萬 块联合判断；largest_frac 防误判）——
              必须在元素检测之前，否则"三"的横杠会被数成 3 根条 → 错成 3s。
-          b) 元素计数 + 形状：N 个圆 → Np；N 个棒 → Ns。
-          c) 1 个圆 → 1p；1 个不规则（鸟） → 1s。
-          d) 字牌 glyph + 颜色佐证。
+          b) 筒/条几何计数优先于风格模板：N 个圆 → Np；N 个棒 → Ns，
+             并验证排列队形。几何是客观计数，优于风格模板对筒/条的数量误配
+             （实测 6s 被风格模板错配成 9s，但几何数棒数得对）。
+          c) 风格模板兜底：覆盖万/字牌，以及几何不稳的筒/条
+             （某些样式下 4p/7s/9s 排列分偏低、1s 雀鸟非棒状）。
+          d) 字牌 glyph + 颜色佐证；1 个圆 → 1p；1 个不规则（鸟） → 1s。
         """
         fh, fw = face.shape[:2]
         if fw < 24 or fh < 24:
             return None, 0.0
+        # 防御：透明背景（RGBA）合成到白底，避免黑底被当成墨迹（跨风格/测试图安全）。
+        if face.ndim == 3 and face.shape[2] == 4:
+            a = face[:, :, 3].astype(np.float32) / 255.0
+            white = np.ones((fh, fw, 3), np.uint8) * 255
+            f = face[:, :, :3].astype(np.float32)
+            face = (f * a[:, :, None] + white * (1.0 - a)[:, :, None]).astype(np.uint8)
         m = self._ink_mask(face)
         total = int((m > 0).sum())
         face_area = fw * fh
@@ -418,68 +832,85 @@ class StructuralDetector(Detector):
         if ink_frac < INK_MIN_FRAC:
             return "5z", 0.9  # 白板：几乎无墨
 
-        # a) 万牌优先：避免"三"被数成 3 根条
+        # ---- 1) 几何筒/条候选（客观计数，用于与风格模板交叉仲裁）----
+        pin_centers = self._pin_centers(m, fw, fh)
+        pin_n = len(pin_centers)
+        pin_arr = 0.0
+        pin_pass = False
+        if 1 <= pin_n <= 9 and self._pin_peak_sanity(m, fw, fh, pin_centers):
+            _, pin_arr = self._arrangement_score(pin_centers, PIN_PATTERNS)
+            pin_pass = pin_arr >= MIN_ARR_SCORE
+        sou_centers = self._stick_centers(m, fw, fh)
+        sou_n = len(sou_centers)
+        sou_arr = 0.0
+        sou_pass = False
+        if 2 <= sou_n <= 9:
+            _, sou_arr = self._arrangement_score(sou_centers, SOU_PATTERNS)
+            sou_pass = sou_arr >= MIN_ARR_SCORE
+        # 独立块数：几何中心应来自彼此独立的顶层 blob。粘连误计数（如 duma 8s
+        # 把 8 根条粘成 2 大块、伪 4 中心）的块数会远小于数量，不可信。
+        pin_indep = self._count_indep_blobs(m, fw, fh, True)
+        sou_indep = self._count_indep_blobs(m, fw, fh, False)
+        geo_label = None
+        geo_arr = 0.0
+        geo_indep = 0
+        if pin_pass:
+            geo_label, geo_arr, geo_indep = f"{pin_n}p", pin_arr, pin_indep
+        if sou_pass and sou_arr > geo_arr:
+            geo_label, geo_arr, geo_indep = f"{sou_n}s", sou_arr, sou_indep
+
+        # ---- 2) 风格模板优先（已知样式：万/字/筒/条最高精度）----
+        #    已知样式的模板精确匹配，优于几何对筒/条的数量误配（如 6s->9s）
+        #    和 _try_man 对筒/条/字的万牌误判（如 6p->4m、8s->4m）。
+        s_label, s_score = self._styles.match(m)
+        if s_label is not None and s_score >= MIN_STYLE_SCORE:
+            sk = s_label[-1]
+            if sk in ("m", "z"):
+                return s_label, float(min(0.98, 0.55 + 0.5 * s_score))
+            # 筒/条风格命中与几何数量冲突时，仅当几何排列分极高(>=0.85)且几何
+            # 中心来自独立顶层 blob（geo_indep==数量，排除粘连伪计数）才以客观
+            # 几何纠正风格错配（如 6s 风格误配 9s）；几何不可信（如 8s 粘连伪 4）
+            # 则保留正确风格。
+            if (geo_label is not None and int(s_label[0]) != int(geo_label[0])
+                    and geo_arr >= 0.85 and geo_indep == int(geo_label[0])):
+                return geo_label, float(0.50 + 0.45 * geo_arr)
+            return s_label, float(min(0.98, 0.55 + 0.5 * s_score))
+
+        # ---- 3) 万牌几何兜底（仅跨样式未见、风格未命中时）----
+        #    _try_man 内部已加"萬块不能是圆/条"守卫，筒/条牌不会再被误判成万。
         numeral, man_score = self._try_man(face, m)
         if numeral is not None and man_score > 0.48:
             return numeral, man_score
 
-        # b) 元素检测 → 筒 / 条
-        # 注意：相邻条牌粘在一起会被 Otsu 合成一个 blob（横向一排 N 条变 1 个），
-        # 单独靠腐蚀会把筒的圆环也切断。改用"行展开"：长条形 blob 按列方向宽度
-        # 反算包含几根条，追加到 n_stick。
+        # ---- 4) 几何筒/条兜底（风格未命中的跨样式牌）----
+        if geo_label is not None:
+            return geo_label, float(0.50 + 0.45 * geo_arr)
+
+        # ---- 5) 字牌 glyph + 单元素兜底（下方保留）----
+
+        # d) 字牌（单字 glyph 匹配 + 颜色佐证）与单元素兜底所需的基础量。
         blobs = self._blobs(m, 0.025, face_area)
         if not blobs:
             return None, 0.0
         elements = [(self._shape_of(m, b)[0], b) for b in blobs]
-        n_circle = sum(1 for s, _ in elements if s == "circle")
-        n_stick = sum(1 for s, _ in elements if s == "stick")
         n_total = len(elements)
 
-        # 行展开 + 列展开：相邻条牌可能按行(横长)或列(纵长)粘连。
-        # 横长：aspect>2.4 且矮  → bw / 单条宽
-        # 纵长：aspect<0.30 且窄（单根条 aspect≈0.37+，不会误中） → bh / (fh/3)
-        stick_w_est = max(6, int(0.16 * fw))
-        for shape, blob in elements:
-            if shape == "circle":
-                continue
-            _, bx, by, bw, bh = blob[0], blob[1], blob[2], blob[3], blob[4]
-            aspect = bw / max(1, bh)
-            if aspect > 2.4 and bh < 0.22 * fh:
-                extra = max(0, round(bw / float(stick_w_est)) - 1)
-                n_stick += extra
-            elif aspect < 0.30 and bw < 0.22 * fw:
-                n_in_col = max(1, round(bh * 3.0 / fh))
-                n_stick += n_in_col - 1
-
-        # 同心圆兜底：1p 在本游戏里画成"大圆环 + 内圆"两个连通块，
-        # 元素检测会数成 2 圆。若两圆中心近似重合 → 1p。
-        if n_circle == 2 and n_stick == 0:
-            cblobs = [b for s, b in elements if s == "circle"]
-            (a1, x1, y1, w1, h1, _), (a2, x2, y2, w2, h2, _) = cblobs
-            cx1, cy1 = x1 + w1 / 2.0, y1 + h1 / 2.0
-            cx2, cy2 = x2 + w2 / 2.0, y2 + h2 / 2.0
-            d = ((cx1 - cx2) ** 2 + (cy1 - cy2) ** 2) ** 0.5
-            r_avg = (max(w1, h1) + max(w2, h2)) / 4.0
-            if d < 0.35 * r_avg:
-                return "1p", 0.65
-
-        if n_total > 1:
-            if n_circle >= 2 and n_circle > n_stick and n_circle <= 9:
-                return f"{n_circle}p", float(0.55 + 0.05 * n_circle)
-            if n_stick >= 2 and n_stick > n_circle and n_stick <= 9:
-                return f"{n_stick}s", float(0.55 + 0.05 * n_stick)
-
-        # c) 字牌（单字 glyph 匹配 + 颜色佐证）
+        hon_score = 0.0
         if n_total <= 2:
             honor, hon_score = self._try_honor(face, m, ink_frac, total)
             if honor is not None and hon_score > 0.45:
                 return honor, hon_score
 
-        # d) 单元素兜底：1 个圆 → 1p；1 个不规则 → 1s
+        # e) 单元素兜底：1 个圆 → 1p；1 个不规则（鸟） → 1s
         if n_total == 1:
             shape, _ = elements[0]
             if shape == "circle":
                 return "1p", 0.60
+            # 该单块已经"有点像"某个字牌时，不再盲目猜 1s。
+            # 阈值 0.26 由实测标定：真实 1s 雀鸟的 honor 字形分 = 0.246（必须放行），
+            # 而真实/合成字牌普遍 ≥0.26。宁可返回 None（低置信）也不给错误答案。
+            if hon_score > 0.26:
+                return None, 0.0
             return "1s", 0.55
 
         return None, 0.0
@@ -560,6 +991,15 @@ class StructuralDetector(Detector):
         total_wan_ink = sum(b[0] for b in wan_real)
         if largest[0] < 0.70 * total_wan_ink:
             return None, 0.0
+        # 圆/椭圆守卫：真萬是笔画复杂的汉字，最大连通块不可能是"近圆"。
+        # 筒牌（圆）或条牌（椭圆）若被误切到萬区，其最大块呈圆形 → 直接拒掉，
+        # 避免把 1p/1s 当成万牌（跨风格稳定复现的误判源）。
+        if self._circularity(wan, largest[1], largest[2], largest[3], largest[4]) > 0.60:
+            return None, 0.0
+        # 多母题守卫：真萬是单一汉字块；若"萬区"实为多个圆点（筒牌下半）或
+        # 多根竖棒（条牌下半），则它是数牌被误切到此，拒绝当萬。
+        if self._wan_is_multi_motif(wan[by0:by1, bx0:bx1]):
+            return None, 0.0
         # 颜色防误判：1s 雀鸟是绿色（dominant=G），1p 红中也是 R/G 但 1p 走
         # element 路径不会进 _try_man。真萬是黑色墨（D）。萬区出现大块绿色
         # → 必是 1s 鸟被错切到下方，拒绝当萬。
@@ -595,10 +1035,17 @@ class StructuralDetector(Detector):
         cutoff = int(0.54 * fh)
         upper = [b for b in real if b[2] + b[4] <= cutoff]
         digit_candidates = upper if upper else real
-        digit = max(digit_candidates, key=lambda b: b[0])
-        x0, y0 = digit[1], digit[2]
-        x1, y1 = digit[1] + digit[3], digit[2] + digit[4]
-        num_blob = top_c[y0:y1, x0:x1]
+        # 关键修正：数字要用「所有笔画的并集 bbox」，不能只取最大连通块。
+        # 「二」「三」是多条独立横杠，取最大块只会拿到一条杠，
+        # 字形匹配必然判成「一」——这就是 2m/3m 稳定误判成 1m 的根因。
+        ux0 = min(b[1] for b in digit_candidates)
+        uy0 = min(b[2] for b in digit_candidates)
+        ux1 = max(b[1] + b[3] for b in digit_candidates)
+        uy1 = max(b[2] + b[4] for b in digit_candidates)
+        # 形状守卫：数字块不能是"圆"（筒牌圆漏到上部时会被当成数字）
+        if self._circularity(top_c, ux0, uy0, ux1 - ux0, uy1 - uy0) > 0.70:
+            return None, 0.0
+        num_blob = top_c[uy0:uy1, ux0:ux1]
         if num_blob.size == 0:
             return None, 0.0
         d, glyph_s = self._glyphs.best_numeral(num_blob)
@@ -612,6 +1059,10 @@ class StructuralDetector(Detector):
                 d = len(bars)
                 glyph_s = max(glyph_s, 0.55)
         if d < 1 or d > 9:
+            return None, 0.0
+        # 萬字形硬门槛：万牌必须真的有「萬/万」字。缺这个门槛时，
+        # 圆形/其它花色的下半部会被当成萬块，把 1p 误判成 4m。
+        if wan_s < MIN_WAN_SCORE:
             return None, 0.0
         score = 0.50 * glyph_s + 0.30 * wan_s + 0.20 * min(1.0, bw / (0.6 * fw))
         return f"{d}m", score
@@ -640,9 +1091,11 @@ class StructuralDetector(Detector):
             gs = max(gs, 0.72)
         elif (letter == "C" and color == "G") or (letter == "F" and color == "R"):
             gs *= 0.75
-        if letter and gs >= 0.50:
+        if letter and gs >= MIN_HONOR_SCORE:
             return _GLYPH_TO_LABEL[letter], 0.30 + 0.55 * gs
-        return None, 0.0
+        # 未达阈值也把最佳字形分带回去：让调用方知道"这块有多像字"，
+        # 从而避免把它盲目兜底成 1s（字牌被大量误判成 1s 的根因）。
+        return None, gs
 
     @staticmethod
     def _is_rect_frame(m: np.ndarray, x: int, y: int, w: int, h: int) -> bool:
@@ -683,107 +1136,87 @@ class StructuralDetector(Detector):
         return bands
 
     def _segment_tiles(self, band_img: np.ndarray, tile_h_hint: int = 0) -> List[Rect]:
-        """牌行 -> 等宽 N 张牌。
+        """牌行 -> 逐张牌（用"亮面连通块"定范围 + FFT 周期定牌宽，
+        不依赖任何单一游戏的 UI 常量）。
 
-        纵向：用横向 Sobel 边缘（dI/dy）找"牌框"上下两条强横边，从而拿到完整牌面高度。
-        不能用"墨迹行"——字符只在中下部，墨迹行起点比牌面顶低约 14px，会把整张脸
-        下移、切掉 3m「三」的顶横杠 -> 3m 误读成 1m。
+        为什么改掉旧的等宽网格：
+          旧实现用「左右 UI 面板的纯色列」定左右边界，再用
+          LEFT/RIGHT_OVERHANG 这类按某个游戏 UI 量出来的常量做补偿，然后等分
+          成 13/14 份。换一个游戏（面板位置/有无面板/牌数不同）这些常量立刻失效，
+          网格整体偏移，每张脸跨在相邻两张牌上，识别全错。
 
-        横向：先定位牌行左右边界（贴边近纯色 UI 面板整列墨迹>0.85，真牌不会；无面板时
-        退回含墨列），等宽切成 N（N 贴近 13/14），再把每张牌之间的边界吸附到局部
-        "含墨最低列"（牌缝），消除降采样导致的整行右移/扇形发散（否则 5p 端牌被右移
-        半张牌误读成 4p/6p）。
+        跨风格不变量：
+          1. 手牌带内，每张牌面是一块**亮区**（ cream/白/浅绿 ），比周围桌面/面板亮；
+          2. 同一只手牌里所有牌**等宽排列**（同一套 UI 资源，尺寸固定）。
+        所以：
+          - 用高阈值二值化找到最亮的那一条"牌面连通块"，其左右 x 范围就是手牌区域；
+          - 用列亮度剖面的 FFT 抓出等宽周期（牌宽）；
+          - 区域宽度 / 周期 = 牌张数；区域左端 + k*牌宽 = 每张牌边界。
+        完全不需要 LEFT/RIGHT_OVERHANG 等任何常量。
+
+        对"没有面板、牌悬浮在桌面上"的情况同样有效：只要牌面是最亮的连通横条，
+        其 x 范围就是手牌区域。
         """
         bh, bw = band_img.shape[:2]
         if bh < 20 or bw < 60:
             return []
-        gray = cv2.cvtColor(band_img, cv2.COLOR_BGR2GRAY) if band_img.ndim == 3 else band_img
-        bh_band, _ = gray.shape[:2]
-        # 纵向：face 取整条 band 在"真实牌高"范围内的部分。band 由 _find_bands 给出
-        # （峰值 ±0.75 牌高），高度 ≈ 真实牌高。但 _detect_once 又向上多扩了 0.10 牌高
-        # （把牌顶补回来），使 band_img 比真实牌高大约 12%。若 face 跟着 band_img 一起取
-        # 到 bh_band，会比真牌高出 ~20px（原图）：底端多吞一段桌面背景，稀释墨迹密度、
-        # 改变 _try_man 的 bbox_frac 阈值判断（3m 险些从 0.28 掉到 0.276 失败），并让
-        # 条牌的连杆检测把一根条判成多根（n_stick 被 row-expansion 推过 9）。
-        # 因此 face Y 上限用真实牌高（tile_h_hint），不再跟着扩张的 band 走。
-        y1, y2 = 0, (tile_h_hint if tile_h_hint > 0 else bh_band)
+        gray = (cv2.cvtColor(band_img, cv2.COLOR_BGR2GRAY)
+                if band_img.ndim == 3 else band_img)
+        y1, y2 = 0, (tile_h_hint if tile_h_hint > 0 else bh)
         sub = gray[y1:y2, :]
         sh, sw = sub.shape
         if sh < 16 or sw < 60:
             return []
-        # 横向：列墨迹剖面
-        colprof_ink = (sub < 180).mean(axis=0)
-        W = len(colprof_ink)
-        # 左右边界：用"整列墨迹 > 0.85"识别近纯色 UI 面板（真牌整列只有 0.2~0.7，
-        # 永远不会到 0.85）。牌行跨度 = 左面板右沿 → 右面板左沿。无贴边面板时
-        # 退回含墨列收窄。这个方法对 band 纵向范围不敏感（面板始终近实心），比
-        # 按"含墨<某阈值"取边界更稳（后者会因 band 变高把中段真牌列误判成实心）。
-        solid = colprof_ink > 0.85
-        runs = []
-        i = 0
-        while i < W:
-            if solid[i]:
-                j = i
-                while j < W and solid[j]:
-                    j += 1
-                runs.append((i, j - 1))
-                i = j
-            else:
-                i += 1
-        xl, xr = 0, W
-        for (s, e) in runs:
-            if s <= int(0.06 * W):          # 贴左边缘 -> 左面板
-                xl = max(xl, e + 1)
-            if e >= int(0.94 * W):          # 贴右边缘 -> 右面板
-                xr = min(xr, s)
-        if xl == 0 and xr == W:
-            # 无贴边面板：用含墨列收窄（弃掉纯背景边）
-            xs = np.where(colprof_ink > 0.05)[0]
-            if len(xs) >= 40:
-                xl, xr = int(xs.min()), int(xs.max()) + 1
-        if xr - xl < 40:
+
+        bright = float(np.percentile(sub, 88))
+        # 找"牌面"亮块：阈值取牌面典型亮度的 0.72 左右。
+        # 字符/牌框/牌缝都更暗，会被排除；相邻牌面的亮像素即使只通过很窄的桥相连，
+        # 只要整体是最大亮块即可。若 0.72 太激进导致碎块，则逐步降低阈值重试。
+        span, tile_w, xmin, xmax = 0.0, 0.0, 0, 0
+        for frac in (0.72, 0.65, 0.58, 0.52):
+            thr = frac * bright
+            mask = (sub >= thr).astype(np.uint8)
+            n, _ = cv2.connectedComponents(mask, connectivity=4)
+            stats = cv2.connectedComponentsWithStats(mask, connectivity=4)[2]
+            best_i = max(range(1, n), key=lambda i: stats[i][4])
+            x, _y, w, h, _ = stats[best_i]
+            if w >= 60 and h >= 0.35 * sh and w / max(1, h) >= 1.5:
+                span = float(w)
+                xmin, xmax = x, x + w
+                break
+        if span < 60:
             return []
-        # 估算张数：牌宽 ≈ 牌高 × 0.82。
-        # 注意：sh 这里用的是 band_img 的高度，而 band_img 在 _detect_once 里已经
-        # 做过 0.10/0.02 的上下扩张（把牌顶补回来），会比真实牌高略大 ~12%，
-        # 使 span/tile_w_est 偏小、N 被低估成 11 而不是 13 —— 11 个过宽的格子
-        # 会跨到相邻真牌上，导致中段若干张分类成 None（全程只剩 7 张）。
-        # 因此张数估计必须用"未扩张"的真实牌高（调用方传入的 tile_h_hint），
-        # 只让 face 提取用扩张后的 band_img（保住牌顶）。
-        sh_hint = tile_h_hint if tile_h_hint > 0 else sh
-        tile_w_est = sh_hint * 0.82
-        # 降采样把面板/牌行边缘糊几像素，使检测到的牌行边界相对真边界内缩约 0.05~0.1 牌宽；
-        # 只补极少余量（0.03）把端牌最外缘留白补回，避免像旧版 0.14 那样把整行拉宽、
-        # 扇形发散（5p 端牌被右移半张牌误读成 4p）。
-        pad = int(0.03 * tile_w_est)
-        xl = max(0, xl - pad)
-        xr = min(W, xr + pad)
-        # 关键：左 UI 面板是不透明的，会盖住最左一张牌的左缘 ~24 orig（面板右沿
-        # 在 orig x=184，但 GT 测得最左牌左缘 x=160，中间 24 orig 被面板遮住）。
-        # 若仅用面板右沿作 xl，等分出的 13 张牌会整体右移，最右几张牌的左缘
-        # 被截掉一个圆 → 5p 误判成 4p、3p 误判成 2p。被遮的 24 orig 无法从画面恢复
-        # （面板是纯色 UI，下面看不到牌），故用一个与游戏 UI 布局对应的常量
-        # LEFT_OVERHANG 把网格向左推回。RIGHT_OVERHANG 同理处理右面板与最右牌的间隙。
-        xl = max(0, xl - LEFT_OVERHANG)
-        xr = min(W, xr + RIGHT_OVERHANG)
-        span = xr - xl
-        n_raw = span / tile_w_est if tile_w_est > 0 else 13.0
-        N = int(round(n_raw))
-        if abs(N - 13) <= 1:
-            N = 13
-        elif abs(N - 14) <= 1:
-            N = 14
-        else:
-            N = max(3, N)
-        tw = span / float(N)
-        tiles: List[Rect] = []
-        for i in range(N):
-            tx1 = int(round(xl + i * tw))
-            tx2 = int(round(xl + (i + 1) * tw)) if i < N - 1 else xr
-            if tx2 - tx1 < 8:
+
+        # 用列亮度剖面 FFT 估计等宽周期（牌宽）
+        col = sub.mean(axis=0).astype(np.float32)
+        col -= np.mean(col)
+        fft = np.fft.rfft(col)
+        power = np.abs(fft) ** 2
+        freqs = np.fft.rfftfreq(sw)
+        fmask = (freqs > 1.0 / 140) & (freqs < 1.0 / 30)
+        period = 60.0
+        if np.any(fmask):
+            period = 1.0 / freqs[fmask][np.argmax(power[fmask])]
+        if period < 20 or period > 120:
+            period = max(30.0, span / 13.0)
+
+        # 牌张数落在 8..17；最终 tile_w 用区域宽度 / N 精修（消除 FFT 离散误差）
+        n_tiles = int(round(span / period))
+        n_tiles = max(8, min(17, n_tiles))
+        tile_w = span / float(n_tiles)
+        if tile_w < 12:
+            return []
+
+        # 生成等宽边界；每张牌左右各留 3% 余量，避免缝边切掉笔画
+        pad = max(1, int(0.03 * tile_w))
+        out: List[Rect] = []
+        for k in range(n_tiles):
+            x1 = max(0, int(round(xmin + k * tile_w)) - pad)
+            x2 = min(sw, int(round(xmin + (k + 1) * tile_w)) + pad)
+            if x2 - x1 < 8:
                 continue
-            tiles.append((tx1, int(y1), tx2, int(y2)))
-        return tiles
+            out.append((x1, int(y1), x2, int(y2)))
+        return out
 
     # -------------------------------------------------------------- 主入口
 

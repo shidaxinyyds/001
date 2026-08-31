@@ -61,3 +61,11 @@ annotations.zip
 
 # 本地构建产出的大体积 APK / 压缩包，不纳入版本控制
 build-output/
+
+# 项目交接文档（含明文 GitHub token，禁止入库）
+HANDOVER.md
+
+# 本地调试 / 构建中间产物
+apk_extract/
+localtest/apk_extract/
+localtest/app-debug.zip
