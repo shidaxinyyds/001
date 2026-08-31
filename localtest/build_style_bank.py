@@ -30,8 +30,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(REPO, "android", "app", "src", "main", "python",
                    "recognition", "images", "styles")
 
-# 模板尺寸：足够保留字形结构，又足够小（34 张 × N 风格 的内存/体积可控）
-TW, TH = 40, 56
+# 模板尺寸：加载端 letterbox 到 96x96；这里只约束最长边（保留纵横比）
+TW, TH = 96, 96
 
 # 风格名 -> (目录, 真值解析函数)
 def _truth_plain(p):
@@ -86,13 +86,18 @@ def main():
             ix, iy = int(fw * 0.06), int(fh * 0.06)
             face = img[iy:fh - iy, ix:fw - ix]
             m = det._ink_mask(face)
-            # 裁到墨迹外接框再等比缩放：去掉风格间的留白差异
+            # 裁到墨迹外接框再**等比**缩放（最长边<=96，保留纵横比）：
+            # 纵横比本身是强判别特征（万牌上下两段 vs 字牌单块），
+            # 非等比拉伸到固定尺寸会把不同结构的牌强行对齐、放大互相相似度。
             ys, xs = np.where(m > 0)
             if len(ys) == 0:
-                tpl = np.zeros((TH, TW), np.uint8)
+                tpl = np.zeros((1, 1), np.uint8)
             else:
                 crop = m[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
-                tpl = cv2.resize(crop, (TW, TH), interpolation=cv2.INTER_AREA)
+                ch, cw = crop.shape
+                sc = 96.0 / float(max(ch, cw))
+                nh, nw = max(1, int(ch * sc)), max(1, int(cw * sc))
+                tpl = cv2.resize(crop, (nw, nh), interpolation=cv2.INTER_AREA)
                 _, tpl = cv2.threshold(tpl, 100, 255, cv2.THRESH_BINARY)
             cv2.imwrite(os.path.join(dst, f"{label}.png"), tpl)
             n += 1
