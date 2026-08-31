@@ -95,7 +95,7 @@ public class ImageProcessor {
                     busy.set(false);
                 }
             }
-        }, 0, 800);
+        }, 0, 600);
     }
 
     public void stop() {

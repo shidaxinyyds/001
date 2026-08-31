@@ -48,9 +48,20 @@ public class ImageEncoder {
   }
 
   private static byte[] bitmapToByteArray(Bitmap bitmap) {
+    // 关键改动：不再用 Assert.assertNotNull。Android 的 Assert 在 release 包里默认
+    // 不抛异常（ENABLE_ASSERTIONS 为 false），会变成对 null 直接 bitmap.compress → NPE；
+    // 而在 debug 包里又可能抛 AssertionError。两种行为都不受控。
+    // 这里显式判空：bitmap 为 null（例如 ImageReader 给出的格式不是 RGBA_8888）
+    // 就直接返回 null，让上层（ImageProcessor.processCapturedImage）走"编码失败"
+    // 的错误处理分支，而不是崩溃。
+    if (bitmap == null) {
+      return null;
+    }
     ByteArrayOutputStream stream = new ByteArrayOutputStream();
-    Assert.assertNotNull(bitmap);
-    bitmap.compress(Bitmap.CompressFormat.JPEG, 50, stream);
+    // 质量 95：之前用 50，整屏（2712x1220 级）高压缩把麻将牌面细小数字/花色糊成
+    // 一团，模板匹配几乎必然误判——这是"识别不准"的头号画质元凶。95 在画质与体积
+    // 之间取得平衡，localhost 传输不是瓶颈。
+    bitmap.compress(Bitmap.CompressFormat.JPEG, 95, stream);
     return stream.toByteArray();
   }
 }

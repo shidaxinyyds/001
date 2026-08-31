@@ -384,6 +384,33 @@ def _error_result(status: str, message: str) -> "EngineResult":
     )
 
 
+def _is_valid_image(img) -> bool:
+    """纯 numpy 校验图像结构性合法，绝不调用 cv2。
+
+    OpenCV 的 C 层在遇到畸形/空/坏 dtype 的 ndarray 时会直接 SIGSEGV，
+    这种崩溃无法被 Python 的 try/except 捕获，进程表现为"闪退"。
+    因此在进入任何 cv2 操作之前，用纯 numpy 把坏数据拦截成
+    _error_result("decode_error")，从根上消除 C 层崩溃闪退。
+    """
+    try:
+        if img is None:
+            return False
+        if not isinstance(img, np.ndarray):
+            return False
+        if img.ndim not in (2, 3):
+            return False
+        if img.dtype != np.uint8:
+            return False
+        h, w = img.shape[:2]
+        if h <= 0 or w <= 0:
+            return False
+        if img.size == 0 or img.nbytes == 0:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 class Engine:
     def __init__(self):
         self.trainer: Optional[Trainer] = None
@@ -513,6 +540,10 @@ class Engine:
             if image is None:
                 print("Failed to decode image")
                 return _error_result("decode_error", "图像解码失败（空字节或坏JPEG）")
+            # 双保险：imdecode 偶尔会对坏数据返回非 None 但尺寸/ dtype 异常的对象，
+            # 进入 cv2 前再用纯 numpy 校验一次，避免 C 层段错误闪退。
+            if not _is_valid_image(image):
+                return _error_result("decode_error", "解码成功但图像数据非法，已安全跳过")
             return self.process(image)
         except Exception as e:
             traceback.print_exc()
@@ -664,6 +695,14 @@ class Engine:
 
     def process(self, image: CVImage) -> Optional[EngineResult]:
         try:
+            # ===== 崩溃兜底（C 层 SIGSEGV 不可被 Python try/except 捕获）=====
+            # 在进入任何 cv2 操作前，用纯 numpy 校验图像结构性合法。
+            # 畸形/空/坏 dtype 的图像会让 OpenCV 底层直接段错误导致进程闪退，
+            # 必须在 cv2 触碰它之前拦截为 _error_result。
+            if not _is_valid_image(image):
+                return _error_result("decode_error",
+                                     "图像数据非法（空/坏尺寸/坏 dtype），已安全跳过")
+
             start_time = time.time()
 
             # ===== 帧差去重 =====
