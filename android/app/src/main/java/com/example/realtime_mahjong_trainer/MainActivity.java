@@ -94,20 +94,14 @@ public class MainActivity extends FlutterActivity {
       return;
     }
 
-    WindowMetrics wm = maximumWindowMetrics();
-    if (wm == null) {
-      return;
-    }
-    DisplayMetrics dm = new DisplayMetrics();
-    getActivity().getWindowManager().getDefaultDisplay().getMetrics(dm);
-
     // 旋转时用 resize + setSurface 更新虚拟显示（ScreenStreamer 内部处理），
     // 不能二次 createVirtualDisplay（Android 14 起会 SecurityException）。
-    streamer.restartStream(
-            wm.getBounds().width(),
-            wm.getBounds().height(),
-            dm.densityDpi
-    );
+    // 同样走统一 helper，保证缓冲始终是横屏尺寸。
+    int[] size = getLandscapeDisplaySize();
+    if (size[0] == 0) {
+      return;
+    }
+    streamer.restartStream(size[0], size[1], size[2]);
   }
 
   @Override
@@ -141,27 +135,23 @@ public class MainActivity extends FlutterActivity {
       return -1;
     }
 
-    WindowMetrics wm = maximumWindowMetrics();
-    if (wm == null) {
-      return -1;
-    }
-    DisplayMetrics dm = new DisplayMetrics();
-    activity.getWindowManager().getDefaultDisplay().getMetrics(dm);
-
     mMediaProjectionManager =
       (MediaProjectionManager) activity.getSystemService(
         Context.MEDIA_PROJECTION_SERVICE
       );
 
-    // 采集尺寸必须用「设备最大显示区域」，且固定为横屏方向（w >= h）：
+    // 采集尺寸务必是「设备最大显示区域 + 强制横屏（w >= h）」：
     // 授权时 App 在前台是竖屏，按当前窗口建流会把游戏画面压成竖条；
     // 麻将游戏全是横屏，本 App 的识别基准几何也是横屏（GT 截图 2712x1220）。
-    // 旋转到游戏后，若需要精确匹配，onConfigurationChanged 会 resize 校正。
-    int bw = wm.getBounds().width();
-    int bh = wm.getBounds().height();
-    mStreamWidth = Math.max(bw, bh);
-    mStreamHeight = Math.min(bw, bh);
-    mStreamDpi = dm.densityDpi;
+    // 用统一 helper 计算，prepareStream 与 onConfigurationChanged 两处一致，
+    // 避免出现「旋转回调把缓冲建成竖屏」导致采集画面被压歪的隐患。
+    int[] size = getLandscapeDisplaySize();
+    if (size[0] == 0) {
+      return -1;
+    }
+    mStreamWidth = size[0];
+    mStreamHeight = size[1];
+    mStreamDpi = size[2];
 
     // Android 14(API 34) 硬性要求：mediaProjection 类型的前台服务，
     // 必须在 startForeground() 之前先调用 createScreenCaptureIntent()，
@@ -284,6 +274,29 @@ public class MainActivity extends FlutterActivity {
       return activity.getWindowManager().getMaximumWindowMetrics();
     }
     return activity.getWindowManager().getCurrentWindowMetrics();
+  }
+
+  // 统一计算采集缓冲尺寸：取设备最大显示区域，并强制横屏（w >= h）。
+  // 返回 {width, height, densityDpi}。麻将游戏全横屏、识别基准几何也是横屏，
+  // 故缓冲必须横屏；否则游戏画面被压成竖条、几何裁剪全部错位、识别必然全挂。
+  // 授权时本 App 在前台是竖屏，getBounds() 返回竖屏序（高>宽），
+  // 用 max/min 归一成横屏，保证 prepareStream 与旋转回调拿到完全一致的结果。
+  private int[] getLandscapeDisplaySize() {
+    Activity activity = getActivity();
+    if (activity == null) {
+      return new int[]{0, 0, 0};
+    }
+    WindowMetrics wm = maximumWindowMetrics();
+    if (wm == null) {
+      return new int[]{0, 0, 0};
+    }
+    DisplayMetrics dm = new DisplayMetrics();
+    activity.getWindowManager().getDefaultDisplay().getMetrics(dm);
+    int bw = wm.getBounds().width();
+    int bh = wm.getBounds().height();
+    int w = Math.max(bw, bh);
+    int h = Math.min(bw, bh);
+    return new int[]{w, h, dm.densityDpi};
   }
 
 }
