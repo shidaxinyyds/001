@@ -15,7 +15,10 @@ import io.flutter.embedding.android.FlutterActivity;
 import io.flutter.embedding.engine.FlutterEngine;
 import io.flutter.plugin.common.MethodChannel;
 
+import java.io.File;
+import java.io.FileOutputStream;
 import java.util.concurrent.CompletableFuture;
+import java.util.regex.Pattern;
 
 
 public class MainActivity extends FlutterActivity {
@@ -71,6 +74,18 @@ public class MainActivity extends FlutterActivity {
         toRun = () -> {
           stopStream();
           result.success(0);
+        };
+      }
+      if (call.method.equals("setMode")) {
+        String mode = call.argument("mode");
+        toRun = () -> {
+          int rc = writeModeFile(mode);
+          result.success(rc);
+        };
+      }
+      if (call.method.equals("getMode")) {
+        toRun = () -> {
+          result.success(readModeFile());
         };
       }
 
@@ -281,6 +296,52 @@ public class MainActivity extends FlutterActivity {
   // 故缓冲必须横屏；否则游戏画面被压成竖条、几何裁剪全部错位、识别必然全挂。
   // 授权时本 App 在前台是竖屏，getBounds() 返回竖屏序（高>宽），
   // 用 max/min 归一成横屏，保证 prepareStream 与旋转回调拿到完全一致的结果。
+  // 读取玩法共享文件。仅做非常宽松的解析：必须是 {"mode":"2p|3p|4p"} 形式，
+  // 否则一律回退到 "4p"，避免任何一端写脏数据后另一端爆炸。
+  private String readModeFile() {
+    try {
+      File dir = getApplicationContext().getExternalFilesDir(null);
+      if (dir == null) return "4p";
+      File f = new File(dir, "mahjong_mode.json");
+      if (!f.exists() || f.length() == 0 || f.length() > 256) return "4p";
+      byte[] buf = new byte[(int) f.length()];
+      try (java.io.FileInputStream in = new java.io.FileInputStream(f)) {
+        int n = in.read(buf);
+        if (n <= 0) return "4p";
+      }
+      String s = new String(buf, 0, buf.length, "UTF-8").trim();
+      java.util.regex.Matcher mc = java.util.regex.Pattern
+          .compile("\"mode\"\\s*:\\s*\"([234]p)\"").matcher(s);
+      return mc.find() ? mc.group(1) : "4p";
+    } catch (Throwable t) {
+      TimedLog.e(TAG, "readModeFile failed: " + t);
+      return "4p";
+    }
+  }
+
+  // 把玩法写入共享文件，供 Python 引擎每帧读取。mode 仅接受 "2p"/"3p"/"4p"。
+  private int writeModeFile(String mode) {
+    if (mode == null) return -1;
+    String m = mode.trim().toLowerCase();
+    if (!Pattern.matches("[234]p", m)) return -2;
+    try {
+      File dir = getApplicationContext().getExternalFilesDir(null);
+      if (dir == null) return -3;
+      if (!dir.exists()) dir.mkdirs();
+      File f = new File(dir, "mahjong_mode.json");
+      try (FileOutputStream out = new FileOutputStream(f, false)) {
+        byte[] body = ("{\"mode\":\"" + m + "\"}").getBytes("UTF-8");
+        out.write(body);
+        out.flush();
+      }
+      TimedLog.i(TAG, "writeModeFile: " + m + " -> " + f.getAbsolutePath());
+      return 0;
+    } catch (Throwable t) {
+      TimedLog.e(TAG, "writeModeFile failed: " + t);
+      return -4;
+    }
+  }
+
   private int[] getLandscapeDisplaySize() {
     Activity activity = getActivity();
     if (activity == null) {

@@ -1,7 +1,7 @@
 from __future__ import annotations
 import hashlib
 import traceback
-from collections import deque
+from collections import Counter, deque
 from typing import Dict, List, Optional, Tuple
 
 import json
@@ -34,31 +34,66 @@ VALID_HAND_SIZES = (13, 14)
 PREVIEW_MAX_WIDTH = 240
 
 # 引擎侧的最低置信度：比结构识别器的 MIN_CONF 更严，挡掉"卡在两张牌之间"的假命中。
-# 实测：MIN_CONF=0.30 时每帧约 10% 出"白板刷屏"（筒/索背景浅被判成白板），
-# 调到 0.40 后这类假阳性基本绝迹（漏检的牌由多帧投票补回）。
-ENGINE_MIN_CONF = 0.40
+# 调高到 0.55：漏掉的牌由多帧投票补回（要求 4 帧里 ≥3 帧同标签才采纳），
+# 但单帧的"白板刷屏"（筒/索背景浅被错认字牌）会显著减少。
+ENGINE_MIN_CONF = 0.55
 
 # 同帧互斥上限：手牌里同种牌最多 4 张（4 张相同的合法牌型）。
 # 同一帧 mpsz 里出现 ≥MAX_DUP_PER_TILE+1 张同字必是误判，整手拒绝。
 MAX_DUP_PER_TILE = 4
 
 # 帧差阈值：相邻两帧的工作区域分块均值差的 L1 范数（256 个 8x8 块、每块均值 0~255）。
-# 0.0 = 完全相同；实测牌局"两张相邻牌静止"约 1~3，"出一张牌"约 20~60。
-# 阈值取 1.5：低于则视为画面无变化、跳过识别。
-FRAME_DIFF_THRESHOLD = 1.5
+# 原来 1.5 过低——吃碰杠瞬间仍被判为"不变"复用旧手牌，导致用户看到的牌和实际不符。
+# 取 5.0：完全静止画面 = 0~3；出一张牌 = 20~60；菜单弹出/动画 = 80+。
+FRAME_DIFF_THRESHOLD = 5.0
 
 # 帧差块边长（像素，工作分辨率上）。32 块 = 256 块覆盖整屏，约每块 12x12 work px。
 FRAME_DIFF_BLOCK = 32
 
+# 突变帧检测：本帧 diff 与最近 N 帧 diff 均值的比值，若超过该倍数视为"动画中"
+# （如吃碰杠的牌移动动画），整帧丢弃（不做投票也不出结果）。
+MOTION_SPIKE_RATIO = 3.0
+MOTION_HISTORY = 5  # 保留最近多少个 diff 用于求均值
+
 # 多帧投票窗口：保留最近 N 帧的检测结果，按位置投票得到稳定标签。
-VOTE_WINDOW = 3
+# 4 帧够稳：3 帧过半数即可敲定，剩 1 帧做加权"新近偏置"。
+VOTE_WINDOW = 4
 
 # 同位置归并半径（work 坐标）。相邻两张牌的中心距 ≈ 牌宽 ≈ tile_h；
 # 归并半径取 0.45 * tile_h 让"同一张牌的位置"被并成一组。
 VOTE_MERGE_FRAC = 0.45
 
-# 位置投票最低票数：占总票数 ≥ 该比例的标签才采纳。低于则保留最近一帧的标签。
-VOTE_MIN_FRAC = 0.5
+# 位置投票最低票数：占总票数 ≥ 该比例的标签才采纳。
+VOTE_MIN_FRAC = 0.55
+
+# 单位置最低票数（绝对值）：必须 ≥VOTE_MIN_VOTES 票才采纳；
+# 否则该位置输出 None（视为未识别）——这是"一下有一下没有"的根因，
+# 原实现在投票不过半时回退到最后一帧的 label，结果就是单帧抖动直接污染输出。
+VOTE_MIN_VOTES = 2
+
+# 最近一帧权重比例：越近的帧在投票里权重越高，避免旧帧的位置"残留"。
+VOTE_RECENCY_WEIGHTS = (0.5, 0.7, 0.9, 1.0)  # 长度与 VOTE_WINDOW 一致
+
+# 手牌行 y 锁定容差（work 坐标）：上一帧挑了 yc，下一帧优先在 ±band 范围内挑。
+# 不锁会因帧间小抖动把"牌河行"和"手牌行"互相切换——这正是 13↔14 跳变的根因之一。
+HAND_LOCK_BAND = 30
+
+
+def _hand_diff_count(a: str, b: str) -> int:
+    """两个 mpsz 串之间的"牌数差异"：把 a 变成 b 最少需改动的张数。
+
+    实现：对 a/b 都按 tile 计数，对应位置做 |cnt_a - cnt_b| 求和再除 2
+    （每个差代表改一张，向上取整）。
+    例：a="1m2m3m" → {'1m':1,'2m':1,'3m':1}；b="1m2m3p" → {'1m':1,'2m':1,'3p':1}；
+    diff = |1-0|+|1-0|+|0-1| = 3 → 3//2 = 1（1 张牌被改了）。
+    这种棋盘级最小变换量是判断"这次识别是不是大改"的最稳指标。
+    """
+    ca = Counter([a[i:i + 2] for i in range(0, len(a), 2)] if a else [])
+    cb = Counter([b[i:i + 2] for i in range(0, len(b), 2)] if b else [])
+    diff = 0
+    for t in set(ca.keys()) | set(cb.keys()):
+        diff += abs(ca.get(t, 0) - cb.get(t, 0))
+    return (diff + 1) // 2
 
 
 def get_mpsz(detection: DetectionResult) -> str:
@@ -120,6 +155,36 @@ def _block_diff_signature(work_gray: np.ndarray) -> float:
     return sig
 
 
+class _MotionGuard:
+    """动画突变帧检测。
+
+    牌局里：吃碰杠动作会有 200~400ms 的"牌从手牌跑到牌河"过渡帧，整张图块变化剧烈；
+    菜单弹出/关闭、聊天框显隐也类似。这种帧截下来做识别会得出"半成品"——
+    比如你的手牌少 1 张、牌河多 1 张的中间状态。如果把这帧结果正常输出，
+    悬浮窗会立刻把"丢牌"判定为你打了一张，把 trainer 弄乱。
+
+    做法：维护一个最近 diff 的滑动均值；本帧 diff > 均值 * MOTION_SPIKE_RATIO
+    时直接判定为"动画中"，丢弃整帧。
+    """
+
+    def __init__(self) -> None:
+        self._history: deque = deque(maxlen=MOTION_HISTORY)
+
+    def is_spike(self, diff: float) -> bool:
+        # 首帧无历史，绝不算 spike，正常识别。
+        if len(self._history) == 0:
+            self._history.append(diff)
+            return False
+        avg = sum(self._history) / len(self._history)
+        self._history.append(diff)
+        # "静止帧" diff 极小（约 0~3），它的均值会被拉低很多，比较时把它去掉；
+        # 否则每一次画面静止都会"训练"出一个极低均值，下一帧稍动就触发误判。
+        non_static = [d for d in self._history if d >= 0.5]
+        if non_static:
+            avg = sum(non_static) / len(non_static)
+        return diff > max(8.0, avg * MOTION_SPIKE_RATIO)
+
+
 class _FrameSkipper:
     """帧差去重：相邻帧画面几乎相同时跳过完整识别。
 
@@ -158,14 +223,17 @@ class _FrameSkipper:
 
 
 class _TileVoter:
-    """多帧投票：把最近 N 帧的识别结果按 (y, x) 位置归并、多数表决出稳定标签。
+    """多帧投票：把最近 N 帧的识别结果按 (y, x) 位置归并、按时间加权投票得到稳定标签。
 
-    解决单帧识别里最头疼的"筒/索被认成白板"——同样的位置连续 2~3 帧都被识别
-    成"白板"是极不可能的（白板是字牌，且牌堆里只有 4 张），投票后这些假阳性
-    标签会被真实标签覆盖。
+    解决单帧识别里最头疼的两个问题：
+      1) "筒/索被认成白板"——同位置 2~3 帧都认白板的概率几乎为 0，投票后被真实标签覆盖；
+      2) "一下有一下没有"——投票不过半时，**不再回退到最后一帧的 label**，
+         而是输出 None。下游 UI 把它当成"未识别"，表现就是出现一次闪烁后立刻稳定。
+
+    加权：越近的帧权重越大（VOTE_RECENCY_WEIGHTS 从旧到新递增）。
 
     输入：每帧 detect 出的 [(rect, label, conf), ...]
-    输出：投票后的 [(rect, label, avg_conf), ...]（按 x 排序）
+    输出：投票后的 [(rect, label|None, avg_conf), ...]（按 x 排序）
     """
 
     def __init__(self, window: int = VOTE_WINDOW) -> None:
@@ -174,6 +242,7 @@ class _TileVoter:
         self._merge_radius: Optional[float] = None
 
     def push(self, dets: List[Tuple[Tuple[int, int, int, int], Optional[str], float]]) -> None:
+        # 只保留窗口大小；老帧自然被挤掉
         self._frames.append(dets)
         # 用最近一帧估算牌高（取检测框高度的均值）作为归并半径参考
         if dets:
@@ -181,68 +250,93 @@ class _TileVoter:
             if hs:
                 self._merge_radius = max(20.0, sum(hs) / len(hs) * VOTE_MERGE_FRAC)
 
+    def reset(self) -> None:
+        """玩法突变 / 大场景切换时硬重置，清空投票窗口。
+
+        不这样做的话：4 帧前手牌是 1m2m3m，模式突变之后画面里的位置完全不一样了，
+        老窗口里那 4 帧的"旧位置"会继续和最新帧的"新位置"归并投票，输出混乱。
+        """
+        self._frames.clear()
+        self._merge_radius = None
+
     def vote(self) -> List[Tuple[Tuple[int, int, int, int], Optional[str], float]]:
         if not self._frames:
             return []
-        # 投票窗口不足（启动初期），直接用最后一帧的结果
+        # 单帧起步：直接透传（没有"投票"可言）。但**仍然**过滤 None label 的不稳定牌——
+        # 启动第一帧不该被信任。
         if len(self._frames) < 2:
-            return list(self._frames[-1])
+            return [(r, l, c) for (r, l, c) in self._frames[-1] if l is not None]
 
         rad = self._merge_radius or 40.0
-        # 1. 把所有帧的同一位置的检测合并到同一组（用最后一帧的位置作为种子）
-        # 2. 每组内统计 label 的票数
-        # 3. 采纳票数 ≥ VOTE_MIN_FRAC * 帧数 的标签；若都不过半，取最末一帧
-        all_dets = [d for frame in self._frames for d in frame]
-        if not all_dets:
-            return []
 
-        # 用最后一帧的检测作为种子（最近的最相关）
+        # 把每帧带"帧索引 + 权重"展开。weights[i] 对应第 i 帧（从旧到新），
+        # VOTE_RECENCY_WEIGHTS 同样按从旧到新递增。
+        weights = VOTE_RECENCY_WEIGHTS
+        # 长度不匹配时（理论上不会发生），用 1.0 兜底
+        if len(weights) != len(self._frames):
+            weights = tuple(1.0 for _ in self._frames)
+
+        # 用最后一帧的检测作为种子（位置最稳）。
         last = list(self._frames[-1])
         out: List[Tuple[Tuple[int, int, int, int], Optional[str], float]] = []
-        used = [False] * len(all_dets)
-        for (rect, _label, _conf) in last:
+        n_frames = len(self._frames)
+        for (rect, last_label, _last_conf) in last:
             cx, cy = rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0
-            # 找所有帧里离这个种子近的检测
-            matches: List[Tuple[Tuple[int, int, int, int], Optional[str], float]] = []
-            for idx, (r2, l2, c2) in enumerate(all_dets):
-                if used[idx]:
-                    continue
-                cx2 = r2[0] + r2[2] / 2.0
-                cy2 = r2[1] + r2[3] / 2.0
-                if abs(cx - cx2) < rad and abs(cy - cy2) < rad:
-                    matches.append((r2, l2, c2))
-                    used[idx] = True
-            if not matches:
+            # 归并：每个 (frame, cx, cy) 只计一次。如果两个 detection 落得极近，
+            # 取先看到的那个（后面遇到再被 round 取整就被并掉）。
+            matches_w: List[Tuple[float, str, float]] = []
+            seen: set = set()
+            for fi, (w, frame) in enumerate(zip(weights, self._frames)):
+                for d in frame:
+                    r2, l2, c2 = d
+                    cx2 = r2[0] + r2[2] / 2.0
+                    cy2 = r2[1] + r2[3] / 2.0
+                    if abs(cx - cx2) >= rad or abs(cy - cy2) >= rad:
+                        continue
+                    pos_key = (fi, round(cx2, 1), round(cy2, 1))
+                    if pos_key in seen:
+                        continue
+                    seen.add(pos_key)
+                    if l2 is not None:
+                        matches_w.append((w, l2, c2))
+
+            if not matches_w:
+                # 窗口内没有任何 label（说明新位置刚出现）——以前投票不过半也会回退到
+                # last 的 label，那是跳变的根因。现在返回 None，让该位置当作"未识别"，
+                # UI 自然会保持上次的状态。
+                out.append((rect, None, 0.0))
                 continue
-            # 统计 label 票数（label is None 不参与投票）
-            counts: Dict[str, int] = {}
-            confs_by_label: Dict[str, List[float]] = {}
-            for (_r, l, c) in matches:
-                if l is None:
-                    continue
-                counts[l] = counts.get(l, 0) + 1
-                confs_by_label.setdefault(l, []).append(c)
-            n_votes = sum(counts.values())
-            n_frames = len(self._frames)
-            chosen_label: Optional[str] = None
-            if n_votes > 0:
-                # 优先选票数最高；票数相同时选平均 conf 高的
-                best_count = max(counts.values())
-                if best_count >= VOTE_MIN_FRAC * n_frames:
-                    cand = [l for l, cnt in counts.items() if cnt == best_count]
-                    if len(cand) == 1:
-                        chosen_label = cand[0]
-                    else:
-                        chosen_label = max(cand, key=lambda l: sum(confs_by_label[l]) / len(confs_by_label[l]))
-            if chosen_label is None:
-                # 都不过半，回退用最后一帧的 label
-                chosen_label = matches[0][1]
-                avg_conf = matches[0][2]
+
+            # 按 label 求加权和
+            label_weight: Dict[str, float] = {}
+            label_conf: Dict[str, List[float]] = {}
+            for (w, l, c) in matches_w:
+                label_weight[l] = label_weight.get(l, 0.0) + w
+                label_conf.setdefault(l, []).append(c)
+            n_total_w = sum(label_weight.values())
+            best_l = max(label_weight.items(), key=lambda kv: kv[1])
+            best_lab, best_w = best_l[0], best_l[1]
+            # 采纳条件（全部满足才认，否则输出 None）：
+            #   - 加权份额 ≥ VOTE_MIN_FRAC
+            #   - 加权票数 ≥ VOTE_MIN_VOTES
+            # 另：种子（最后一帧）的 label 必须与 best_lab 一致——
+            #     否则意味着"最新帧刚换了"，投票还没稳，宁可不输出。
+            #     但如果 last_label 是 None（新位置刚出现/单帧漏检），宽容：
+            #     只要历史加权份额达标就认，否则永远无法起步。
+            last_vote_w = label_weight.get(last_label, 0.0) if last_label else 0.0
+            ok_share = (best_w / n_total_w) >= VOTE_MIN_FRAC
+            ok_abs = label_weight[best_lab] >= VOTE_MIN_VOTES
+            if last_label is None:
+                # last 没识别，依靠历史加权；放宽要求，但不能松到让单帧噪声混入
+                chosen: Optional[str] = best_lab if (ok_share and ok_abs) else None
             else:
-                avg_conf = sum(confs_by_label[chosen_label]) / len(confs_by_label[chosen_label])
-            # 用最后一帧的 rect（位置最稳）；如果最后一帧这个位置 label 是 None，
-            # 但投票选出了别的 label，仍用最后一帧的 rect（位置不变）
-            out.append((matches[0][0], chosen_label, avg_conf))
+                ok_last = (last_label == best_lab and last_vote_w > 0.0)
+                chosen = best_lab if (ok_share and ok_abs and ok_last) else None
+            avg_conf = (
+                sum(label_conf[best_lab]) / len(label_conf[best_lab])
+                if best_lab in label_conf else 0.0
+            )
+            out.append((rect, chosen, avg_conf))
         out.sort(key=lambda d: d[0][0])
         return out
 
@@ -285,8 +379,19 @@ class Engine:
         self._advice: List[Dict] = []
         # 帧差去重：相邻帧几乎相同时跳过完整识别
         self._frame_skipper = _FrameSkipper()
-        # 多帧投票：把最近 3 帧的同一位置检测做多数表决
+        # 动画突变帧（吃碰杠的牌移动帧、菜单弹出帧）：整帧丢弃
+        self._motion_guard = _MotionGuard()
+        # 多帧投票：把最近 4 帧的同一位置检测做加权多数表决
         self._tile_voter = _TileVoter(window=VOTE_WINDOW)
+        # 行锁定：上一帧手牌行的 y 坐标，下一帧在 [y - HAND_LOCK_BAND, y + HAND_LOCK_BAND]
+        # 范围内挑，避免 13↔14 跳变（手牌行被牌河/记分行抢走）的根因
+        self._last_hand_y: Optional[float] = None
+        # 最近一次"稳定"的手牌 mpsz 与张数：用于本帧识别失败/可疑时做兜底
+        self._stable_hand_mpsz: str = ""
+        self._stable_hand_count: int = 0
+        # 当前模式（process() 每帧 reload，对比是否变了）
+        self.mode: str = "4p"
+        self._prev_mode: str = self.mode
         # 给主界面"知道什么时候画面没动"的提示用
         self._consecutive_skips: int = 0
 
@@ -458,38 +563,71 @@ class Engine:
         return "".join(out)
 
     @staticmethod
-    def _pick_hand_row(rows):
+    def _hand_row_score(row):
+        """返回 (avg_h, y_center, len_score) 三元组，越大越像"手牌行"。
+
+        评判维度：
+          - 平均牌高更大（手牌是连续拍摄、单张牌大）
+          - y 坐标更靠下（屏幕坐标系原点在左上角，y 越大越靠下）
+          - 行长度接近 13/14（手牌行专属；牌河一般 0~12 张）
+        长度 <8 直接返回 None（不太可能是手牌行）。
+        """
+        if len(row) < 8:
+            return None
+        hs = [d[0][3] for d in row if d[0][3] > 0]
+        if not hs:
+            return None
+        avg_h = sum(hs) / len(hs)
+        ys = [d[0][1] for d in row]
+        yc = sum(ys) / len(ys)
+        # len_score: 13 张 = 1.0，14 张 = 0.99（都算高分），其它线性衰减
+        best13 = 1.0 - min(abs(len(row) - 13), abs(len(row) - 14)) / 13.0
+        return (avg_h, yc, best13)
+
+    def _pick_hand_row(self, rows):
         """从所有牌行里挑出「自己手牌行」。
 
-        通用启发：手牌行是玩家面前最近的一排，牌最大（离镜头最近）、
-        通常位于屏幕最底部，张数接近 13/14。各家的牌河/副露行牌更小、
-        更靠上。因此优先取「平均牌高最大」的行；牌高相近时用「更靠下」
-        和「张数更接近 13/14」做 tiebreak。
-
-        返回该行（list），供调用方区分 hand vs discard；找不到则返回 None。
+        通用启发（原有）：手牌行是玩家面前最近的一排，牌最大、靠下、张数接近 13/14。
+        新增（这一轮）：**行锁定**。优先保留上一帧挑中的 y（±HAND_LOCK_BAND），挡掉
+        "手牌行被牌河/记分行临时抢走"造成的 13↔14 跳变。
         """
         if not rows:
             return None
-        best = None
-        best_key = (-1.0, -1.0, -1.0)  # (平均牌高, 行中心 y, 张数接近度)
+        # 1) 行锁定：如果上一帧挑了 y，先看本帧是否有落在 [y-band, y+band] 内且长度合理的候选
+        lock_y = self._last_hand_y
+        if lock_y is not None:
+            band = HAND_LOCK_BAND
+            candidates = []
+            for row in rows:
+                s = self._hand_row_score(row)
+                if s is None:
+                    continue
+                ys = [d[0][1] for d in row]
+                yc = sum(ys) / len(ys)
+                if abs(yc - lock_y) <= band:
+                    candidates.append((s, row, yc))
+            if candidates:
+                # 同分数时优先选 y 更接近 lock 的（再保险）
+                candidates.sort(key=lambda x: (-x[0][0], -x[0][1], -x[0][2],
+                                              abs(x[2] - lock_y)))
+                chosen = candidates[0][1]
+                self._last_hand_y = sum(d[0][1] for d in chosen) / len(chosen)
+                return chosen
+
+        # 2) 兜底：所有行里选最佳
+        scored = []
         for row in rows:
-            if len(row) < 8:
-                continue
-            hs = [d[0][3] for d in row if d[0][3] > 0]
-            if not hs:
-                continue
-            avg_h = sum(hs) / len(hs)
-            ys = [d[0][1] for d in row]
-            yc = sum(ys) / len(ys)
-            len_ok = 1.0 - min(abs(len(row) - 13), abs(len(row) - 14)) / 13.0
-            key = (avg_h, yc, len_ok)
-            if key > best_key:
-                best_key = key
-                best = row
-        if best is not None:
-            return best
-        # 兜底：选张数最接近 13 的行
-        return min(rows, key=lambda g: min(abs(len(g) - 13), abs(len(g) - 14)))
+            s = self._hand_row_score(row)
+            if s is not None:
+                ys = [d[0][1] for d in row]
+                yc = sum(ys) / len(ys)
+                scored.append((s, row, yc))
+        if not scored:
+            return min(rows, key=lambda g: min(abs(len(g) - 13), abs(len(g) - 14)))
+        scored.sort(key=lambda x: (-x[0][0], -x[0][1], -x[0][2]))
+        chosen = scored[0][1]
+        self._last_hand_y = sum(d[0][1] for d in chosen) / len(chosen)
+        return chosen
 
     def process(self, image: CVImage) -> Optional[EngineResult]:
         try:
@@ -519,8 +657,29 @@ class Engine:
                 return self._build_skip_result(image, self._frame_skipper.cached)
             self._consecutive_skips = 0
 
-            # 每帧读取当前玩法（文件共享态，由悬浮窗写入）。切换玩法后无需重启引擎。
+            # ===== 动画突变帧检测（吃碰杠过渡帧 / 菜单弹出帧） =====
+            # 整帧丢弃，等下一帧稳定画面。直接复用上次缓存的 payload（避免 UI 抽搐）。
+            if self._motion_guard.is_spike(diff):
+                self._consecutive_skips += 1
+                if self._frame_skipper.cached is not None:
+                    return self._build_skip_result(image, self._frame_skipper.cached)
+                # 没有任何历史稳定结果可复用，必须发一个明确的"等待"信号给 UI，
+                # 不能让 UI 看到旧的 hand/advice（场景可能完全变了）
+                self._tile_voter.reset()
+                return _error_result("animation",
+                                     "画面突变中（动画/菜单），等下一帧稳定再识别")
+
+            # ===== 玩法切换硬重置 =====
+            # 模式变了 → 投票窗口 / 行锁 / 缓存全部失效，必须清空重建。
             self.mode = load_mode()
+            if self.mode != self._prev_mode:
+                self._tile_voter.reset()
+                self._last_hand_y = None
+                self._stable_hand_mpsz = ""
+                self._stable_hand_count = 0
+                self._advice_key = None
+                self._frame_skipper = _FrameSkipper()  # 旧缓存与新玩法无关
+                self._prev_mode = self.mode
             avail = available_set(self.mode)
             hsizes = hand_sizes(self.mode)
 
@@ -590,9 +749,25 @@ class Engine:
                     if self._check_dup_explosion(hand_mpsz):
                         status = "incomplete"
                     else:
-                        status = "ok"
-                        commentary = self.update_trainer(hand)
-                        shanten, advice = self.build_advice(hand, disc_counts)
+                        # 行级稳定性兜底：本帧 hand_mpsz 与上一次稳定手牌张数相同
+                        # 但差异 ≥3 张——典型"识别跳变"（帧间某张被误改了 label）。
+                        # 这种本帧降级为 incomplete 并沿用上次 stable_hand，避免
+                        # UI 出现一闪而过的错误手牌。
+                        diff_with_stable = -1
+                        if (self._stable_hand_mpsz
+                                and self._stable_hand_count == tile_count):
+                            diff_with_stable = _hand_diff_count(
+                                self._stable_hand_mpsz, hand_mpsz)
+                        stable_threshold = max(2, tile_count // 4)
+                        if (diff_with_stable >= 0
+                                and diff_with_stable > stable_threshold):
+                            status = "incomplete"
+                        else:
+                            status = "ok"
+                            commentary = self.update_trainer(hand)
+                            shanten, advice = self.build_advice(hand, disc_counts)
+                            self._stable_hand_mpsz = hand_mpsz
+                            self._stable_hand_count = tile_count
                 else:
                     status = "incomplete"
 

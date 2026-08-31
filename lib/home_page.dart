@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:realtime_mahjong_trainer/channel.dart';
+import 'package:realtime_mahjong_trainer/mode_store.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({Key? key}) : super(key: key);
@@ -19,10 +20,22 @@ class _HomePageState extends State<HomePage> {
   static const channel = MethodChannel(CHANNEL_NAME);
 
   bool isProcessing = false;
+  // 当前选中的玩法，初始空：必须先选才能开始识别。
+  String? selectedMode;
+  bool _modeReady = false;
 
   @override
   void initState() {
     super.initState();
+
+    // 拉一次当前玩法（来自 Java 写的共享文件，Python 引擎也读这个文件）
+    GameMode.current().then((m) {
+      if (!mounted) return;
+      setState(() {
+        selectedMode = m;
+        _modeReady = true;
+      });
+    });
 
     // 接收悬浮窗通过 shareData 发来的消息：
     // 'stop' 为"停止"指令，Map 为识别状态回传（用于确认后端真的在识别）
@@ -213,6 +226,8 @@ class _HomePageState extends State<HomePage> {
     return '屏幕 $scr｜匹配分 $score\n有牌但匹配分偏低：本 App 的牌面样式与内置模板差异较大';
   }
 
+  // 诊断小工具：调试时可手动调用查看权限/采集链路。当前 UI 不再暴露按钮。
+  // ignore: unused_element
   Future<void> _refreshDiag() async {
     bool granted = false;
     bool active = false;
@@ -245,114 +260,163 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  /// 用户点选玩法。同步写到 Java 共享文件（Python 引擎读的就是这个文件），
+  /// 异步回来再 setState，避免 MethodChannel 抖动期间出现"选项闪烁"。
+  Future<void> _selectMode(String mode) async {
+    if (mode == selectedMode) return;
+    final ok = await GameMode.set(mode);
+    if (!ok) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('切到 ${GameMode.label(mode)} 失败，请重试'),
+      ));
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      selectedMode = mode;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
+    final String mode = selectedMode ?? '';
+    final bool canStart = !isProcessing && _modeReady && mode.isNotEmpty;
     return Scaffold(
       appBar: AppBar(
         title: const Text("麻将训练器"),
       ),
-      body: LayoutBuilder(
-        builder: (BuildContext context, BoxConstraints constraints) {
-          return Center(
-            child: Column(
-              children: [
-                TextButton(
-                  onPressed: () {
-                    permissions();
-                  },
-                  child: const Text("授权通知"),
-                ),
-                (isProcessing
-                    ? TextButton(
-                        onPressed: () {
-                          setProcessingState(false);
-                          hideOverlay();
-                          setState(() {
-                            isProcessing = false;
-                          });
-                        },
-                        child: const Text("停止识别"),
-                      )
-                    : TextButton(
-                        onPressed: () async {
-                          // 先弹出悬浮按钮（需要“显示在其他应用上层”权限），再开始识别
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const SizedBox(height: 6),
+              const Text(
+                '选择玩法',
+                style: TextStyle(fontSize: 14, color: Colors.black54),
+              ),
+              const SizedBox(height: 8),
+              _modeRow(mode),
+              const SizedBox(height: 24),
+              SizedBox(
+                height: 52,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: canStart
+                        ? Colors.deepOrange
+                        : Colors.grey.shade400,
+                    foregroundColor: Colors.white,
+                    disabledBackgroundColor: Colors.grey.shade300,
+                    disabledForegroundColor: Colors.grey.shade600,
+                    elevation: canStart ? 2 : 0,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                  onPressed: canStart
+                      ? () async {
                           await showOverlay();
                           setProcessingState(true);
                           setState(() {
                             isProcessing = true;
                           });
-                        },
-                        child: const Text("开始识别"),
-                      )),
-                TextButton(
-                  onPressed: _refreshDiag,
-                  child: const Text("刷新悬浮窗状态"),
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: SelectableText(
-                    _status,
-                    style: const TextStyle(fontSize: 13, color: Colors.blue),
-                    textAlign: TextAlign.center,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 16),
+                        }
+                      : null,
                   child: Text(
-                    '识别状态',
-                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                    isProcessing
+                        ? '停止识别'
+                        : (mode.isEmpty ? '请先选择玩法' : '开始识别'),
+                    style: const TextStyle(
+                        fontSize: 18, fontWeight: FontWeight.w600),
                   ),
                 ),
+              ),
+              if (isProcessing)
                 Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: SelectableText(
-                    _recognitionText(),
-                    style: const TextStyle(fontSize: 13, color: Colors.green),
-                    textAlign: TextAlign.center,
+                  padding: const EdgeInsets.only(top: 12),
+                  child: SizedBox(
+                    height: 44,
+                    child: OutlinedButton(
+                      onPressed: () {
+                        setProcessingState(false);
+                        hideOverlay();
+                        setState(() {
+                          isProcessing = false;
+                        });
+                      },
+                      child: const Text('停止识别'),
+                    ),
                   ),
                 ),
-                const SizedBox(height: 12),
-                const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 16),
-                  child: Text(
-                    '提示：点"开始识别"后，屏幕右上角会出现一个橙色悬浮按钮（可拖动）。\n'
-                    '若没出现，先把上面那行状态截图发我，可快速定位。',
-                    style: TextStyle(fontSize: 12, color: Colors.grey),
-                    textAlign: TextAlign.center,
-                  ),
-                ),
-                Clock(),
-              ],
-            ),
-          );
-        },
+              const SizedBox(height: 16),
+              Text(
+                _status,
+                style: const TextStyle(fontSize: 13, color: Colors.black54),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                _recognitionText(),
+                style: const TextStyle(
+                    fontSize: 14, color: Colors.black87, height: 1.35),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
-}
 
-class Clock extends StatefulWidget {
-  const Clock({super.key});
+  // 玩法选择：3 个等宽 SegmentedButton 风格卡。当前选中项高亮 + 上边框加粗。
+  Widget _modeRow(String mode) {
+    Widget tile(String value) {
+      final bool sel = value == mode;
+      return Expanded(
+        child: GestureDetector(
+          onTap: () => _selectMode(value),
+          child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: 4),
+            height: 64,
+            decoration: BoxDecoration(
+              color: sel ? Colors.deepOrange.shade50 : Colors.white,
+              border: Border.all(
+                color: sel ? Colors.deepOrange : Colors.grey.shade400,
+                width: sel ? 2 : 1,
+              ),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            alignment: Alignment.center,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  GameMode.label(value),
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: sel ? FontWeight.w700 : FontWeight.w500,
+                    color: sel ? Colors.deepOrange : Colors.black87,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  value,
+                  style: TextStyle(
+                      fontSize: 11, color: Colors.grey.shade600),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
 
-  @override
-  State<Clock> createState() => _ClockState();
-}
-
-class _ClockState extends State<Clock> {
-  @override
-  void initState() {
-    super.initState();
-    Timer.periodic(
-        Duration(seconds: 1),
-        (Timer t) => setState(() {
-              time = DateTime.now();
-            }));
-  }
-
-  DateTime time = DateTime.now();
-  @override
-  Widget build(BuildContext context) {
-    return Text(time.toString());
+    return Row(
+      children: [
+        tile('2p'),
+        tile('3p'),
+        tile('4p'),
+      ],
+    );
   }
 }
