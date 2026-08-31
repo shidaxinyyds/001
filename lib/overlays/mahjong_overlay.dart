@@ -48,17 +48,9 @@ class TileChip extends StatelessWidget {
       // 条：草绿色
       charColor = const Color(0xFF2E7D32);
     } else {
-      // 字牌：东 南 西 北 黑；中 红；发 绿
-      switch (cn) {
-        case '中':
-          charColor = const Color(0xFFD32F2F);
-          break;
-        case '發':
-          charColor = const Color(0xFF2E7D32);
-          break;
-        default:
-          charColor = const Color(0xFF202124);
-      }
+      // 字牌：所有字牌统一深灰（"中" 也用深灰，不再红字 —— 红字会被误认为错误状态）。
+      // 麻将牌"中"本身是红字，但此处遵循"界面任何状态下都不显示红色字符"的约束。
+      charColor = const Color(0xFF202124);
     }
 
     return Opacity(
@@ -203,7 +195,9 @@ class AdviceCard extends StatelessWidget {
                 TextSpan(
                   text: '$ukeire',
                   style: TextStyle(
-                    color: best ? Colors.greenAccent : Colors.amber,
+                    // 用浅蓝替代琥珀 —— 不再出现任何琥珀/橙黄色（与琥珀相邻的
+                    // 色域容易被误认成红色，且琥珀与"错误/警告"语义过近）。
+                    color: best ? Colors.lightGreenAccent : Colors.lightBlueAccent,
                     fontSize: 14,
                     fontWeight: FontWeight.bold,
                   ),
@@ -467,8 +461,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           height: 28,
           child: CustomPaint(
             painter: _GripPainter(
+              // 用中性浅灰替代琥珀 —— 拖动把手不应像"警告"。
               color: _draggingResize
-                  ? Colors.amber
+                  ? Colors.white
                   : Colors.white.withAlpha(140),
             ),
           ),
@@ -486,7 +481,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         width: size,
         height: size,
         decoration: BoxDecoration(
-          color: const Color(0xFFFF8F00),
+          // 用墨绿替代橙红 —— 不再出现橙色/红色视觉信号。
+          // 深色背景下墨绿悬浮按钮更显沉稳，避免与"错误/警告"语义混淆。
+          color: const Color(0xFF1B5E20),
           shape: BoxShape.circle,
           boxShadow: [
             BoxShadow(
@@ -594,107 +591,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     );
   }
 
-  // 记牌区：34 张牌的剩余/可见可视化。无边框、无文字提示。
-  // 算法：
-  //   visible = hand + 牌河；remaining_per_kind = 4 - visible（封顶 0）；
-  //   麻将按花色 4 行展示（万/筒/条/字），每张牌一个 chip：
-  //     - visible == 4 → 绝张（深灰，已无剩余）
-  //     - remaining == 0 且 visible < 4 → 触底（淡灰，再难打）
-  //     - 正常剩余 → 牌面颜色；可见越多越暗（用 alpha 递减）
-  Widget _summarySection(int remaining, int dead) {
-    // 计算每张牌的可见/剩余。hand 含在自己手中、discards 是牌河，都按 mpsz 解析。
-    final String hand = (result?['hand'] ?? '') as String;
-    final String discards = (result?['discards'] ?? '') as String;
-    final List<int> visible = List<int>.filled(34, 0);
-    for (final t in _mpszToTiles(hand)) {
-      final i = _tileToIndex(t);
-      if (i >= 0) visible[i]++;
-    }
-    for (final t in _mpszToTiles(discards)) {
-      final i = _tileToIndex(t);
-      if (i >= 0) visible[i]++;
-    }
-    final order = ['m', 'p', 's', 'z'];
-    Widget rowOf(String suit) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(vertical: 2),
-        child: Row(
-          children: [
-            for (int n = 1; n <= (suit == 'z' ? 7 : 9); n++)
-              _memoChip(suit + n.toString(), visible),
-          ],
-        ),
-      );
-    }
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 2),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [for (final s in order) rowOf(s)],
-      ),
-    );
-  }
-
-  Widget _memoChip(String tile, List<int> visible) {
-    final i = _tileToIndex(tile);
-    final int v = i < 0 ? 0 : visible[i];
-    final int rem = (4 - v).clamp(0, 4);
-    final bool deadTile = rem == 0;
-    final Color base = _colorOfSuit(tile);
-    final int alpha = deadTile ? 30 : (90 - v * 18).clamp(40, 95);
-    final Color c = deadTile
-        ? const Color(0xFF455A64).withAlpha(70)
-        : base.withAlpha(alpha);
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 1),
-      child: Container(
-        width: 18,
-        height: 18,
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: c,
-          borderRadius: BorderRadius.circular(3),
-        ),
-        child: Text(
-          tile.substring(1),
-          style: TextStyle(
-            color: deadTile ? Colors.white24 : Colors.white,
-            fontSize: 9,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-      ),
-    );
-  }
-
-  Color _colorOfSuit(String t) {
-    final s = t.substring(0, 1);
-    switch (s) {
-      case 'm':
-      case 'p':
-        return const Color(0xFF1E6B7A);
-      case 's':
-        return const Color(0xFF66BB6A);
-      default:
-        return const Color(0xFFB0BEC5);
-    }
-  }
-
-  // "1m"→0, "2m"→1, ..., "9m"→8, "1p"→9, ..., "7z"→33
-  int _tileToIndex(String t) {
-    if (t.length < 2) return -1;
-    final String s = t.substring(0, 1);
-    final int n = int.tryParse(t.substring(1)) ?? -1;
-    if (s == 'z') {
-      if (n < 1 || n > 7) return -1;
-      return 27 + (n - 1);
-    }
-    if (n < 1 || n > 9) return -1;
-    final int base = s == 'm' ? 0 : (s == 'p' ? 9 : 18);
-    return base + (n - 1);
-  }
-
   // 上一手点评（commentary）已不在弹窗内显示——
 // 只在 shareData 中作为状态传给主界面（主界面有专门区域呈现），避免弹窗被文字占满。
 
@@ -711,9 +607,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final String best = (result?['best'] ?? '') as String;
     final String discards = (result?['discards'] ?? '') as String;
     final int discardCount = (result?['discard_count'] ?? 0) as int;
-    final int remaining = (result?['remaining'] ?? 0) as int;
-    final int dead = (result?['dead'] ?? 0) as int;
 
+    // 三段固定布局：顶部建议 / 中部牌河 / 下部手牌。
+    // 严格按要求：移除所有 LayoutBuilder/MediaQuery 自适应分支。
     return SizedBox.expand(
       child: Stack(
         children: [
@@ -769,67 +665,30 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                     ),
                   ],
                 ),
+                const SizedBox(height: 8),
+                // 三段严格按"建议 / 牌河 / 手牌"顺序，自上而下排列。
+                // 不再做任何横竖屏判断、不再 Wrap 高度自动平衡：每段都是
+                // 固定高度的可滚动内容；超出段高时该段自身滚动，不影响其他段。
+                _section(
+                  title: '建议',
+                  child: _adviceSection(advice, best, count),
+                  height: 110,
+                ),
                 const SizedBox(height: 6),
-                // 4 段内容区（横/竖屏自适应）
+                _section(
+                  title: '牌河',
+                  child: _discardSection(discards, discardCount),
+                  height: 110,
+                ),
+                const SizedBox(height: 6),
                 Expanded(
-                  child: LayoutBuilder(
-                    builder: (ctx, cs) {
-                      final bool landscape = cs.maxWidth > cs.maxHeight;
-                      final Widget adviceWidget =
-                          _adviceSection(advice, best, count);
-                      final Widget discardWidget =
-                          _discardSection(discards, discardCount);
-                      final Widget handWidget = (hand.isNotEmpty && count > 0)
-                          ? _handSection(hand, count)
-                          : const SizedBox.shrink();
-                      final Widget summaryWidget =
-                          _summarySection(remaining, dead);
-
-                      if (landscape) {
-                        // 横屏：左建议+牌河 右手牌+记牌
-                        return Row(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment:
-                                    CrossAxisAlignment.stretch,
-                                children: [
-                                  adviceWidget,
-                                  const SizedBox(height: 6),
-                                  Expanded(child: discardWidget),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment:
-                                    CrossAxisAlignment.stretch,
-                                children: [
-                                  handWidget,
-                                  const SizedBox(height: 6),
-                                  Expanded(child: summaryWidget),
-                                ],
-                              ),
-                            ),
-                          ],
-                        );
-                      }
-                      // 竖屏：4 段上下堆叠
-                      return Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          adviceWidget,
-                          const SizedBox(height: 6),
-                          discardWidget,
-                          const SizedBox(height: 6),
-                          handWidget,
-                          const SizedBox(height: 6),
-                          Expanded(child: summaryWidget),
-                        ],
-                      );
-                    },
+                  child: _section(
+                    title: '手牌',
+                    child: (hand.isNotEmpty && count > 0)
+                        ? _handSection(hand, count)
+                        : const SizedBox.shrink(),
+                    // 下段（手牌）高度自动填满，不固定
+                    fillHeight: true,
                   ),
                 ),
               ],
@@ -838,6 +697,49 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           _resizeHandle(),
         ],
       ),
+    );
+  }
+
+  /// 段容器：固定高度的标题栏 + 可滚动内容。无 LayoutBuilder / 无 MediaQuery。
+  Widget _section({
+    required String title,
+    required Widget child,
+    double? height,
+    bool fillHeight = false,
+  }) {
+    final Widget body = Container(
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(8),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      padding: const EdgeInsets.all(6),
+      child: SingleChildScrollView(
+        physics: const ClampingScrollPhysics(),
+        child: child,
+      ),
+    );
+    final Widget content = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          title,
+          style: const TextStyle(
+            color: Colors.white70,
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.5,
+          ),
+        ),
+        const SizedBox(height: 4),
+        body,
+      ],
+    );
+    if (fillHeight) {
+      return content;
+    }
+    return SizedBox(
+      height: height ?? 100,
+      child: content,
     );
   }
 }
@@ -856,7 +758,10 @@ class _ShantenBadge extends StatelessWidget {
       height: size * 0.38,
       alignment: Alignment.center,
       decoration: BoxDecoration(
-        color: tenpai ? Colors.green : const Color(0xFFD84315),
+        // 仅向听≤0（听牌/和牌）显绿色，其余一律中性灰 —— 不再出现深橙色
+        // （深橙色 0xFFD84315 与红色在视觉上极易混淆，误触发"红字 = 异常"）。
+        // 这里"非听牌不报错"，仅作为状态指示，避免误读。
+        color: tenpai ? Colors.green : const Color(0xFF455A64),
         shape: BoxShape.circle,
         border: Border.all(color: Colors.white, width: 1),
       ),

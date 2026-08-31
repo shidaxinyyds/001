@@ -104,6 +104,20 @@ NUMERAL_REGION = 0.58        # 万牌数字区（占牌高）
 # 萬字块起始（占牌高）。设 0.60 而非 0.55，给数字"三"的最下横杠留出 0.05 余量，
 # 避免 0.55~0.58 区间的数字笔画被圈进 bottom 把 bbox 拉大、密度拉低、萬检测失败。
 WAN_REGION = 0.60            # 萬字块起始（占牌高）
+
+# ---- 低光/色温预处理：CLAHE (Contrast Limited Adaptive Histogram Equalization) ----
+# 不开：夜间/暖光牌面对比度普遍偏低（绿牌面转灰度 ~80、紫光下偏红），Otsu 在
+# 单峰分布上把 JPEG 噪声硬劈成两半、产生大面积伪墨迹，白板被认成字牌；
+# 开：在 LAB 空间的 L 通道做 CLAHE，把对比度拉到接近正常光照的水平，且不影响
+# 色相（H 通道原样保留 → 红中仍是红、绿發仍是绿）。clip_limit=2.0 是行业经验值，
+# 太高会引入块状伪影，太低起不到增强作用。
+CLAHE_CLIP_LIMIT = 2.0
+CLAHE_GRID_SIZE = (8, 8)
+# 启动期稳定性：启动时帧差历史为空 → _MotionGuard 会全部按"非 spike"放行。
+# 解决方案：识别器提供"是否处于冷启动期"信号给引擎，让引擎对冷启动的 N 帧
+# 走保守策略（只采纳 ≥2 帧一致的 label，且每张牌都要求至少 0.55 置信度），
+# 不让动画过渡帧污染冷启动投票窗口。
+WARMUP_FRAMES = 4
 # 面板遮挡补偿（work 坐标）。左 UI 面板会盖住最左牌的内侧 ~24 orig（GT 测得：
 # 左牌 x=160 vs 面板右沿 184），但这 24 orig 是纯色面板盖在牌上，画面里"看不到牌
 # 内容也无法与面板区分"——若把网格整体左移去补偿，最左牌能找回一点，但中间/右边
@@ -408,6 +422,29 @@ class StructuralDetector(Detector):
         m = cv2.bitwise_or(dark, colorful) * 255
         m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
         return m
+
+    @staticmethod
+    def _apply_clahe(gray: np.ndarray) -> np.ndarray:
+        """对灰度图做 CLAHE 增强：解决弱光/暖光下对比度过低导致 Otsu 失效的问题。
+
+        何时触发：灰度的 1%→99% 动态范围 < 60（实测白天 80~150、夜间 30~70）。
+        强光下直方图已接近全范围，再做 CLAHE 反而引入块状伪影、降低字形匹配 IoU。
+
+        clip_limit=2.0 / grid=(8,8) 是行业经验值；更高 clip 出现过曝斑块，更低
+        失去增强效果。返回与原图同 shape 同 dtype 的 uint8 图，调用方可无缝替换。
+        """
+        lo = float(np.percentile(gray, 1))
+        hi = float(np.percentile(gray, 99))
+        if hi - lo >= 60.0:
+            return gray
+        try:
+            clahe = cv2.createCLAHE(
+                clipLimit=CLAHE_CLIP_LIMIT,
+                tileGridSize=CLAHE_GRID_SIZE,
+            )
+            return clahe.apply(gray)
+        except Exception:
+            return gray
 
     @staticmethod
     def _fill_holes(m: np.ndarray) -> np.ndarray:
@@ -1443,8 +1480,11 @@ class StructuralDetector(Detector):
         if tile_w < 12:
             return []
 
-        # 生成等宽边界；每张牌左右各留 3% 余量，避免缝边切掉笔画
-        pad = max(1, int(0.03 * tile_w))
+        # 生成等宽边界；每张牌左右各留余量，避免缝边切掉笔画。
+        # 原 0.03 在大屏上只有 1~2 像素，最右牌右沿被裁掉一像素就足够让
+        # "一/二/三"等单像素笔画消失（实测 w=80 时 pad=2，最右牌的笔画端
+        # 经常被裁，3m 误判 2m）。改为 0.05 并设绝对下限 3 像素。
+        pad = max(3, int(0.05 * tile_w))
         out: List[Rect] = []
         for k in range(n_tiles):
             x1 = max(0, int(round(xmin + k * tile_w)) - pad)
@@ -1463,14 +1503,15 @@ class StructuralDetector(Detector):
 
         # dets 始终是 (rect, label, conf) 三元组，保证 confs 不会因排序与 result 错位
         dets = self._detect_once(img)
-        if len(dets) < 4:
+        # 旋转重试：质量门限（参见 detect_all_rows 的注释）。
+        if self._should_try_rotation(dets):
             for rot in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE):
                 try:
                     rot_img = cv2.rotate(img, rot)
                 except cv2.error:
                     continue
                 d2 = self._detect_once(rot_img)
-                if len(d2) > len(dets):
+                if self._rotation_is_better(dets, d2):
                     dets = [(self._unrotate_rect(r, rot, iw, ih), l, c)
                             for (r, l, c) in d2]
                     break
@@ -1506,23 +1547,59 @@ class StructuralDetector(Detector):
         每行是一组 [(rect, label, conf), ...]，已由 x 排序。
         引擎据此区分「自己手牌行」（张数最接近 13/14、牌最大）与
         「各家牌河行」（其余行），从而把所有打出的牌纳入剩余牌计算。
+
+        旋转重试：原实现"识别出 <4 张牌就尝试旋转"——这会把横屏正确识别
+        因 13 张全在手牌行、牌河没识别到而 <4 而误触发旋转分支，把竖向画面
+        当横向识别（横屏手机截屏方向错时尤其）。改为"原始方向识别到的手牌
+        数 < 期望值 + 平均置信度 < 0.45"才尝试旋转，且旋转分支的置信度均值
+        必须**严格高于**原始方向才采纳。
         """
         img = image if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         ih, iw = img.shape[:2]
         self.last_screen = (iw, ih)
         dets = self._detect_once(img)
-        if len(dets) < 4:
+        # 旋转重试的触发条件改为"质量门限"而不是数量门限
+        if self._should_try_rotation(dets):
             for rot in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE):
                 try:
                     rot_img = cv2.rotate(img, rot)
                 except cv2.error:
                     continue
                 d2 = self._detect_once(rot_img)
-                if len(d2) > len(dets):
+                if self._rotation_is_better(dets, d2):
                     dets = [(self._unrotate_rect(r, rot, iw, ih), l, c)
                             for (r, l, c) in d2]
                     break
         return self._group_rows(dets)
+
+    @staticmethod
+    def _should_try_rotation(dets) -> bool:
+        """旋转重试触发条件：低质量且数量少。
+
+        原实现只看 `len(dets) < 4`，会把横屏正常识别（手牌 13/14 张全在手牌
+        行、其它行未被识别）误触旋转。现改为：检测数 <6（基本没什么牌可识别）
+        **或** 平均置信度 <0.45 才尝试旋转。
+        """
+        if not dets:
+            return True
+        if len(dets) < 6:
+            return True
+        avg_conf = float(sum(d[2] for d in dets)) / len(dets)
+        return avg_conf < 0.45
+
+    @staticmethod
+    def _rotation_is_better(orig, rot) -> bool:
+        """旋转分支采纳门限：检测到的牌更多 **且** 平均置信度更高。
+
+        避免旋转分支因"随便多识别了几张牌"而误激活——必须两边都好于原方向。
+        """
+        if not rot:
+            return False
+        if len(rot) <= len(orig):
+            return False
+        orig_conf = float(sum(d[2] for d in orig)) / len(orig) if orig else 0.0
+        rot_conf = float(sum(d[2] for d in rot)) / len(rot)
+        return rot_conf > orig_conf + 0.05
 
     @staticmethod
     def _group_rows(dets):
@@ -1543,17 +1620,21 @@ class StructuralDetector(Detector):
 
     def _detect_once(self, img: np.ndarray) -> List[Tuple[Rect, Optional[str], float]]:
         h, w = img.shape[:2]
+        # ===== 低光/色温预处理：CLAHE（仅作用于"工作图"，分类用的全分辨率 face 仍取自原图）=====
+        # 必须只增强工作图，不能动原图——_classify_face 的几何守卫是按原始色相
+        # 设计的（红中红、绿發绿、白板纯白），CLAHE 会破坏色相判别。
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        work_gray = StructuralDetector._apply_clahe(gray)
         longest = float(max(h, w))
         inv = 1.0
         if longest > MAX_WORKING_EDGE:
             inv = longest / MAX_WORKING_EDGE
-            work = cv2.resize(gray, (max(1, int(w / inv)), max(1, int(h / inv))),
+            work = cv2.resize(work_gray, (max(1, int(w / inv)), max(1, int(h / inv))),
                               interpolation=cv2.INTER_AREA)
             work_color = cv2.resize(img, (max(1, int(w / inv)), max(1, int(h / inv))),
                                     interpolation=cv2.INTER_AREA)
         else:
-            work, work_color = gray, img
+            work, work_color = work_gray, img
 
         wh, ww = work.shape[:2]
         tile_h = max(10, int(TILE_H_RATIO * min(wh, ww)))

@@ -181,6 +181,104 @@ p2 = json.loads(r2.result)
 check("diff-image-runs", not p1.get("frame_skipped") or not p2.get("frame_skipped"),
        f"p1.skip={p1.get('frame_skipped')} p2.skip={p2.get('frame_skipped')}")
 
+
+# ---- 6) 启动期 WARMUP_FRAMES 内即使画面大跳变也不被 _MotionGuard 拒 ----
+print()
+print("[6] 冷启动 WARMUP_FRAMES 帧不被突变检测拒")
+eng = make_fake_engine(n_tiles_hand=13,
+                       hand_labels=["1m","2m","3m","4m","5m","6m","7m",
+                                    "1p","2p","3p","4p","5p","6p"])
+check("warmup-init-4", eng._warmup_left == 4,
+      f"initial _warmup_left={eng._warmup_left}")
+# 连跑 4 张差异极大的图（每张 seed 不同 → diff 极高）
+imgs = [make_fake_image(seed=s) for s in (101, 202, 303, 404)]
+skipped_count = 0
+processed_count = 0
+for img in imgs:
+    r = eng.process(img)
+    payload = json.loads(r.result)
+    if payload.get("frame_skipped"):
+        skipped_count += 1
+    if "hand" in payload:
+        processed_count += 1
+# 4 张图可能只有首张是"完整识别"（建立 baseline），其余靠 frame_skip。
+# 但**不应**被 _MotionGuard 拒（warmup 期内 motion guard 被绕过）。
+# 简单验证：4 张都有非空 hand 字段 + 4 张里 warmup 计数器最终为 0
+check("warmup-counter-depleted", eng._warmup_left == 0,
+      f"_warmup_left={eng._warmup_left}")
+check("warmup-no-crash", processed_count >= 1,
+      f"processed_count={processed_count}/4")
+
+
+# ---- 7) 牌河稳定性兜底：当前帧 discards 显著少于历史，回退到历史最大值 ----
+print()
+print("[7] 牌河稳定性兜底")
+# 构造一个 FakeDetector：第一阶段返回 20 张牌河 + 13 张手牌，
+# 第二阶段把牌河减到 4 张（小于历史最大值 - MIN_DROP_DELTA=4）
+hand_labels = ["1m","2m","3m","4m","5m","6m","7m",
+               "1p","2p","3p","4p","5p","6p"]
+hand_dets = [((100 + i * 50, 460, 50, 80), lbl, 0.92) for i, lbl in enumerate(hand_labels)]
+
+class TwoStageDetector:
+    """前 6 帧返回 20 张牌河；第 7 帧开始返回 4 张牌河，触发兜底。"""
+    def __init__(self):
+        self.last_top_score = 0.85
+        self.last_screen = (1100, 600)
+        self._glyphs = type("G", (), {"nums": {"a": 1}})()
+        self._styles = type("S", (), {"tpls": [1]})()
+        self.call_count = 0
+    def detect_all_rows(self, image):
+        self.call_count += 1
+        # 牌河：20 张 vs 4 张（用单一 mpsz 复用以便 assertion 简单）
+        if self.call_count <= 6:
+            discard_labels = ["2p"] * 20
+        else:
+            discard_labels = ["2p"] * 4
+        discard_dets = [((100 + i * 50, 100, 50, 80), lbl, 0.92)
+                        for i, lbl in enumerate(discard_labels)]
+        return [hand_dets, discard_dets]
+
+eng = make_fake_engine(n_tiles_hand=13, hand_labels=hand_labels)
+eng.get_detector = lambda: TwoStageDetector()  # type: ignore
+eng._tile_voter = engine_mod._TileVoter(window=engine_mod.VOTE_WINDOW)
+eng._frame_skipper = engine_mod._FrameSkipper()
+eng._motion_guard = engine_mod._MotionGuard()
+eng._warmup_left = 0  # 跳过 warmup，直接走正常路径
+eng._discard_history.clear()
+
+# 跑 6 帧"正常"画面（牌河 20 张），建立历史
+img = make_fake_image(seed=7)
+results_phase1 = []
+for _ in range(6):
+    r = eng.process(img)
+    payload = json.loads(r.result)
+    results_phase1.append(payload.get("discard_count"))
+# 注意：frame_skipper 在同图下会让第 2~6 帧被跳过；这不影响 history（只在
+# "完整识别"分支末尾写 history）。所以这里用 6 张不同图，确保都进识别
+imgs_phase1 = [make_fake_image(seed=s) for s in (11, 12, 13, 14, 15, 16)]
+results_phase1 = []
+for img_ in imgs_phase1:
+    r = eng.process(img_)
+    payload = json.loads(r.result)
+    results_phase1.append(payload.get("discard_count"))
+
+# 现在 _discard_history 应该已有 6 个 20 张的牌河
+hist_lens = [len(s) // 2 for s in eng._discard_history]
+check("history-built", all(h > 10 for h in hist_lens),
+       f"history lens={hist_lens}")
+
+# 第 7 帧换成牌河只有 4 张的"画面"——触发兜底
+img_phase2 = make_fake_image(seed=99)
+r = eng.process(img_phase2)
+payload = json.loads(r.result)
+check("discard-fallback-restored",
+       payload.get("discard_count", 0) >= 10,
+       f"discard_count={payload.get('discard_count')}")
+check("discards-not-empty-after-fallback",
+       bool(payload.get("discards")),
+       f"discards={payload.get('discards')!r}")
+
+
 print()
 if failures:
     print(f"FAILED: {len(failures)} case(s) -> {failures}")

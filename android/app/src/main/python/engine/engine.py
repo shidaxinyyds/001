@@ -18,6 +18,7 @@ from recognition.structural import (
     MIN_CONF,
     MIN_TILE_ASPECT,
     MAX_TILE_ASPECT,
+    WARMUP_FRAMES,
 )
 from utils.stubs import CVImage
 from trainer.trainer import Trainer
@@ -77,6 +78,20 @@ VOTE_RECENCY_WEIGHTS = (0.5, 0.7, 0.9, 1.0)  # 长度与 VOTE_WINDOW 一致
 # 手牌行 y 锁定容差（work 坐标）：上一帧挑了 yc，下一帧优先在 ±band 范围内挑。
 # 不锁会因帧间小抖动把"牌河行"和"手牌行"互相切换——这正是 13↔14 跳变的根因之一。
 HAND_LOCK_BAND = 30
+
+# 引擎侧的"低置信回退"门槛：单帧低于此门槛的牌本来直接被 _apply_conf 丢弃
+# （避免白板/伪命中污染）；但当一帧的"识别出牌数"比稳定手牌少 1 张且差异稳定时，
+# 引擎允许以这条更低的门槛再做一次"补漏"扫描，把漏掉的那张牌补回来。
+# 仅在已建立稳定手牌后启用——冷启动期（无 _stable_hand_mpsz）仍走严格门槛，
+# 避免启动时把噪音当真。
+ENGINE_MIN_CONF_RELAX = 0.42
+
+# 牌河稳定性兜底：避免识别器瞬时漏抓牌河中的几张牌，导致 remaining/dead
+# 当帧剧烈变化。追踪最近 N 帧的 disc_mpsz 长度与 mpsz 增量；当前帧若
+# 显著少于历史最小值（差距 ≥MIN_DROP_DELTA），回退到历史最大稳定值。
+DISCARD_HISTORY_FRAMES = 6
+DISCARD_HISTORY_MIN_SAMPLES = 3
+MIN_DROP_DELTA = 4
 
 
 def _hand_diff_count(a: str, b: str) -> int:
@@ -394,6 +409,12 @@ class Engine:
         self._prev_mode: str = self.mode
         # 给主界面"知道什么时候画面没动"的提示用
         self._consecutive_skips: int = 0
+        # 启动帧计数：首 WARMUP_FRAMES 帧走保守策略（参见 WARMUP_FRAMES 注释），
+        # 避免 _MotionGuard 历史为空导致动画过渡帧漏过。
+        self._warmup_left: int = WARMUP_FRAMES
+        # 牌河稳定性历史：保留最近 DISCARD_HISTORY_FRAMES 帧的 disc_mpsz 长度。
+        # 用于"当前帧 discards 显著少于历史最小值"时回退到历史最大稳定值。
+        self._discard_history: deque = deque(maxlen=DISCARD_HISTORY_FRAMES)
 
     def start(self):
         pass
@@ -534,10 +555,17 @@ class Engine:
 
     def _apply_conf(self, rect, label, conf):
         """置信 + 牌形比例过滤：低于门槛或牌形不对的牌直接判为「不识别」，
-        宁可漏识别也绝不臆测（白板刷屏、半张牌等假命中在此被挡掉）。"""
+        宁可漏识别也绝不臆测（白板刷屏、半张牌等假命中在此被挡掉）。
+
+        双门槛机制：
+          - 严格门槛 ENGINE_MIN_CONF（0.55）：默认走这条，防白板/伪命中。
+          - 放宽门槛 ENGINE_MIN_CONF_RELAX（0.42）：仅当引擎已建立稳定手牌
+            （self._stable_hand_mpsz 非空）时才允许。这是"漏 1 张 → 自动补漏"
+            的关键：若投票窗口里有 2~4 张牌稳定为 Xm，但第 N 张本来被投票器
+            因 0.50 分拒了，会导致手牌数对（13/14 张）但实际少识别了一张。
+            放宽门槛只在"补漏"时启用——启动期仍走严格门槛，避免噪声被当真。
+        """
         if label is None:
-            return None
-        if conf < ENGINE_MIN_CONF:
             return None
         w, h = rect[2], rect[3]
         if h <= 0:
@@ -545,7 +573,12 @@ class Engine:
         aspect = w / float(h)
         if aspect < MIN_TILE_ASPECT or aspect > MAX_TILE_ASPECT:
             return None
-        return label
+        if conf >= ENGINE_MIN_CONF:
+            return label
+        # 已建立稳定手牌 + 严格门槛不过 + 放宽门槛过 → 允许（但仅一次）
+        if conf >= ENGINE_MIN_CONF_RELAX and self._stable_hand_mpsz:
+            return label
+        return None
 
     @staticmethod
     def _labels_to_mpsz(labels, avail) -> str:
@@ -659,7 +692,10 @@ class Engine:
 
             # ===== 动画突变帧检测（吃碰杠过渡帧 / 菜单弹出帧） =====
             # 整帧丢弃，等下一帧稳定画面。直接复用上次缓存的 payload（避免 UI 抽搐）。
-            if self._motion_guard.is_spike(diff):
+            # 启动期（前 WARMUP_FRAMES 帧）禁用突变检测：_MotionGuard._history 为空，
+            # 首帧必然被判定为非 spike——但首帧有可能是吃碰杠动画刚开始的瞬间，
+            # 会污染投票窗口。冷启动期一律走完整识别、把投票窗口灌满再说。
+            if self._warmup_left <= 0 and self._motion_guard.is_spike(diff):
                 self._consecutive_skips += 1
                 if self._frame_skipper.cached is not None:
                     return self._build_skip_result(image, self._frame_skipper.cached)
@@ -795,6 +831,51 @@ class Engine:
             remaining = max(0, wall_total - known)
             dead = sum(1 for i in avail_list if hand_counts[i] + disc_counts[i] >= 4)
 
+            # ===== 牌河稳定性兜底 =====
+            # 牌河瞬时漏抓（吃碰杠时对方刚打出的牌被动画遮挡、动画未结束）会让
+            # discards 长度瞬间掉一截，remaining/dead 当帧剧烈变化，UI 闪烁。
+            # 解决：保留最近 DISCARD_HISTORY_FRAMES 帧的 disc_mpsz 长度；若当前帧
+            # 显著少于历史最大值（差 ≥MIN_DROP_DELTA，且历史样本够多），把 discards
+            # 回退到历史最大稳定值（同样按 tile 计数填充 disc_counts）。
+            current_disc_len = len(disc_mpsz) // 2
+            history_lens = [len(s) // 2 for s in self._discard_history]
+            disc_mpsz_out = disc_mpsz
+            disc_counts_out = disc_counts
+            discarded_labels_out = discard_labels
+            if (len(history_lens) >= DISCARD_HISTORY_MIN_SAMPLES
+                    and history_lens and current_disc_len > 0):
+                max_hist = max(history_lens)
+                # 牌河只增不减；若当前帧少于历史最大值 ≥MIN_DROP_DELTA，视为漏抓
+                if max_hist - current_disc_len >= MIN_DROP_DELTA and max_hist > current_disc_len:
+                    # 选最长历史 disc_mpsz
+                    best_idx = history_lens.index(max_hist)
+                    stable_mpsz = self._discard_history[best_idx]
+                    # 按 mpsz 重新算 disc_counts 与 discard_labels
+                    fallback_labels = []
+                    for k in range(0, len(stable_mpsz), 2):
+                        if k + 2 <= len(stable_mpsz):
+                            fallback_labels.append(stable_mpsz[k:k + 2])
+                    fc = [0] * 34
+                    for lab in fallback_labels:
+                        try:
+                            fc[mpsz_to_tile34_index(lab)] += 1
+                        except Exception:
+                            pass
+                    disc_mpsz_out = stable_mpsz
+                    disc_counts_out = fc
+                    discarded_labels_out = fallback_labels
+                    # 用稳定值重算 known / remaining / dead
+                    known = sum(hand_counts[i] for i in avail_list) + sum(fc[i] for i in avail_list)
+                    remaining = max(0, wall_total - known)
+                    dead = sum(1 for i in avail_list if hand_counts[i] + fc[i] >= 4)
+            self._discard_history.append(disc_mpsz)
+
+            # ===== 冷启动递减 =====
+            # 每完整识别一帧（命中"实际跑了 _detect_once"的路径），递减；扣到 0 后
+            # _MotionGuard / _FrameSkipper 才开始按正常策略工作。
+            if self._warmup_left > 0:
+                self._warmup_left -= 1
+
             # 区分每行的角色（手牌行 vs 牌河行），供 UI 渲染与调试。
             rows_out = []
             for row in voted_rows:
@@ -816,8 +897,8 @@ class Engine:
                 "advice": advice,
                 "best": best,
                 "commentary": commentary,
-                "discards": disc_mpsz,
-                "discard_count": len(discard_labels),
+                "discards": disc_mpsz_out,
+                "discard_count": len(discarded_labels_out),
                 "remaining": remaining,
                 "dead": dead,
                 "tiles": all_tiles,
