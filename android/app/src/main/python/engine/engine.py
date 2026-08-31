@@ -9,11 +9,9 @@ import time
 import cv2
 import numpy as np
 
-from dirs import LABELLED_DIR
-
 from .engine_result import EngineResult
 from recognition.stage import DetectionResult
-from recognition.template_detector import TemplateDetector
+from recognition.structural import StructuralDetector, MIN_CONF
 from utils.stubs import CVImage
 from trainer.trainer import Trainer
 from trainer.objects.tile_collection import TileCollection
@@ -62,11 +60,8 @@ def _make_preview(image: CVImage) -> CVImage:
 class Engine:
     def __init__(self):
         self.trainer: Optional[Trainer] = None
-        # 模板图与检测器只构建一次。
-        # 原实现每帧都从磁盘读 34 张 PNG，并对「每个牌位 × 每个模板」重复 cvtColor，
-        # 单帧要跑数百次 cv2 运算，手机上远超 500ms 的采集间隔。
-        self._targets: Optional[Dict[str, CVImage]] = None
-        self._detector: Optional[TemplateDetector] = None
+        # 结构识别器自带字形库，构建一次即可（无需每帧读模板图）。
+        self._detector: Optional[StructuralDetector] = None
         # 推荐打法的缓存（按手牌内容），避免每帧重算 34 次向听 + 进张
         self._advice_key: Optional[str] = None
         self._advice: List[Dict] = []
@@ -74,34 +69,11 @@ class Engine:
     def start(self):
         pass
 
-    def load_target_images(self) -> Dict[str, CVImage]:
-        if self._targets is not None:
-            return self._targets
-
-        output: Dict[str, CVImage] = {}
-        try:
-            for basename in sorted(os.listdir(LABELLED_DIR)):
-                if not basename.lower().endswith('.png'):
-                    continue
-                image = cv2.imread(os.path.join(LABELLED_DIR, basename))
-                if image is None:
-                    print(f"Failed to read template: {basename}")
-                    continue
-                output[basename.split('.')[0]] = image
-        except Exception:
-            traceback.print_exc()
-
-        print(f"Loaded {len(output)} tile templates")
-        self._targets = output
-        return output
-
-    def get_detector(self) -> Optional[TemplateDetector]:
+    def get_detector(self) -> Optional[StructuralDetector]:
         if self._detector is not None:
             return self._detector
-        targets = self.load_target_images()
-        if not targets:
-            return None
-        self._detector = TemplateDetector(targets)
+        # 结构识别器自带字形库，无需外部模板图片，构建一次即可。
+        self._detector = StructuralDetector()
         return self._detector
 
     def update_trainer(self, hand: TileCollection) -> Optional[str]:
@@ -194,7 +166,14 @@ class Engine:
                 return None
 
             stage = detector.detect(image)
-            mpsz = get_mpsz(stage.result)
+            # 低置信过滤：识别精度 > 速度，宁可漏检也不把错牌喂给向听/进张逻辑。
+            # last_conf 与 stage.result 下标已按 x 排序一一对应（见 StructuralDetector.detect）。
+            confs = getattr(detector, "last_conf", [])
+            detected = [
+                (rect, label if (i >= len(confs) or confs[i] >= MIN_CONF) else None)
+                for i, (rect, label) in enumerate(stage.result)
+            ]
+            mpsz = get_mpsz(detected)
 
             status = "no_tiles"
             commentary: Optional[str] = None
@@ -222,7 +201,7 @@ class Engine:
                 "commentary": commentary,
                 "tiles": [
                     [int(v) for v in rect] + [label if label is not None else ""]
-                    for rect, label in stage.result
+                    for rect, label in detected
                 ],
                 # 最近一帧的最高模板匹配分（无论是否过阈）。
                 # 用于诊断：分数长期 <0.2 说明屏幕里没牌；0.3~0.44 说明有牌但样式与模板差异大。

@@ -78,7 +78,8 @@ dependencies {}
 chaquopy {
     defaultConfig {
         pip {
-            install("mahjong")
+            // mahjong 已内置并 vendoring 到 android/app/src/main/python/mahjong，
+            // 不依赖 PyPI/镜像版本，避免云端构建因版本漂移或镜像不可用而失败。
             // The latest version available on https://chaquo.com/pypi-13.1/
             install("opencv-python~=4.5.1")
 

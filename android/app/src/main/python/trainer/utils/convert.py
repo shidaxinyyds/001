@@ -26,7 +26,7 @@ def tiles34_index_to_mpsz(index: int) -> str:
         return f"{index % 9 + 1}p"
     if 18 <= index <= 26:
         return f"{index % 9 + 1}s"
-    if 27 <= index <= 34:
+    if 27 <= index <= 33:
         return f"{index % 9 + 1}z"
     assert False
 

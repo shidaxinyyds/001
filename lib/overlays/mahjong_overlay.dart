@@ -164,20 +164,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     }
   }
 
-  // 悬浮窗内"停止"：通过 shareData 通知主 App 真正停止识别，并关闭整个悬浮窗。
-  // 兜底：万一主 App 没收到（被系统回收、或 MethodChannel 回调没送达），
-  // 悬浮窗自己再尝试关一次，避免"点停止毫无反应"。
-  Future<void> _stop() async {
-    try {
-      await FlutterOverlayWindow.shareData('stop');
-    } catch (_) {}
-    await Future<void>.delayed(const Duration(milliseconds: 900));
-    if (!mounted) return;
-    try {
-      await FlutterOverlayWindow.closeOverlay();
-    } catch (_) {}
-  }
-
   // 缩放把手：右下角，可自由改变弹窗长宽
   Widget _resizeHandle() {
     return Positioned(
@@ -278,7 +264,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final List<dynamic> advice = (result?['advice'] ?? const []) as List<dynamic>;
     final double topScore =
         (result?['top_score'] as num?)?.toDouble() ?? 0.0;
-    final String screenText = (result?['screen'] as List?)?.join('×') ?? '';
 
     return SizedBox.expand(
       child: Stack(
@@ -321,21 +306,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                           borderRadius: BorderRadius.circular(6),
                         ),
                         child: const Text('收起',
-                            style:
-                                TextStyle(color: Colors.white, fontSize: 11)),
-                      ),
-                    ),
-                    const SizedBox(width: 5),
-                    GestureDetector(
-                      onTap: _stop,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 7, vertical: 3),
-                        decoration: BoxDecoration(
-                          color: Colors.redAccent,
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: const Text('停止',
                             style:
                                 TextStyle(color: Colors.white, fontSize: 11)),
                       ),
@@ -408,7 +378,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                           ),
                         ],
                         const SizedBox(height: 8),
-                        _DiagLine(topScore: topScore, screen: screenText),
+                        _DiagLine(topScore: topScore),
                         const SizedBox(height: 14),
                       ],
                     ),
@@ -484,38 +454,25 @@ class _StatusLine extends StatelessWidget {
   }
 }
 
-/// 诊断行：截屏分辨率 + 最高模板匹配分。
-/// 识别不出牌时，这一行能直接区分"没截到屏/屏幕里没牌"和"有牌但样式跟模板不匹配"。
+/// 诊断行：仅显示匹配状态提示（不显示屏幕尺寸，符合简洁要求）。
+/// 识别不出牌时，这一行能区分"屏幕里没牌"和"有牌但样式与模板差异较大"。
 class _DiagLine extends StatelessWidget {
   final double topScore;
-  final String screen;
-  const _DiagLine({required this.topScore, required this.screen});
+  const _DiagLine({required this.topScore});
 
   @override
   Widget build(BuildContext context) {
-    String hint;
-    if (screen.isEmpty) {
-      hint = '等待第一帧…';
-    } else if (topScore < 0.20) {
+    final String hint;
+    if (topScore < 0.20) {
       hint = '屏幕里没找到麻将牌（确认已打开牌局）';
     } else if (topScore < 0.45) {
       hint = '有牌但匹配分偏低，牌面样式与模板差异较大';
     } else {
       hint = '匹配正常';
     }
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          screen.isEmpty ? hint : '屏幕 $screen｜匹配分 ${topScore.toStringAsFixed(2)}',
-          style: const TextStyle(color: Colors.white38, fontSize: 10),
-        ),
-        if (screen.isNotEmpty)
-          Text(
-            hint,
-            style: const TextStyle(color: Colors.white30, fontSize: 10),
-          ),
-      ],
+    return Text(
+      hint,
+      style: const TextStyle(color: Colors.white38, fontSize: 10),
     );
   }
 }
