@@ -57,6 +57,34 @@ def _make_preview(image: CVImage) -> CVImage:
         return np.zeros((1, 1, 3), dtype=np.uint8)
 
 
+def _error_result(status: str, message: str) -> "EngineResult":
+    """构造错误状态的结果。
+
+    以前这些场景（解码失败/识别异常）直接返回 None，Java 端会把整帧
+    静默丢弃，悬浮窗永远转圈——用户看到的就是"没有任何反应"。
+    现在把错误包装成正常的 EngineResult 发给界面，任何 Python 异常
+    都能在悬浮窗上直接看到原因。
+    """
+    result = {
+        "hand": "",
+        "count": 0,
+        "status": status,
+        "shanten": None,
+        "advice": [],
+        "commentary": None,
+        "tiles": [],
+        "top_score": 0.0,
+        "screen": [0, 0],
+        "elapsed": 0.0,
+        "message": str(message)[:200],
+    }
+    return EngineResult(
+        image=np.zeros((1, 1, 3), dtype=np.uint8),
+        result=json.dumps(result),
+        stage=None,
+    )
+
+
 class Engine:
     def __init__(self):
         self.trainer: Optional[Trainer] = None
@@ -149,12 +177,16 @@ class Engine:
         return shanten, advice
 
     def process_bytes(self, image_data) -> Optional[EngineResult]:
-        arr = _to_uint8_buffer(image_data)
-        image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if image is None:
-            print("Failed to decode image")
-            return None
-        return self.process(image)
+        try:
+            arr = _to_uint8_buffer(image_data)
+            image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if image is None:
+                print("Failed to decode image")
+                return _error_result("decode_error", "图像解码失败（空字节或坏JPEG）")
+            return self.process(image)
+        except Exception as e:
+            traceback.print_exc()
+            return _error_result("py_error", f"process_bytes 异常: {e}")
 
     def process(self, image: CVImage) -> Optional[EngineResult]:
         try:
@@ -163,7 +195,7 @@ class Engine:
             detector = self.get_detector()
             if detector is None:
                 print("No templates available")
-                return None
+                return _error_result("py_error", "识别器初始化失败（模板库为空）")
 
             stage = detector.detect(image)
             # 低置信过滤：识别精度 > 速度，宁可漏检也不把错牌喂给向听/进张逻辑。
@@ -206,6 +238,10 @@ class Engine:
                 # 最近一帧的最高模板匹配分（无论是否过阈）。
                 # 用于诊断：分数长期 <0.2 说明屏幕里没牌；0.3~0.44 说明有牌但样式与模板差异大。
                 "top_score": round(float(getattr(detector, "last_top_score", 0.0)), 3),
+                # 模板库加载诊断：真机上若字形/风格库读不出来（路径问题），
+                # 这两个数为 0，识别会全挂——此前这种情况完全静默。
+                "glyphs": len(getattr(detector._glyphs, "nums", {}) or {}),
+                "styles": len(getattr(detector._styles, "tpls", []) or []),
                 # MediaProjection 截到的屏幕真实像素尺寸（宽, 高）——用于确认取到了整屏
                 "screen": [
                     int(getattr(detector, "last_screen", (0, 0))[0]),
@@ -222,6 +258,6 @@ class Engine:
             print(result)
             print(f"Processed in {time.time() - start_time}")
             return res
-        except Exception:
+        except Exception as e:
             traceback.print_exc()
-            return None
+            return _error_result("py_error", f"process 异常: {e}")

@@ -46,6 +46,7 @@ class _HomePageState extends State<HomePage> {
             _recogHand = event['hand']?.toString() ?? '';
             _recogTopScore = (event['top_score'] as num?)?.toDouble() ?? 0.0;
             _recogScreen = event['screen']?.toString() ?? '';
+            _recogMessage = event['message']?.toString() ?? '';
           });
         }
       }
@@ -59,6 +60,7 @@ class _HomePageState extends State<HomePage> {
   String _recogHand = '';
   double _recogTopScore = 0.0;
   String _recogScreen = '';
+  String _recogMessage = '';
 
   Future<void> setProcessingState(bool start) async {
     try {
@@ -176,6 +178,22 @@ class _HomePageState extends State<HomePage> {
         return '识别到 $_recogCount 张，需 13/14 张才完整\n（确认牌面完整、没有被遮挡）';
       case 'no_tiles':
         return '未识别到牌面\n${_diagHint()}';
+      case 'engine_ready':
+        return '识别引擎已就绪，等待画面…\n（若一直停在这里，说明采集不到屏幕画面）';
+      case 'no_frames':
+        return '已授权录屏，但未采集到画面\n'
+            '（切到牌局稍等几秒；屏幕完全静止时也属正常；\n'
+            '若持续如此说明录屏会话已失效，请"停止识别"后重新开始）';
+      case 'projection_stopped':
+        return '录屏会话被系统结束\n（锁屏/状态栏停止共享/被其它录屏抢占）\n请重新点"开始识别"';
+      case 'send_error':
+        return '识别结果发送失败\n（悬浮窗数据链路断开，请停止后重新开始）';
+      case 'py_error':
+      case 'decode_error':
+      case 'java_error':
+      case 'capture_error':
+      case 'start_failed':
+        return '识别链路异常\n$_recogMessage';
       default:
         return '正在等待第一帧识别结果…';
     }

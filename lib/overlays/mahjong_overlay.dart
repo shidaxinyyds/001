@@ -104,6 +104,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       // 分数长期 <0.2 => 屏幕里没有牌；0.2~0.45 => 有牌但样式跟模板差异大。
       'top_score': json['top_score'] ?? 0,
       'screen': (json['screen'] as List?)?.join('x') ?? '',
+      // 链路错误详情（py_error/java_error/no_frames 等状态附带）
+      'message': json['message'] ?? '',
     }).catchError((_) {});
   }
 
@@ -264,6 +266,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final List<dynamic> advice = (result?['advice'] ?? const []) as List<dynamic>;
     final double topScore =
         (result?['top_score'] as num?)?.toDouble() ?? 0.0;
+    final String message = (result?['message'] ?? '') as String;
 
     return SizedBox.expand(
       child: Stack(
@@ -379,6 +382,14 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                         ],
                         const SizedBox(height: 8),
                         _DiagLine(topScore: topScore),
+                        if (message.isNotEmpty) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            message,
+                            style: const TextStyle(
+                                color: Colors.redAccent, fontSize: 10),
+                          ),
+                        ],
                         const SizedBox(height: 14),
                       ],
                     ),
@@ -413,6 +424,21 @@ class _StatusLine extends StatelessWidget {
   final int count;
   const _StatusLine({required this.status, required this.count});
 
+  static const Set<String> _knownStatuses = {
+    'ok',
+    'incomplete',
+    'no_tiles',
+    'engine_ready',
+    'no_frames',
+    'projection_stopped',
+    'send_error',
+    'py_error',
+    'decode_error',
+    'java_error',
+    'capture_error',
+    'start_failed',
+  };
+
   @override
   Widget build(BuildContext context) {
     String text;
@@ -427,12 +453,39 @@ class _StatusLine extends StatelessWidget {
         color = Colors.orangeAccent;
         break;
       case 'no_tiles':
-      default:
         text = '未识别到牌面';
         color = Colors.white38;
         break;
+      case 'engine_ready':
+        text = '识别引擎已就绪，等待画面…';
+        color = Colors.greenAccent;
+        break;
+      case 'no_frames':
+        // 已授权但一帧都收不到：录屏会话失效或屏幕完全静止
+        text = '已授权，未采集到画面';
+        color = Colors.orangeAccent;
+        break;
+      case 'projection_stopped':
+        text = '录屏已被系统结束，请重新开始识别';
+        color = Colors.redAccent;
+        break;
+      case 'send_error':
+        text = '结果发送失败（悬浮窗链路断开）';
+        color = Colors.redAccent;
+        break;
+      case 'py_error':
+      case 'decode_error':
+      case 'java_error':
+      case 'capture_error':
+      case 'start_failed':
+        text = '识别链路异常（见下方详情）';
+        color = Colors.redAccent;
+        break;
+      default:
+        text = '未识别到牌面';
+        color = Colors.white38;
     }
-    if (!{'ok', 'incomplete', 'no_tiles'}.contains(status)) {
+    if (!_knownStatuses.contains(status)) {
       text = '等待识别…';
       color = Colors.white38;
     }
