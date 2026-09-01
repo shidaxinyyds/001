@@ -447,6 +447,14 @@ class Engine:
         # 牌河稳定性历史：保留最近 DISCARD_HISTORY_FRAMES 帧的 disc_mpsz 长度。
         # 用于"当前帧 discards 显著少于历史最小值"时回退到历史最大稳定值。
         self._discard_history: deque = deque(maxlen=DISCARD_HISTORY_FRAMES)
+        # ===== 方向自检（旋转鲁棒性）=====
+        # 真机截屏：竖屏手机 + 横屏麻将游戏时，MediaProjection 的 VirtualDisplay
+        # 被强制成横屏缓冲，横屏游戏在里面被系统旋转 90° 塞入。结果所有牌都"横过来"，
+        # 宽高比 < MIN_TILE_ASPECT 全被 _apply_conf 滤掉 → 表现为"一张牌都识别不出"。
+        # 这里在 0/90/180/270 四个方向各探一次，锁定"识别到牌最多"的方向；
+        # 中途方向变化（用户旋转手机/切换 App）连续 3 帧 0 牌时自动解锁重探。
+        self._orient: Optional[int] = None
+        self._orient_zerocount: int = 0
 
     def start(self):
         pass
@@ -698,6 +706,57 @@ class Engine:
         self._last_hand_y = sum(d[0][1] for d in chosen) / len(chosen)
         return chosen
 
+    def _probe_orientation(self, image: CVImage):
+        """探测最佳方向，规避"竖屏截横屏游戏 → 牌被旋转 90° → 全滤掉"的坑。
+
+        在 0/90/180/270 四个方向各跑一次 detect_all_rows，选"识别到牌最多"的方向
+        （有长牌行 ≥8 张的方向额外加权，因为它最像真实手牌行）。
+        返回 (rot, rotated_image)。rot 为需要施加到原图上的顺时针旋转角度。
+        """
+        det = self.get_detector()
+        if det is None:
+            return 0, image
+        best_rot = 0
+        best_score = -1
+        best_img = image
+        variants = [
+            (0, image),
+            (90, cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)),
+            (180, cv2.rotate(image, cv2.ROTATE_180)),
+            (270, cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)),
+        ]
+        for rot, rim in variants:
+            try:
+                rows = det.detect_all_rows(rim)
+            except Exception:
+                traceback.print_exc()
+                rows = []
+            n = sum(len(r) for r in rows)
+            has_long = any(len(r) >= 8 for r in rows)
+            score = n + (8 if has_long else 0)
+            if score > best_score:
+                best_score = score
+                best_rot = rot
+                best_img = rim
+        return best_rot, best_img
+
+    def _apply_orientation(self, image: CVImage) -> CVImage:
+        """按当前锁定的方向把图旋到规范横屏朝向。未锁定时做一次探测并锁定。"""
+        if self._orient is None:
+            rot, image = self._probe_orientation(image)
+            self._orient = rot
+            self._orient_zerocount = 0
+            if rot != 0:
+                print(f"[engine] 方向自检锁定 {rot}°（原图疑似被旋转）")
+            return image
+        if self._orient == 90:
+            return cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+        if self._orient == 180:
+            return cv2.rotate(image, cv2.ROTATE_180)
+        if self._orient == 270:
+            return cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return image
+
     def process(self, image: CVImage) -> Optional[EngineResult]:
         try:
             # ===== 崩溃兜底（C 层 SIGSEGV 不可被 Python try/except 捕获）=====
@@ -707,6 +766,10 @@ class Engine:
             if not _is_valid_image(image):
                 return _error_result("decode_error",
                                      "图像数据非法（空/坏尺寸/坏 dtype），已安全跳过")
+
+            # ===== 方向归一（旋转鲁棒性）=====
+            # 必须在帧差/检测之前做，保证后续所有几何都基于规范朝向。
+            image = self._apply_orientation(image)
 
             start_time = time.time()
 
@@ -962,6 +1025,21 @@ class Engine:
                     remaining = max(0, wall_total - known)
                     dead = sum(1 for i in avail_list if hand_counts[i] + fc[i] >= 4)
             self._discard_history.append(disc_mpsz)
+
+            # ===== 方向自愈：连续 3 帧整帧 0 牌 → 解锁重探方向 =====
+            # 用户中途旋转手机/切后台再回来，VirtualDisplay 朝向可能变了，
+            # 旧锁定的方向不再适用。此时重新探测，避免永久卡在 0 牌。
+            total_detected = (len(hand_mpsz) // 2) + (len(disc_mpsz_out) // 2)
+            if total_detected == 0:
+                self._orient_zerocount += 1
+                if self._orient_zerocount >= 3:
+                    print("[engine] 连续 3 帧 0 牌，解锁方向重探")
+                    self._orient = None
+                    self._last_hand_y = None
+                    self._tile_voter.reset()
+                    self._frame_skipper = _FrameSkipper()
+            else:
+                self._orient_zerocount = 0
 
             # ===== 冷启动递减 =====
             # 每完整识别一帧（命中"实际跑了 _detect_once"的路径），递减；扣到 0 后
