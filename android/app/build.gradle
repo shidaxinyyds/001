@@ -92,9 +92,8 @@ chaquopy {
         // Portable: chaquopy auto-detects python3; the previous Nix path only works inside a nix-shell.
         buildPython("python3")
     }
-    // 把训练好的 .tflite 模型随 APK 发布；assets 会被 chaquopy 原样打入 app.imy。
-    sourceSets {
-        main.assets.srcDirs += ['src/main/python/tflite_assets']
-    }
+    // tflite_assets/ 目录在 src/main/python/ 下，Chaquopy 默认就会扫描
+    // src/main/python/ 所有文件并打包进 assets/chaquopy/app.imy，所以模型随 APK
+    // 自动发布，无需额外 sourceSets 配置（之前手写的 sourceSets 块编译失败）。
 }
 
