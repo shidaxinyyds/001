@@ -11,10 +11,17 @@ Public API (mirrors structural.py's per-tile classifier contract):
     predict_batch(images) -> list     # batch version, much faster for full hand
 
 Class index → mpsz mapping (34 classes):
-    0-8   → 1m..9m  (万)
-    9-17  → 1p..9p  (筒)
-    18-26 → 1s..9s  (条)
-    27-33 → 1z..7z  (字牌: 东 南 西 北 中 发 白)
+    alphabetical 顺序（与 train.py flow_from_directory class_indices 一致，**也是 labels.txt
+    实际写入顺序**）：
+        0=1m  1=1p  2=1s  3=1z
+        4=2m  5=2p  6=2s  7=2z
+        8=3m  9=3p 10=3s 11=3z
+       12=4m 13=4p 14=4s 15=4z
+       16=5m 17=5p 18=5s 19=5z
+       20=6m 21=6p 22=6s 23=6z
+       24=7m 25=7p 26=7s 27=7z
+       28=8m 29=8p 30=8s
+       31=9m 32=9p 33=9s
 """
 import os
 import threading
@@ -23,17 +30,24 @@ from typing import List, Optional
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# Class index ↔ mpsz mapping (frozen — MUST match train.py LABEL_LIST order)
+# Class index ↔ mpsz mapping
+#
+# **CRITICAL**: LABEL_LIST 顺序必须与 train.py 的 flow_from_directory 输出一致
+# (alphabetical: 1m,1p,1s,1z,2m,2p,2s,2z,...,9s)。否则模型输出 idx 会映射到
+# 错误的牌面，引擎整套识别错位。labels.txt 在 train_data/model/ 与
+# tflite_assets/ 副本均按此序写入；不要手动改其中之一。
 # ---------------------------------------------------------------------------
-LABEL_LIST: List[str] = []
-for _n in range(1, 10):
-    LABEL_LIST.append(f"{_n}m")
-for _n in range(1, 10):
-    LABEL_LIST.append(f"{_n}p")
-for _n in range(1, 10):
-    LABEL_LIST.append(f"{_n}s")
-for _n in range(1, 8):
-    LABEL_LIST.append(f"{_n}z")
+LABEL_LIST: List[str] = [
+    "1m", "1p", "1s", "1z",
+    "2m", "2p", "2s", "2z",
+    "3m", "3p", "3s", "3z",
+    "4m", "4p", "4s", "4z",
+    "5m", "5p", "5s", "5z",
+    "6m", "6p", "6s", "6z",
+    "7m", "7p", "7s", "7z",
+    "8m", "8p", "8s",
+    "9m", "9p", "9s",
+]
 NUM_CLASSES: int = len(LABEL_LIST)  # 34
 
 # Model input shape (frozen — MUST match train.py TFLite export)

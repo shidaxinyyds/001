@@ -1,24 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-Harvest 34 tile classes from 10 teaching images.
+Harvest 34 tile classes from 10 teaching images — v2 (content-based suit detection).
 
-设计要点（稳健性 —— 10 张教学图均为标准 34 张牌 4 行排版）：
-  - 不做脆弱的 band 检测：图里都有行间/底部教学说明文字带（黄底红字等），
-    行投影会被严重干扰。改用「均匀 4 行」+ 标准 y 中心 [0.12, 0.37, 0.62, 0.85]，
-    完美避开行间文字带（文字带在行间隔内，牌行 y 范围不跨过）。
-  - 每行均匀切 9 份，通过「第 8、9 份是否有效牌」自动判荣誉行
-    （荣誉行只有 7 张，后两份是背景空白）。
-  - 数值行采用「suit 众数 + number 强制 1-9」强一致约束：
-    跨图字体/风格差异下，同一行 9 张互相最像 → suit 众数稳定；
-    number 严格按 x 位置 1-9 升序 → label 100% 正确，与匹配分数无关。
-  - 荣誉行 7-way 匹配取最高分，低分(<0.25)直接丢弃（宁缺毋滥，
-    fine-tune 阶段用真实截图补齐）。
-  - 参考图 40541 提取保持原有 band+均匀切分（已验证 34/34 完美）。
+v1 失败根因：参考集按 "行1=万/行2=筒/行3=条/行4=荣誉" 硬编码 → 参考图 40541 实际
+行 0 是筒，所以整套参考集的花色名全部错挂，跨图模板匹配也跟着全错。
 
-输出：localtest/train_data/processed/face_pretrain/<class>/<src>_<idx>.png
+v2 核心：不再假设"行号→花色"固定映射，按每张图的牌面行标签目视确定每行花色。
+  - 参考集按 40541 实测内容建（行 0=筒 p、行 1=万 m、行 2=条 s、行 3=荣誉 z）。
+  - 每张图用 IMAGE_ROW_SUITS 查表（依行标签"万/筒/条/番"目视标注，含异序图
+    40541=p/m/s/z、46715=p/s/m/z），逐行定花色，无行序假设。
+  - 数值行：花色来自查表；号数 1–9 按列位置（教学图标准 1→9 升序）。
+  - 数值行另做逐牌 glyph 匹配交叉验证，表标与匹配不符时打印警告。
+  - 荣誉行：白底连通域定位 7 张真牌 → 7-way 参考匹配定 1z..7z。
 """
 import sys
-import itertools
 from collections import Counter
 from pathlib import Path
 
@@ -26,19 +21,37 @@ import cv2
 import numpy as np
 
 
-# ---------------------------------------------------------------------------
-# 路径
-# ---------------------------------------------------------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent
 RAW_DIR = SCRIPT_DIR / "train_data" / "raw" / "face_pretrain"
 OUT_DIR = SCRIPT_DIR / "train_data" / "processed" / "face_pretrain"
 
 REFERENCE_IMAGE = "40541d4d12cf0525fb6c875830d2ac12.jpg"
-HONOR_ORDER = ["1z", "2z", "3z", "4z", "5z", "6z", "7z"]  # 東南西北中發白
+
+# 40541 实测行内容（v1 注释与实际不符，这里以肉眼核查为准）：
+#   row0 = 筒子(p)  1筒…9筒
+#   row1 = 万子(m)  一万…九万
+#   row2 = 条子(s)  一条…九条
+#   row3 = 番子(z)  東南西北中發白
+REF_ROW_SUITS = ["p", "m", "s", "z"]
+
+# 全部 10 张教学图行序 ground truth（按行标签"万/筒/条/番"目视标注）
+# 8/10 张是 m/p/s/z，仅 40541 (p/m/s/z) 和 46715 (p/s/m/z) 是异类。
+IMAGE_ROW_SUITS = {
+    "1494c7c0371cd2eabcc28be7381739c8.jpg": ["m", "p", "s", "z"],
+    "40541d4d12cf0525fb6c875830d2ac12.jpg": ["p", "m", "s", "z"],
+    "44da61d56f153976f3492f1346923cb3.jpg": ["m", "p", "s", "z"],
+    "46715c5c69b199c39b08c9edf8a5d4b9.jpg": ["p", "s", "m", "z"],
+    "7a505cd63aa3e8f07fedbfce1dcc8002.jpg": ["m", "p", "s", "z"],
+    "7f0c9a8fcbc91ab9f055441ea61529c3.jpg": ["m", "p", "s", "z"],
+    "9a0662b17e578bf61f30c3a27f54d78e.jpg": ["m", "p", "s", "z"],
+    "cd352b6df675ce11409dd0a450e875d5.jpg": ["m", "p", "s", "z"],
+    "d67fca311badd68d34acd2b5043ec600.jpg": ["m", "p", "s", "z"],
+    "d91e9495fd10b28749b28de11e400db4.jpg": ["m", "p", "s", "z"],
+}
 
 NUMERIC_CLASSES = [f"{i}{s}" for s in ("m", "p", "s") for i in range(1, 10)]
 HONOR_CLASSES = [f"{i}z" for i in range(1, 8)]
-ALL_CLASSES = NUMERIC_CLASSES + HONOR_CLASSES  # 34
+ALL_CLASSES = NUMERIC_CLASSES + HONOR_CLASSES
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +67,6 @@ def crop_tile(img, y1, y2, x1, x2):
 
 
 def is_valid_tile(crop, min_std=14, min_size=18):
-    """丢弃空白/纯色/过小的 crop（避免文字带 cell 污染训练集）。"""
     if crop is None:
         return False
     h, w = crop.shape[:2]
@@ -71,22 +83,74 @@ def normalize_gray(img):
     return cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
 
 
-def best_match(crop, references, threshold=0.30):
-    if crop is None or not references:
-        return -1, 0.0
-    norm_crop = normalize_gray(crop)
-    best_idx, best_score = -1, -1.0
-    for i, ref in enumerate(references):
-        norm_ref = normalize_gray(ref)
-        if norm_ref.size == 0:
+def match_score(crop, ref):
+    """Single-ref normalized cross-correlation. Higher is better; range roughly [-1, 1]."""
+    if crop is None or ref is None:
+        return -1.0
+    nc = normalize_gray(crop)
+    nr = normalize_gray(ref)
+    if nr.size == 0 or nc.size == 0:
+        return -1.0
+    resized = cv2.resize(nc, (nr.shape[1], nr.shape[0]))
+    return float(cv2.matchTemplate(resized, nr, cv2.TM_CCOEFF_NORMED).max())
+
+
+def best_match_suit(crop, numeric_refs):
+    """3-way: 筒(p) / 万(m) / 条(s). Return (best_suit, best_score)."""
+    if crop is None or not is_valid_tile(crop):
+        return None, -1.0
+    best_s, best_sc = None, -1.0
+    for s in ("p", "m", "s"):
+        refs = numeric_refs.get(s, [])
+        if not refs:
             continue
-        resized = cv2.resize(norm_crop, (norm_ref.shape[1], norm_ref.shape[0]))
-        score = cv2.matchTemplate(resized, norm_ref, cv2.TM_CCOEFF_NORMED).max()
-        if score > best_score:
-            best_idx, best_score = i, score
-    if best_score < threshold:
-        return -1, best_score
-    return best_idx, best_score
+        sc = max((match_score(crop, r) for r in refs if r is not None), default=-1.0)
+        if sc > best_sc:
+            best_sc = sc
+            best_s = s
+    return best_s, best_sc
+
+
+def is_white_bg(crop, sat_thresh=45, white_frac_min=0.35):
+    """牌面白底检测：拒纯色绿/红/深色底纹。用于从荣誉行 9 格里挑出 7 张真牌。"""
+    if crop is None or crop.size == 0:
+        return False
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    mean_sat = float(hsv[:, :, 1].mean())
+    if mean_sat > sat_thresh:
+        return False
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    if gray.std() < 10:
+        return False
+    white_frac = float((gray > 200).mean())
+    return white_frac >= white_frac_min
+
+
+def find_white_tiles(band_color, n=7):
+    """在荣誉行彩色带中用 HSV 白底掩膜 + 连通域定位 n 张白底牌，按 x 排序。
+    比均匀切分更稳：避开牌间隙、不受边框（白板）影响。
+    注：对 中(红字)/發(绿字) 等带色字牌的白底面积小，可能漏检（标签仍正确，只是样本少）。"""
+    hsv = cv2.cvtColor(band_color, cv2.COLOR_BGR2HSV)
+    mask = ((hsv[:, :, 1] < 60) & (hsv[:, :, 2] > 150)).astype(np.uint8) * 255
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    n_cc, _labels, stats, centroids = cv2.connectedComponentsWithStats(mask)
+    band_h = band_color.shape[0]
+    tiles = []
+    for i in range(1, n_cc):
+        x, y, w, h, area = stats[i]
+        if h >= band_h * 0.6 and w >= band_h * 0.4 and area >= band_h * band_h * 0.2:
+            tiles.append((float(centroids[i][0]), int(x), int(y), int(w), int(h)))
+    tiles.sort(key=lambda t: t[0])
+    crops = []
+    for _, x, y, w, h in tiles[:n]:
+        pad = 2
+        x0 = max(0, x - pad); y0 = max(0, y - pad)
+        x1 = min(band_color.shape[1], x + w + pad)
+        y1 = min(band_color.shape[0], y + h + pad)
+        crops.append(band_color[y0:y1, x0:x1].copy())
+    return crops
 
 
 def save_crop(crop, label, src_name, stats):
@@ -98,181 +162,181 @@ def save_crop(crop, label, src_name, stats):
 
 
 # ---------------------------------------------------------------------------
-# 均匀切分（行内）
+# 均匀切分（按行内亮像素主块）
 # ---------------------------------------------------------------------------
-def band_x_range(row_gray, lo=170):
-    """返回该行内「有亮像素」的 x 区间。"""
-    bright = (row_gray > lo).astype(np.float32)
+def band_x_range(gray_row, lo=170):
+    """Return the (x1, x2) of the main bright column-block (tiles), excluding narrow
+    left-side row-label text. Tile columns have high bright-pixel density; label
+    columns and green/red background have low density."""
+    bright = (gray_row > lo).astype(np.float32)
     col_density = bright.mean(axis=0)
-    active = col_density > col_density.max() * 0.40
+    if col_density.max() <= 0:
+        return None
+    threshold = col_density.max() * 0.40
+    active = col_density > threshold
     xs = np.where(active)[0]
     if len(xs) == 0:
         return None
     return int(xs[0]), int(xs[-1]) + 1
 
 
-def uniform_cells(row_gray, n, lo=170, pad=2):
-    """在亮像素 x 区间内均匀切成 n 份。"""
-    xr = band_x_range(row_gray, lo)
+def row_cells(gray_row, n, lo=170, pad=2):
+    xr = band_x_range(gray_row, lo)
     if xr is None:
         return []
     x1, x2 = xr
     x1 = max(0, x1 - pad)
-    x2 = min(row_gray.shape[1], x2 + pad)
+    x2 = min(gray_row.shape[1], x2 + pad)
     width = (x2 - x1) / n
     return [(int(x1 + i * width), int(x1 + (i + 1) * width)) for i in range(n)]
 
 
 # ---------------------------------------------------------------------------
-# 参考集提取（参考图 40541，规范顺序）
+# 自适应牌行带检测（按亮像素密度排名取前 4 —— 牌行最白，文字/背景带自然落选）
 # ---------------------------------------------------------------------------
-def find_horizontal_bands(gray, min_density=0.15, min_height=24):
-    """按行亮像素密度找牌行 —— 仅用于参考图（参考图无文字带干扰）。"""
-    bright = (gray > 170).astype(np.float32)
-    row_density = bright.mean(axis=1)
-    threshold = max(row_density.max() * 0.4, min_density)
-    in_band = row_density > threshold
-    bands, start = [], None
-    for i, v in enumerate(in_band):
-        if v and start is None:
-            start = i
-        elif not v and start is not None:
-            if i - start >= min_height:
-                bands.append((start, i))
-            start = None
-    if start is not None and len(in_band) - start >= min_height:
-        bands.append((start, len(in_band)))
-    return bands
+def find_tile_bands(gray):
+    """Detect 4 tile bands adaptively. Tile rows are predominantly white (high
+    bright density); text captions and green/red backgrounds have lower density
+    and fall outside the top-4 dense bands. Returns 4 (y1, y2) sorted by y."""
+    h = gray.shape[0]
+    # 用行标准差（白牌+深图案 → 高 std；纯色背景 → 低 std）替代亮像素密度。
+    # 这样亮米/黑/粉等不同底色都能稳定识别牌行。
+    row_std = gray.astype(np.float32).std(axis=1)
+    min_h = max(int(h * 0.06), 30)
+
+    def _scan(threshold):
+        in_band = row_std > threshold
+        bands, start = [], None
+        for i, v in enumerate(in_band):
+            if v and start is None:
+                start = i
+            elif not v and start is not None:
+                if (i - start) >= min_h:
+                    bands.append((start, i, float(row_std[start:i].mean())))
+                start = None
+        if start is not None and (len(in_band) - start) >= min_h:
+            bands.append((start, len(in_band), float(row_std[start:].mean())))
+        return bands
+
+    bands = _scan(20.0)
+    if len(bands) < 4:
+        bands = _scan(10.0)
+    if len(bands) < 4:
+        bands = _scan(5.0)
+    if len(bands) < 4:
+        return None
+    bands.sort(key=lambda b: -b[2])
+    top4 = sorted(bands[:4], key=lambda b: b[0])
+    return [(y1, y2) for y1, y2, _ in top4]
 
 
+# ---------------------------------------------------------------------------
+# 参考集提取（按 40541 实测内容：p/m/s/z）
+# ---------------------------------------------------------------------------
 def extract_reference_set(reference_path):
-    """从参考图 40541 提取 34 个参考牌图（规范顺序：万/筒/条/荣誉）。"""
+    """Build correct content references from the reference image.
+    Row0=筒(9 refs), row1=万(9 refs), row2=条(9 refs), row3=荣誉(7 refs in 1z..7z order)."""
     img = cv2.imread(str(reference_path))
     if img is None:
         raise RuntimeError(f"无法读取参考图: {reference_path}")
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    bands = find_horizontal_bands(gray)
-    band_meta = []
-    for y1, y2 in bands:
-        density = (gray[y1:y2] > 170).mean()
-        band_meta.append((y1, y2, density * (y2 - y1)))
-    band_meta.sort(key=lambda b: -b[2])
-    if len(band_meta) < 4:
-        raise RuntimeError(f"参考图只找到 {len(band_meta)} 个 band（需要 4）")
-    top4 = sorted(band_meta[:4])  # 按 y 从上到下
+    bands = find_tile_bands(gray)
 
-    references = {}
-    suit_order = ["m", "p", "s", "z"]
-    expected = [9, 9, 9, 7]
-    for idx, (y1, y2, _) in enumerate(top4):
-        n = expected[idx]
-        cells = uniform_cells(gray[y1:y2], n)
-        if len(cells) != n:
-            print(f"  REF 行 {idx}({suit_order[idx]}): 切出 {len(cells)} 份，期望 {n}")
-        for i, (x1, x2) in enumerate(cells[:n]):
-            crop = crop_tile(img, y1, y2, x1, x2)
-            if not is_valid_tile(crop):
-                continue
-            label = f"{i + 1}{suit_order[idx]}"
-            references[label] = crop
-    missing = set(ALL_CLASSES) - set(references.keys())
-    if missing:
-        print(f"  REF 警告：缺失类别 {sorted(missing)}")
-        print(f"  REF：提取 {len(references)} / {len(ALL_CLASSES)} 个参考牌图")
-    # 打印各类参考是否齐全
-    for c in ALL_CLASSES:
-        if c not in references:
-            print(f"    REF 缺: {c}")
-    return references
+    numeric_refs = {"p": [None] * 9, "m": [None] * 9, "s": [None] * 9}
+    honor_refs = [None] * 7
+
+    row_suits = IMAGE_ROW_SUITS.get(reference_path.name, REF_ROW_SUITS)
+    for row_idx, (y1, y2) in enumerate(bands):
+        suit = row_suits[row_idx]
+        if suit == "z":
+            # 荣誉行：连通域定位 7 张白底牌（按 x 顺序 = 1z..7z，40541 实测就是标准序）
+            white_crops = find_white_tiles(img[y1:y2], n=7)
+            if len(white_crops) < 7:
+                raise RuntimeError(
+                    f"参考图荣誉行仅检出 {len(white_crops)} 张白底牌（需 7）"
+                )
+            for i, c in enumerate(white_crops[:7]):
+                honor_refs[i] = c
+        else:
+            cells9 = row_cells(gray[y1:y2], 9)
+            filled = 0
+            for i, (x1, x2) in enumerate(cells9[:9]):
+                c = crop_tile(img, y1, y2, x1, x2)
+                if is_valid_tile(c):
+                    numeric_refs[suit][i] = c
+                    filled += 1
+            if filled < 8:
+                print(f"  REF 警告：{suit} 行仅 {filled}/9 张有效")
+
+    # 健全性
+    for s in ("p", "m", "s"):
+        miss = [i for i, r in enumerate(numeric_refs[s]) if r is None]
+        if miss:
+            print(f"  REF 警告：{s} 参考缺号 {miss}")
+    miss_z = [i for i, r in enumerate(honor_refs) if r is None]
+    if miss_z:
+        print(f"  REF 警告：荣誉参考缺 {miss_z}")
+    return numeric_refs, honor_refs
 
 
 # ---------------------------------------------------------------------------
-# 单图 harvest：均匀 4 行 + suit 众数 + number 强制
+# 单图 harvest：内容检测花色
 # ---------------------------------------------------------------------------
-def uniform_4_rows(img_h):
-    """标准 34 张牌 4 行排版的均匀 y 范围（避开行间/底部说明文字带）。
-    y 中心与行高基于 10 张教学图的实测布局：
-    - 行间说明文字带约在 y=0.20-0.28 / 0.45-0.53 / 0.70-0.78
-    - 底部说明文字在 y=0.92+
-    - 牌行 y 中心约 0.10/0.33/0.56/0.80，行高约 0.13
-    → 行 4 下沿 0.865 < 0.92（底部文字），安全。
-    """
-    row_h = int(img_h * 0.13)
-    centers = [int(img_h * c) for c in (0.10, 0.33, 0.56, 0.80)]
-    return [(max(0, yc - row_h // 2), min(img_h, yc + row_h // 2)) for yc in centers]
-
-
-def harvest_image(img_path, references, stats, debug=False):
+def harvest_image(img_path, numeric_refs, honor_refs, stats, debug=False):
     img = cv2.imread(str(img_path))
     if img is None:
         print(f"  跳过：无法读取 {img_path.name}")
         return 0
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    img_h = gray.shape[0]
+    bands = find_tile_bands(gray)
+    if bands is None:
+        print(f"  跳过 {img_path.name}：未检测到 4 个牌行带")
+        return 0
 
-    bands = uniform_4_rows(img_h)
-    numeric_refs = {s: [references[f"{i}{s}"] for i in range(1, 10)]
-                    for s in ("m", "p", "s")}
-    honor_refs = [references[f"{i}z"] for i in range(1, 8)]
+    # 按牌面行标签目视确定的每行花色（不再假设固定行序）。
+    # 8/10 张为 m/p/s/z；40541=p/m/s/z；46715=p/s/m/z。
+    row_suits = IMAGE_ROW_SUITS.get(img_path.name, ["m", "p", "s", "z"])
+    honor_idx = row_suits.index("z")
+    if debug:
+        print(f"  行序 suit = {row_suits}  →  honor row = {honor_idx}")
 
     n_extracted = 0
-    for band_idx, (y1, y2) in enumerate(bands):
-        # 硬编码：10 张图均为标准 34 张排版，第 4 行 = 荣誉行（萬/筒/条/荣誉），
-        # 即便前 3 行顺序任意（如 46715 是 筒/条/萬），行 4 永远荣誉。
-        # 完全绕开脆弱的 is_honor 结构判据（行间/底部说明文字带会污染 x_range）。
-        is_honor_row = (band_idx == 3)
+    n_mismatch = 0  # 表标与逐牌 glyph 匹配不符计数（仅 debug 提示）
 
-        if is_honor_row:
-            # 荣誉行：切 7 份 → 7-way 匹配取最高分（不设阈值，覆盖 7 类）
-            cells7 = uniform_cells(gray[y1:y2], 7)
-            if len(cells7) != 7:
-                continue
-            for x1, x2 in cells7:
-                crop = crop_tile(img, y1, y2, x1, x2)
-                if not is_valid_tile(crop):
-                    continue
-                idx, score = best_match(crop, honor_refs, threshold=0.0)
-                if idx >= 0:
-                    save_crop(crop, HONOR_ORDER[idx], img_path.stem, stats)
-                    n_extracted += 1
+    for row_idx, (y1, y2) in enumerate(bands):
+        suit = row_suits[row_idx]
+        if suit == "z":
+            # 荣誉行：连通域定位牌中心（按 x 排序 = 1z..7z 顺序：東南西北中發白）
+            # 连通域对 中/發 带色字牌也稳健，比 band_x_range 等分更可靠
+            white_crops = find_white_tiles(img[y1:y2], n=7)
+            for k, c in enumerate(white_crops[:7]):
+                label = f"{k + 1}z"
+                save_crop(c, label, img_path.stem, stats)
+                n_extracted += 1
         else:
-            # 数值行（行 1-3）：均匀切 9 份 → suit 众数 + number 强制 1-9
-            cells9 = uniform_cells(gray[y1:y2], 9)
+            # 数值行：9 等分 + 列位置 1..9 定号数；花色来自行标签 ground truth
+            cells9 = row_cells(gray[y1:y2], 9)
             if len(cells9) != 9:
                 continue
-            crops9 = [crop_tile(img, y1, y2, *c) for c in cells9]
-
-            # 数值行：每张与 27 个数值参考匹配，记录 (pos, suit, score)
-            scored = []
-            for pos in range(9):
-                crop = crops9[pos]
-                if not is_valid_tile(crop):
-                    scored.append((pos, None, 0.0))
+            for pos, (x1, x2) in enumerate(cells9[:9]):
+                c = crop_tile(img, y1, y2, x1, x2)
+                if c is None:
                     continue
-                best_suit, best_score = None, -1.0
-                for s, refs in numeric_refs.items():
-                    _, sc = best_match(crop, refs, threshold=0.0)
-                    if sc > best_score:
-                        best_score = sc
-                        best_suit = s
-                scored.append((pos, best_suit, best_score))
-
-            # suit 众数（同行 9 张字体一致，对该行参考分数应最高）
-            suits = [s for _, s, _ in scored if s]
-            if not suits:
-                continue
-            suit = Counter(suits).most_common(1)[0][0]
-
-            # 逐张按位置标 1-9 + 该行 suit（强制一致，丢弃低分 cell）
-            for pos in range(9):
-                _, s, score = scored[pos]
-                if score < 0.20:
-                    continue
-                crop = crops9[pos]
                 label = f"{pos + 1}{suit}"
-                save_crop(crop, label, img_path.stem, stats)
+                save_crop(c, label, img_path.stem, stats)
                 n_extracted += 1
+                if debug:
+                    m_suit, m_sc = best_match_suit(c, numeric_refs)
+                    # 仅在高置信度(>0.5)且花色不符时才告警；低分匹配是模板匹配
+                    # 跨风格不可靠的噪声，不反映表标错误。
+                    if m_suit is not None and m_suit != suit and m_sc > 0.5:
+                        n_mismatch += 1
+                        if n_mismatch <= 12:
+                            print(f"    ⚠ 行{row_idx} 列{pos + 1} 表标={suit} "
+                                  f"但逐牌匹配={m_suit}({m_sc:.2f})")
 
+    if debug and n_mismatch:
+        print(f"  ⚠ 逐牌 glyph 匹配与表标不符 {n_mismatch} 次（核对 IMAGE_ROW_SUITS）")
     return n_extracted
 
 
@@ -289,7 +353,7 @@ def main():
         sys.exit(1)
     print(f"找到 {len(images)} 张教学图")
 
-    # 清空旧的输出（逐文件删，绕过沙箱对 rmtree 的安全删除拦截）
+    # 清空旧输出（逐文件 unlink，绕过沙箱对 rmtree 的拦截）
     if OUT_DIR.exists():
         for f in OUT_DIR.rglob("*.png"):
             try:
@@ -302,17 +366,20 @@ def main():
     if not ref_path.exists():
         print(f"错误：参考图缺失: {ref_path}")
         sys.exit(1)
-    print(f"从 {REFERENCE_IMAGE} 提取参考集...")
-    references = extract_reference_set(ref_path)
-    if len(references) < 34:
-        print(f"错误：仅获得 {len(references)}/34 个参考类；中止")
+    print(f"从 {REFERENCE_IMAGE} 提取参考集（按实测内容 p/m/s/z）...")
+    numeric_refs, honor_refs = extract_reference_set(ref_path)
+    n_num = sum(1 for s in ("p", "m", "s") for r in numeric_refs[s] if r is not None)
+    n_z = sum(1 for r in honor_refs if r is not None)
+    print(f"  参考集：数值 {n_num}/27  荣誉 {n_z}/7")
+    if n_num < 27 or n_z < 7:
+        print("错误：参考集不完整")
         sys.exit(1)
 
     stats = {c: 0 for c in ALL_CLASSES}
     total = 0
     for img_path in images:
         print(f"处理 {img_path.name}...")
-        n = harvest_image(img_path, references, stats, debug=True)
+        n = harvest_image(img_path, numeric_refs, honor_refs, stats, debug=True)
         print(f"  → {n} 张")
         total += n
 

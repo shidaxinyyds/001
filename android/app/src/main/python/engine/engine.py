@@ -772,6 +772,55 @@ class Engine:
                 fr = [(r, self._apply_conf(r, l, c), c) for (r, l, c) in row]
                 filtered.append(fr)
 
+            # ===== TFLite 二次确认（可选、可热更、未来 hook）=====
+            # 在 structural.py 几何判定后、投票前，对每张已通过 _apply_conf 的牌
+            # 再用 TFLite 模型"看一眼"。**TFLite 任何故障都静默 fallback**：
+            #   - 模型未部署（is_available()=False）→ 整段跳过，behavior 退化为纯 structural
+            #   - predict 异常/超时/None → 该牌保留 structural 标签
+            #   - tflite conf < HIGH_CONF → 不覆盖，保留 structural
+            # 仅当 tflite conf ≥ HIGH_CONF（极高置信度）才覆盖 structural 的标签，
+            # 防止低 acc 模型污染识别。
+            # 当前 v3 模型（272 张/34 类）acc ≈14%、top-1 conf ≤0.09，远低于门槛，
+            # **本轮对线上识别 0 贡献**——但代码完整，未来 fine-tune 提升 acc 后自动启用。
+            try:
+                from recognition import tflite_classifier  # noqa: E402
+                HIGH_CONF = 0.70
+                if tflite_classifier.is_available():
+                    crops: list = []
+                    crop_locs: list = []  # (row_idx, det_idx)
+                    for ri, row in enumerate(filtered):
+                        for di, (r, l, c) in enumerate(row):
+                            if l is None:
+                                continue
+                            x, y, w, h = r
+                            if h <= 0 or w <= 0:
+                                continue
+                            crop = image[y:y + h, x:x + w]
+                            if crop.size == 0:
+                                continue
+                            crops.append(crop)
+                            crop_locs.append((ri, di))
+                    if crops:
+                        preds = tflite_classifier.predict_batch(crops)
+                        n_overridden = 0
+                        for (ri, di), p in zip(crop_locs, preds):
+                            if p is None:
+                                continue
+                            if p["confidence"] < HIGH_CONF:
+                                continue
+                            r, l_orig, c_orig = filtered[ri][di]
+                            if p["tile"] != l_orig:
+                                # 用 tflite 高置信覆盖；同时提升 conf，避免被
+                                # 后续 _apply_conf 二次过滤掉
+                                filtered[ri][di] = (r, p["tile"],
+                                                     max(c_orig, p["confidence"]))
+                                n_overridden += 1
+                        if n_overridden:
+                            print(f"[engine] tflite 高置信覆盖 {n_overridden} 张")
+            except Exception as e:  # noqa: BLE001
+                # 任何导入/调用异常 → 静默降级，不影响主流程
+                pass
+
             # 多帧投票：把所有牌（含牌河）按位置投入投票窗口，挡掉单帧抖动
             # （尤其筒/索被误判成白板的刷屏）。跨行 y 差距大不会串。
             flat = [(r, l, c) for row in filtered for (r, l, c) in row]
