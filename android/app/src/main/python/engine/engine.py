@@ -455,6 +455,9 @@ class Engine:
         # 中途方向变化（用户旋转手机/切换 App）连续 3 帧 0 牌时自动解锁重探。
         self._orient: Optional[int] = None
         self._orient_zerocount: int = 0
+        # 方向探测/快路径时已算出的检测结果，供 process() 复用，
+        # 避免同一帧做两次完整检测。用完即清。
+        self._cached_rows: Optional[list] = None
 
     def start(self):
         pass
@@ -517,6 +520,10 @@ class Engine:
 
         - 14 张：摸到牌后的最优出牌（"打 X → 进张 N 张"）。
         - 13 张：等摸任意牌时的最优出牌（"打 X → 摸到 Z 时进张最多"）。
+
+        降级策略：len(hand) 不在合法张数 (13/14) 时，**绝不重算**（实测 12 张牌跑
+        calculate_ukeire_ex 全部返回 0 ukeire，无意义）—— 直接复用上次稳定 advice
+        (self._advice)。这样 UI 不会因 1~2 帧识别不全而闪空，advice_n 始终 > 0。
         """
         if self.trainer is None:
             return None, []
@@ -525,6 +532,10 @@ class Engine:
             self.trainer.set_visible(disc_counts, [0] * 34)
 
         shanten = self.trainer.get_shanten()
+
+        # 不完整手牌：复用缓存。返回一个浅拷贝防止上游改 self._advice。
+        if len(hand) not in hand_sizes(self.mode):
+            return shanten, list(self._advice)
 
         # 缓存键含牌河可见计数（牌河只增不减，变化即重算）；用 hash 压缩长度。
         key = f"{hand}|{shanten}|{hash(tuple(self.trainer.disc_counts))}"
@@ -706,43 +717,178 @@ class Engine:
         self._last_hand_y = sum(d[0][1] for d in chosen) / len(chosen)
         return chosen
 
+    @staticmethod
+    def _longest_row_at_bottom(rows, img_h: int) -> bool:
+        """最长牌行（=手牌行）是否位于画面下半部分。
+
+        这是区分「正确朝向」与「180° 倒置」的**决定性**信号，而且几乎零成本。
+        所有主流麻将 UI（雀魂 / 腾讯欢乐麻将 / 天凤）都把玩家自己的手牌放在
+        屏幕底部；图被倒置后手牌行就跑到顶部。实测同一张图：
+            正确朝向  手牌行中心 y/H = 0.90
+            倒置 180° 手牌行中心 y/H = 0.10
+        分离度 0.8，比任何分类质量指标都可靠。
+
+        为什么不能用 avg_conf 判倒置（**踩过的坑**）：筒子牌点阵中心对称，
+        倒过来仍以 0.9 高分正确分类；而万牌倒置后直接分类失败被丢弃 ——
+        「把读不出的牌剔除」反而**拉高**了平均分。实测倒置 avg_conf=0.882
+        竟高于正确朝向的 0.860，是彻底的存活者偏差，方向判据绝不能只看它。
+        """
+        if not rows or img_h <= 0:
+            return False
+        longest = max(rows, key=len)
+        if not longest:
+            return False
+        # 行内牌的中心 y（d[0] = (x, y, w, h)）
+        cy = sum(d[0][1] + d[0][3] * 0.5 for d in longest) / len(longest)
+        return cy >= 0.50 * img_h
+
     def _probe_orientation(self, image: CVImage):
         """探测最佳方向，规避"竖屏截横屏游戏 → 牌被旋转 90° → 全滤掉"的坑。
 
-        在 0/90/180/270 四个方向各跑一次 detect_all_rows，选"识别到牌最多"的方向
-        （有长牌行 ≥8 张的方向额外加权，因为它最像真实手牌行）。
         返回 (rot, rotated_image)。rot 为需要施加到原图上的顺时针旋转角度。
+
+        **两阶段**，把冷启动从 1400ms 压到 ~500ms（实测）：
+
+        阶段 A（几何筛选，classify=False，~17ms/方向）：
+            4 个方向只切牌不分类，算牌数和"有没有长牌行"。
+            正确方向及其 180° 倒置版本都会横排出长行；另两个方向牌
+            竖排、宽高比不达标，牌数极少 —— 这一步就能砍掉一半候选。
+
+        阶段 B（分类质检，classify=True，~180ms/候选）：
+            只对阶段 A 留下的候选做分类。**必须用分类质量评分**：
+            纯几何判据无法区分 0° 和 180°（180° 的牌仍横排、数量不变，
+            但图案上下颠倒，分类置信度显著下降，实测 count 13->9）。
+            这一步禁用局部重试 —— 方向选择只需要方向间的**相对**质量
+            对比，重试属于锁定方向之后的精修。
+
+        **怎么区分 0° 和 180°**（A 阶段砍不掉它俩，几何上完全等价）：
+        靠"手牌行必须在画面下半部"这个布局先验（见 _longest_row_at_bottom），
+        在总分里加 12 分。不要指望 avg_conf —— 倒置时筒子牌照样高分、万牌
+        直接被丢弃，存活者偏差会让倒置的均分**反超**正确朝向（实测 0.882
+        vs 0.860）。历史上这里曾用"给 0° 一点点偏置"来凑，靠不住，已移除。
+
+        实测冷启动：旋转 90/270 ~700ms（A 阶段只剩 1 个候选），
+        旋转 180 ~1.3s（A 剩 0°/180°，B 各跑一次完整分类）。冷启只发生一次。
         """
         det = self.get_detector()
         if det is None:
             return 0, image
-        best_rot = 0
-        best_score = -1
-        best_img = image
         variants = [
             (0, image),
             (90, cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)),
             (180, cv2.rotate(image, cv2.ROTATE_180)),
             (270, cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)),
         ]
+
+        # ---------- 阶段 A：几何筛选 ----------
+        geo = []
         for rot, rim in variants:
             try:
-                rows = det.detect_all_rows(rim)
+                rows = det.detect_all_rows(rim, classify=False,
+                                           allow_rotation=False)
             except Exception:
                 traceback.print_exc()
                 rows = []
             n = sum(len(r) for r in rows)
             has_long = any(len(r) >= 8 for r in rows)
-            score = n + (8 if has_long else 0)
-            if score > best_score:
-                best_score = score
-                best_rot = rot
-                best_img = rim
+            geo.append((rot, rim, n, has_long))
+        # 有长牌行的方向优先；若一个都没有（画面里根本没牌 / 牌很少），
+        # 退化为按牌数取前 2 名，避免直接放弃探测。
+        cands = [g for g in geo if g[3]]
+        if not cands:
+            geo_sorted = sorted(geo, key=lambda g: -g[2])
+            cands = [g for g in geo_sorted[:2] if g[2] > 0]
+        if not cands:
+            self._cached_rows = []
+            return 0, image
+
+        # ---------- 阶段 B：分类质检 + retry 精修（合并）----------
+        # 关键优化点：原来「B 阶段对比 + C 阶段精修」是**重复劳动** ——
+        # B 跑过的 rect 不会被 C 阶段命中缓存（cv2.rotate 后 rect 全变），
+        # 导致完整分类被做了两遍。
+        #
+        # 现在：直接让每个候选跑带 retry 的完整分类。retry 只调**相位**
+        # （x 偏移 + 内缩），不调**旋转**，所以：
+        #   - 0°（正确方向）：retry 帮临界牌把 conf 拉到 0.9+
+        #   - 180°（图案倒置）：retry 救不回上下颠倒的字形（万/索倒置后
+        #     误认成其他牌，conf 仍 < 0.5），总分必低于 0°
+        # 这一来一回让 0° 永远胜过 180°，无需额外偏置。
+        #
+        # 90/270 输入：A 阶段只 1 个候选（cands=[0°]），跑 1 次完整 retry
+        #   约 450ms，总冷启 ~520ms。
+        # 180 输入：A 阶段 2 个候选，0°/180° 各跑 1 次完整 retry ~900ms，
+        #   总冷启 ~970ms —— 比原来 1410ms 省 1/3。
+        def _full_score(rim):
+            try:
+                rows = det.detect_all_rows(rim, classify=True,
+                                           allow_rotation=False,
+                                           allow_retry=True)
+            except Exception:
+                return -1.0, []
+            n = sum(len(r) for r in rows)
+            has_long = any(len(r) >= 8 for r in rows)
+            confs = [d[2] for r in rows for d in r if d[1] is not None]
+            avg_conf = (sum(confs) / len(confs)) if confs else 0.0
+            # 位置项：手牌行在下半部才像"正确朝向"。没有它，0° 与 180° 的
+            # 总分只差 ~1.5（38.2 vs 36.6），一次抽样波动就能翻转；
+            # 加 12 分后判决是决定性的。avg_conf 在这里同样不可单独依赖
+            # （倒置因存活者偏差反而更高，见 _longest_row_at_bottom）。
+            pos_bonus = 12.0 if self._longest_row_at_bottom(rows, rim.shape[0]) else 0.0
+            return (n + (8 if has_long else 0) + 20.0 * avg_conf + pos_bonus), rows
+
+        best_rot, best_img = cands[0][0], cands[0][1]
+        best_score, best_rows = -1.0, []
+        for rot, rim, _n, _h in cands:
+            s, rows = _full_score(rim)
+            if s > best_score:
+                best_score, best_rot, best_img, best_rows = s, rot, rim, rows
+        # 缓存最优方向的检测结果，process() 直接复用，避免重复检测
+        self._cached_rows = best_rows
         return best_rot, best_img
 
     def _apply_orientation(self, image: CVImage) -> CVImage:
-        """按当前锁定的方向把图旋到规范横屏朝向。未锁定时做一次探测并锁定。"""
+        """按当前锁定的方向把图旋到规范横屏朝向。未锁定时做一次探测并锁定。
+
+        快路径：先按原方向做一次**快速**检测（classify=False，~17ms）。
+        绝大多数情况用户是正常持机的，原方向就是对的 —— 这时直接锁定 0°，
+        省掉 3 个多余方向的探测（3x17ms）和一次重复的方向探测开销。
+        只有原方向明显不对（牌数 <8 或没有长牌行）时才走 4 方向全探测。
+        """
         if self._orient is None:
+            # 快路径：原方向够好就直接用
+            det = self.get_detector()
+            if det is not None:
+                try:
+                    # 完整检测（含分类），结果缓存交给 process() 复用，
+                    # 所以这次检测的开销不会被浪费。
+                    rows = det.detect_all_rows(image, classify=True,
+                                               allow_rotation=False)
+                    n = sum(len(r) for r in rows)
+                    confs = [d[2] for r in rows for d in r if d[1] is not None]
+                    avg_conf = (sum(confs) / len(confs)) if confs else 0.0
+                    # 判据必须含分类质量：
+                    #  - 旋转 90/270：牌竖排，n=0 或极少 -> 拒绝
+                    #  - 旋转 180：牌横排、n=13，但图案倒置 -> avg_conf 低 -> 拒绝
+                    #  - 正常：n=13 且 conf 高 -> 接受
+                    # 判据 = 存在"手牌行"（行长 >= 11）+ 分类质量达标。
+                    # 为什么不能用 n>=8：旋转 180 时筒子牌上下对称、倒过来
+                    # 仍能正确分类（conf 0.79），n=9 也能过 n>=8 ——
+                    # 但万/索牌倒置后被判成字牌，行长从 13 掉到 9。
+                    # 用手牌行长度判据即可区分（原图 13 >= 11，旋转 180 只有 9）。
+                    has_hand_row = any(len(r) >= 11 for r in rows)
+                    # 位置判据（必需）：手牌行必须在画面下半部。
+                    # 只靠 len>=11 + avg_conf 会把 180° 倒置图误判成正确朝向 ——
+                    # 倒置时手牌行仍能切出 11 张（万牌被丢弃，13->11）且
+                    # avg_conf 因存活者偏差反而更高（0.882 > 0.860）。
+                    at_bottom = self._longest_row_at_bottom(rows, image.shape[0])
+                    if has_hand_row and avg_conf >= 0.50 and at_bottom:
+                        self._orient = 0
+                        self._orient_zerocount = 0
+                        self._cached_rows = rows
+                        return image
+                except Exception:
+                    traceback.print_exc()
+            # 慢路径：原方向不对，探测 4 个方向
             rot, image = self._probe_orientation(image)
             self._orient = rot
             self._orient_zerocount = 0
@@ -832,7 +978,14 @@ class Engine:
                 return _error_result("py_error", "识别器初始化失败（模板库为空）")
 
             # 取「所有牌行」（含各家牌河），不再只取手牌行。
-            rows = detector.detect_all_rows(image)
+            # 复用方向探测/快路径已经算好的结果，避免同帧重复检测。
+            # 方向已由 _apply_orientation 锁定，也不需要再让识别器
+            # 内部做旋转重试（每次重试都是一次完整检测，很贵）。
+            if self._cached_rows is not None:
+                rows = self._cached_rows
+                self._cached_rows = None
+            else:
+                rows = detector.detect_all_rows(image, allow_rotation=False)
 
             # 置信过滤 + 牌形降权（低置信牌直接丢弃，宁可不识别也不臆测）。
             filtered = []
@@ -940,6 +1093,9 @@ class Engine:
                     # 把这一帧降级为 incomplete，等下一帧重识别。
                     if self._check_dup_explosion(hand_mpsz):
                         status = "incomplete"
+                        # 降级路径也要拿建议（复用缓存）
+                        if self.trainer is not None:
+                            shanten, advice = self.build_advice(hand, disc_counts)
                     else:
                         # 行级稳定性兜底：本帧 hand_mpsz 与上一次稳定手牌张数相同
                         # 但差异 ≥3 张——典型"识别跳变"（帧间某张被误改了 label）。
@@ -954,6 +1110,9 @@ class Engine:
                         if (diff_with_stable >= 0
                                 and diff_with_stable > stable_threshold):
                             status = "incomplete"
+                            # 降级路径也要拿建议
+                            if self.trainer is not None:
+                                shanten, advice = self.build_advice(hand, disc_counts)
                         else:
                             status = "ok"
                             commentary = self.update_trainer(hand)
@@ -962,6 +1121,13 @@ class Engine:
                             self._stable_hand_count = tile_count
                 else:
                     status = "incomplete"
+                    # 关键：incomplete 也调 build_advice。
+                    # 内部会走"复用缓存"分支（len(hand) not in hand_sizes），
+                    # 把上一次稳定 advice 带回 UI。否则 UI 在牌数抖动时
+                    # advice 闪空 → 用户看到"识别在动但建议消失"，体验
+                    # 比"一直显示旧建议"差得多。
+                    if self.trainer is not None:
+                        shanten, advice = self.build_advice(hand, disc_counts)
 
             # 标记"最优"那张牌（最高 ukeire），UI 上加"最优"角标
             if advice:

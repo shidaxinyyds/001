@@ -17,6 +17,7 @@
 """
 
 import os
+import time
 from typing import Dict, List, Optional, Tuple
 
 import cv2
@@ -71,6 +72,19 @@ _GLYPH_TO_LABEL = {v: k for k, v in _HONOR_GLYPH.items()}
 
 # ------------------------------------------------------- 相对阈值（常量）
 FACE_INSET = 0.06            # 牌面内缩比例（去掉牌边框）
+
+# 牌面分类「局部重试」参数。
+# RETRY_CONF：低于此置信度就认为切图可能没对准，值得花代价重试。
+#   实测原图上 3m/9m/1s 的 conf 是 0.55~0.59（临界），筒子是 0.90+，
+#   取 0.62 刚好只圈住这几张有风险的牌（13 张里 <=3 张），不影响性能。
+# RETRY_OFFSETS：(dx, shrink) 候选。dx 为整体平移比例（相对牌宽），
+#   shrink 为左右各内缩比例。覆盖「相位偏了」和「切太宽含了邻牌边框」两种情况。
+RETRY_CONF = 0.62
+RETRY_OFFSETS = (
+    (-0.135, 0.0), (0.135, 0.0),
+    (-0.08, 0.0), (0.08, 0.0),
+    (0.0, 0.04), (-0.055, 0.04), (0.055, 0.04),
+)
 INK_MIN_FRAC = 0.035         # 低于此墨迹占比 -> 白板
 TILE_H_RATIO = 0.105         # 牌高初值（占屏幕短边）——只用于圈横条
 MIN_TILE_ASPECT = 0.52       # 牌宽/牌高 合理下限
@@ -78,6 +92,16 @@ MAX_TILE_ASPECT = 0.95       # 牌宽/牌高 合理上限（超界当误检丢�
 MAX_WORKING_EDGE = 1100      # 长边超过则降采样（性能）
 OUT_PENALTY = 0.6            # 排列掩码外墨迹的罚系数
 MIN_CONF = 0.30              # 低于此置信度的牌标记为低置信
+# 牌级缓存容差：归一化 16x16 缩略图的平均绝对差。
+# 实测（screenshot.jpg 13 张 GT，7 种扰动）：
+#   同一张牌在 JPEG95/75/55、亮度±30%、噪声σ=12、高斯模糊下的最大差异 = 0.13
+#   不同牌之间的最小差异 = 0.33（如 4p vs 5p、7s vs 9s）
+# 取 0.20 落在两者之间并偏向"误命中代价更高"的一侧：
+#   命中侧余量 0.20/0.13 = 1.5x，误判侧余量 0.33/0.20 = 1.65x
+# 另配 1 秒 TTL（见 _FACE_CACHE_TTL）兜底：任何误命中最多存活 1 秒。
+FACE_CACHE_TOL = 0.20
+# 缓存强制刷新周期（秒）。到期整体清空重新分类，防止误命中长期粘住。
+_FACE_CACHE_TTL = 1.0
 # 万牌硬门槛：萬字形匹配分低于此值就判定"不是万牌"。
 # 没有这个门槛时，1p 的大圆下缘会被当成"萬块"、上缘被数字字形匹配上，
 # 从而把 1p 误判成 4m/1m（多风格测试中稳定复现）。
@@ -99,11 +123,38 @@ MIN_STYLE_SCORE = 0.74
 # 绝对分 + 边际双门限：注册风格召回 80/80，合成 17 风格泄漏仅 2 例（黑体/雅黑
 # 的 2z 误配 1p，由 1p 结构守卫拦下）。
 STYLE_MARGIN_LO = 0.58
-STYLE_MARGIN_GAP = 0.08
+# GAP 由数据标定（localtest/diag_margin_sweep.py，14 个扰动场景 x 13 张手牌
+# = 143 样本，其中 92 条走 margin 通道）：
+#   真对样本(90 条) margin ∈ [0.0742, 0.2514]
+#   真错样本(2 条，6s 被误配 9s) margin = 0.0305 / 0.0383
+# 两者之间有一段 [0.0383, 0.0742] 的完全空隙 —— 门限放这段正中最稳。
+# 旧值 0.08 压在真对样本堆里：9s 全族 margin ∈ [0.0742, 0.0889]（其他牌都
+# >=0.10），恰好骑在 0.08 上，任何重采样抖动都会把 9s 掀翻 —— 掉出风格通道
+# 后几何数不准 9 根条（粘成 3 列，arr=0.15），最终经 _try_honor 错成 1z(東)。
+# 1.5x 缩放下实测复现。取 0.056（空隙中点）后：真对 90/90 放行、真错 0/2 放行。
+STYLE_MARGIN_GAP = 0.056
 NUMERAL_REGION = 0.58        # 万牌数字区（占牌高）
 # 萬字块起始（占牌高）。设 0.60 而非 0.55，给数字"三"的最下横杠留出 0.05 余量，
 # 避免 0.55~0.58 区间的数字笔画被圈进 bottom 把 bbox 拉大、密度拉低、萬检测失败。
 WAN_REGION = 0.60            # 萬字块起始（占牌高）
+
+# ---- 牌面尺度归一化 ----
+# 风格模板走 96px letterbox，本身尺度无关；但几何路径（_pin_centers /
+# _stick_centers / _count_indep_blobs / 形态学核）用的是**绝对像素**阈值，
+# 因此只在「牌面约 148x168」的原生尺度上标定过。
+# 实测（localtest/diag_scale_norm.py，13 张手牌逐牌比对）：
+#   0.5x  牌面 84px  原始 9/13   -> 归一到 168 后 13/13
+#   0.75x 牌面126px  原始13/13   -> 归一后 13/13
+#   1.0x  牌面168px  原始13/13   -> 归一是恒等变换
+#   1.5x  牌面251px  原始12/13   -> 归一后 13/13
+# 0.5x 的失败机理：6~9 根条在小尺度上相邻间隙消失（白点退化成 1~2px 灰度），
+# 二值化把它们粘成 1~2 个连续块，被 _is_two_stage 判成「单一大字」走字牌分支。
+# 上采样到基准尺度后间隙恢复。
+# 落在 [LO, HI] 内的牌面视为已在基准尺度，跳过重采样（原图零开销、零风险）。
+FACE_CANON_LONG = 168        # 基准长边（= 基准截图的牌面高度）
+FACE_CANON_LO = 150
+FACE_CANON_HI = 190
+FACE_CANON_MIN = 40          # 长边小于此值的牌面信息量不足，放大只会放大噪声
 
 # ---- 低光/色温预处理：CLAHE (Contrast Limited Adaptive Histogram Equalization) ----
 # 不开：夜间/暖光牌面对比度普遍偏低（绿牌面转灰度 ~80、紫光下偏红），Otsu 在
@@ -373,6 +424,28 @@ class StructuralDetector(Detector):
         self._mask_cache: Dict[Tuple[str, int, int], np.ndarray] = {}
         # 诊断信息（与 TemplateDetector 字段名保持一致）
         self.last_top_score: float = 0.0
+        # 牌级分类缓存：真机连续帧里同一张牌被反复分类（13ms/张，13 张 = 173ms/帧，
+        # 占单帧 90%）。命中时直接复用上帧结果，开销从 13ms 降到 ~0.15ms。
+        # key = 量化后的 rect (x//4, y//4, w//4, h//4)，value = (16x16 降采样, label, conf)
+        self._face_cache = {}
+        # 缓存条目上限，超过就整体清空（防止长时间运行内存增长）
+        self._FACE_CACHE_MAX = 512
+        # 上次清空缓存的时间戳（配合 _FACE_CACHE_TTL 强制刷新）
+        self._face_cache_ts = 0.0
+        # 「本 TTL 周期内已做过局部重试」的格子 key 集合。切图相位误差是静态的，
+        # 同一位置重复搜索必得同样结果，所以每个位置每周期只搜一次。
+        # 注意：成功与失败**都要**标记 —— 只标记失败会让"救到 0.55（仍低于
+        # RETRY_CONF）"的牌每帧重搜 7 次（~91ms），稳态直接崩。
+        self._retry_done = set()
+        # 带级相位提示：key = y // max(8, h)（行号），value = 该行最佳 (fdx, fsh)。
+        # 同一行的牌共享同一切牌网格，相位误差全行一致，学一次全行复用。
+        self._phase_hint = {}
+        # 每帧局部重试预算（硬上限）。带门限已经把重试限制在手牌行，
+        # 这里是**防御性**兜底：任何意外（畸形画面、极端光照导致切牌爆炸）
+        # 都不能让单帧退化成秒级。一次重试最多 7 次分类 x 13ms ≈ 91ms，
+        # 预算 6 个格子 => 重试部分最坏 ~550ms，仍在可交互范围。
+        self._RETRY_BUDGET = 6
+        self._retry_budget = 6
         self.last_screen: Tuple[int, int] = (0, 0)
         # 每张检出牌的置信度，与 result 一一对应
         self.last_conf: List[float] = []
@@ -930,6 +1003,29 @@ class StructuralDetector(Detector):
                 i += 1
         return False
 
+    @staticmethod
+    def _canon_scale(face: np.ndarray) -> np.ndarray:
+        """把牌面等比重采样到基准长边 FACE_CANON_LONG。
+
+        为什么必要：风格模板匹配走 96px letterbox，天生尺度无关；但几何路径
+        （筒/条计数、独立块数、形态学核）全部是**绝对像素**阈值，只在基准
+        牌面尺度（≈148x168）标定过。低分辨率下条与条的间隙消失导致粘连，
+        高分辨率下笔画变粗同样改变计数 —— 两端都会错标。
+
+        落在 [FACE_CANON_LO, FACE_CANON_HI] 内视为已在基准尺度，原样返回
+        （基准截图走这条路，零拷贝、零风险）。
+        """
+        h, w = face.shape[:2]
+        le = w if w > h else h
+        if FACE_CANON_LO <= le <= FACE_CANON_HI or le < FACE_CANON_MIN:
+            return face
+        sc = FACE_CANON_LONG / float(le)
+        # 缩小用 INTER_AREA（抗锯齿、不产生伪边），放大用 INTER_CUBIC（保边）
+        interp = cv2.INTER_AREA if sc < 1.0 else cv2.INTER_CUBIC
+        return cv2.resize(face, (max(1, int(round(w * sc))),
+                                 max(1, int(round(h * sc)))),
+                          interpolation=interp)
+
     def _classify_face(self, face: np.ndarray) -> Tuple[Optional[str], float]:
         """单张牌面 -> (标签, 置信度)。
 
@@ -953,6 +1049,11 @@ class StructuralDetector(Detector):
             white = np.ones((fh, fw, 3), np.uint8) * 255
             f = face[:, :, :3].astype(np.float32)
             face = (f * a[:, :, None] + white * (1.0 - a)[:, :, None]).astype(np.uint8)
+        # 尺度归一化：把牌面重采样到基准长边，让下游**绝对像素**阈值的几何
+        # 计数（条/筒根数、独立块数、形态学核）在任意屏幕分辨率下行为一致。
+        # 原生尺度（[150,190]）直接跳过 —— 基准图零开销、零风险。
+        face = self._canon_scale(face)
+        fh, fw = face.shape[:2]
         m = self._ink_mask(face)
         total = int((m > 0).sum())
         face_area = fw * fh
@@ -1388,110 +1489,452 @@ class StructuralDetector(Detector):
                 break
         return bands
 
-    def _segment_tiles(self, band_img: np.ndarray, tile_h_hint: int = 0) -> List[Rect]:
-        """牌行 -> 逐张牌（用"亮面连通块"定范围 + FFT 周期定牌宽，
-        不依赖任何单一游戏的 UI 常量）。
+    # 手牌合法张数先验：13（待摸）、14（刚摸）；副露一组减 3（顺/刻）或减 4（杠）。
+    # 副露场景下，未摸牌可少 1~3 张：~7..10；纯吃碰场景：1~5。
+    # 把这些张数作为先验枚举，**禁止**盲目 round(span/period) —— 周期估错 5% 就 13→14。
+    _HAND_COUNTS = (14, 13, 11, 10, 8, 7, 5, 4, 2, 1)
+    # 切牌 x 范围（牌区相对 active 区偏移）搜索窗（像素，work 分辨率）。
+    _SEG_XMIN_RANGE = 14
+    # 周期相对自相关粗值的搜索窗（±比例）。
+    _SEG_PERIOD_FRAC = 0.06
+    # 周期搜索步数（含中点）。
+    _SEG_PERIOD_STEPS = 13
+    # 最小可接受张数。
+    _SEG_MIN_TILES = 3
 
-        为什么改掉旧的等宽网格：
-          旧实现用「左右 UI 面板的纯色列」定左右边界，再用
-          LEFT/RIGHT_OVERHANG 这类按某个游戏 UI 量出来的常量做补偿，然后等分
-          成 13/14 份。换一个游戏（面板位置/有无面板/牌数不同）这些常量立刻失效，
-          网格整体偏移，每张脸跨在相邻两张牌上，识别全错。
+    def _col_profile(self, gray_band):
+        """列剖面信号：每列"亮像素占比"。
 
-        跨风格不变量：
-          1. 手牌带内，每张牌面是一块**亮区**（ cream/白/浅绿 ），比周围桌面/面板亮；
-          2. 同一只手牌里所有牌**等宽排列**（同一套 UI 资源，尺寸固定）。
-        所以：
-          - 用高阈值二值化找到最亮的那一条"牌面连通块"，其左右 x 范围就是手牌区域；
-          - 用列亮度剖面的 FFT 抓出等宽周期（牌宽）；
-          - 区域宽度 / 周期 = 牌张数；区域左端 + k*牌宽 = 每张牌边界。
-        完全不需要 LEFT/RIGHT_OVERHANG 等任何常量。
+        比均值稳健 —— 牌面图案（墨迹）让均值下降，但不会改变"这一列是不是牌面"。
+        0..1。0=纯暗缝/空白，1=整列亮。
+        """
+        hi = float(np.percentile(gray_band, 88))
+        sig = (gray_band >= hi * 0.72).mean(axis=0).astype(np.float32)
+        # 轻微平滑：去掉笔画造成的细碎抖动，但保留牌缝/牌边框这种"宽信号"
+        k = np.ones(3, np.float32) / 3.0
+        sig = np.convolve(sig, k, mode="same")
+        return sig
 
-        对"没有面板、牌悬浮在桌面上"的情况同样有效：只要牌面是最亮的连通横条，
-        其 x 范围就是手牌区域。
+    def _autocorr_period(self, sig, min_p, max_p):
+        """FFT 加速的归一化自相关，返回 (亚像素周期, 峰强度)。
 
-        跨风格增强：
-          - 多阈值重试（0.72 -> 0.50），适配不同亮度对比度的牌面
-          - 对彩色边框牌（绿/红框），用 HSV 饱和度辅助定位
+        FFT 自相关：R = IFFT(|FFT(s)|^2)，O(n log n)，比循环实现快 50x+。
+        抛物线插值到亚像素精度。
+        """
+        n = len(sig)
+        if n < 8:
+            return None, 0.0
+        s = sig - sig.mean()
+        denom = float(np.dot(s, s))
+        if denom <= 1e-9:
+            return None, 0.0
+        f = np.fft.rfft(s, n=2 * n)
+        ac = np.fft.irfft(f * np.conj(f))[:n]
+        if ac[0] <= 0:
+            return None, 0.0
+        ac = ac / ac[0]
+        lo, hi = max(1, int(round(min_p))), min(n - 2, int(round(max_p)))
+        if hi <= lo:
+            return None, 0.0
+        seg = ac[lo:hi + 1]
+        idx = int(np.argmax(seg))
+        peak = float(seg[idx])
+        period = lo + idx
+        # 抛物线亚像素插值
+        if 0 < idx < len(seg) - 1:
+            r0, r1, r2 = float(seg[idx - 1]), peak, float(seg[idx + 1])
+            denom_i = (r0 - 2 * r1 + r2)
+            if abs(denom_i) > 1e-9:
+                delta = 0.5 * (r0 - r2) / denom_i
+                if abs(delta) <= 1.0:
+                    period = lo + idx + delta
+        return float(period), peak
+
+    def _seg_align_score(self, sig, xmin, tile_w, n, period_ref=None):
+        """网格对齐得分。
+
+        好网格的特征：
+          1. 内部边界（牌缝/共享边框）落在牌"亮边框"上（sig 高）
+          2. 每个牌格内部确实有牌面（sig 显著 > 0）
+          3. **tile_w 与自相关周期一致**（强约束）：
+             旧版只用前两条，导致 tile_w 偏 1% 就让 13 张牌累计偏 8px，
+             最后两张牌的 face 切到边沿，分类器判定为 None。
+
+        实测这张图：GT 边界处 sig ≈ 0.94~0.98，牌心 sig ≈ 0.68。
+        max 比 mean 更鲁棒：牌心有图案，min 可能跌到 ~0.4，max 仍稳。
+        """
+        sw = len(sig)
+        if tile_w <= 5 or n < 1:
+            return -1e9
+        if xmin < -2 or xmin + n * tile_w > sw + 2:
+            return -1e9
+        edge_score = 0.0
+        cell_score = 0.0
+        n_edge = 0
+        n_cell = 0
+        # **首尾边界也计分** —— 否则 xmin 可以自由滑动而不影响 score。
+        # 首尾边界可能在牌区外，sig 低；这些低分会惩罚 xmin 偏左/偏右。
+        for k in range(0, n + 1):
+            x = xmin + k * tile_w
+            xi = int(round(x))
+            if 0 <= xi - 2 and xi + 3 <= sw:
+                edge_score += float(sig[xi - 2:xi + 3].max())
+                n_edge += 1
+        for k in range(n):
+            a = int(round(xmin + k * tile_w)) + 3
+            b = int(round(xmin + (k + 1) * tile_w)) - 3
+            if b > a and 0 <= a and b <= sw:
+                cell_score += float(sig[a:b].mean())
+                n_cell += 1
+        if n_edge == 0 or n_cell == 0:
+            return -1e9
+        # 周期偏离惩罚：强约束 tile_w ≈ period_ref。
+        # 系数 2.0：让 1% 偏差（tile_w 偏 0.6px）就扣 ~0.02 分，相当于
+        # n=11/n=13 之间的典型分差 (~0.05)，能稳定把 n=13 选出来。
+        period_pen = 0.0
+        if period_ref and period_ref > 0:
+            period_pen = 2.0 * abs(tile_w - period_ref) / period_ref
+        return ((edge_score / n_edge) + 0.5 * (cell_score / n_cell)
+                - period_pen)
+
+    @staticmethod
+    def _face_thumb(face):
+        """牌面缩略图（16x16 灰度，零均值单位方差归一化），用于缓存比对。
+
+        归一化是**必须的**：屏幕亮度/对比度变化（自动亮度、色温、不同机型）
+        会让绝对灰度整体线性漂移，不归一化时实测亮度 +10% 就让同一张牌的
+        缩略图差异飙到 127，而不同牌之间最小差异只有 11.7 —— 容差窗口
+        根本不存在（既大量漏命中，又有误命中风险）。
+        归一化消除全局线性漂移后，同一张牌在各种扰动下差异 <2，
+        不同牌仍 >10，两者有 5x 以上的安全间隔。
+        """
+        g = (cv2.cvtColor(face, cv2.COLOR_BGR2GRAY)
+             if face.ndim == 3 else face)
+        small = cv2.resize(g, (16, 16), interpolation=cv2.INTER_AREA)
+        f = small.astype(np.float32)
+        return (f - f.mean()) / (f.std() + 1e-6)
+
+    def _classify_face_retry(self, img, rect, allow_retry=True):
+        """分类一张牌，必要时用「局部重试」救回切图没对准的牌。
+
+        rect 是 (x, y, w, h)（原图坐标）。先按原 rect 分类（走缓存）；
+        若 label 为 None 或 conf < RETRY_CONF，就在 RETRY_OFFSETS 给出的
+        若干平移/内缩候选上重新切图分类，取 conf 最高者。
+
+        为什么必须这样做：切牌网格是「等宽 + 全局相位」，相位有 ~10% 牌宽的
+        系统性误差时，对称的筒子仍能 0.9，但万/索的字形被切掉一侧就掉到 0.55，
+        环境亮度一变就跌破阈值返回 None -> 整张牌被丢 -> 手牌张数不足 ->
+        建议不显示。局部重试把这些临界牌拉回 0.9 区间（实测 1s 0.55 -> 0.92）。
+
+        allow_retry=False 用于「不像手牌行」的候选带：那些带里几乎每个格子都是
+        None，逐个跑 7 次重试会把单帧从 15ms 拖到 60ms+，纯浪费。
+
+        性能关键有两条，缺一条稳态就会崩：
+
+        (1) **每个位置在一个 TTL 周期内最多重试一次**（记在 `_retry_done`）。
+            切图相位误差是**静态**的，同一位置重复搜索必然得到同样的结果，
+            所以第二次搜索是纯浪费。注意这里不能只标记"重试失败"的格子：
+            重试**成功但 conf 仍低于 RETRY_CONF** 的牌（低对比度/JPEG 噪声
+            场景很常见，例如 0.40 -> 0.55）会在下一帧再次跌破门限、再搜 7 次,
+            实测把稳态从 15ms 拖到 125ms。必须无条件标记。
+
+        (2) **带级相位提示**（`_phase_hint`）。同一牌行里所有牌共享同一个
+            切牌网格，相位误差因此是**全行共享**的。第一张牌搜出最佳偏移后
+            记进提示，同行后续牌先试这一个偏移即可命中，把整行的分类次数
+            从 13x7 降到 ~13x2。
+
+        重试结果要写回 `_face_cache`，这样下一帧直接命中，连一次都不用重搜。
+        缓存有 TTL，所以即使缓存了一次坏结果，最多 _FACE_CACHE_TTL 秒就会重算。
+        """
+        x, y, w, h = rect
+        H, W = img.shape[:2]
+        face = img[y:y + h, x:x + w]
+        label, conf = self._classify_face_cached(face, rect)
+        if not allow_retry or (label is not None and conf >= RETRY_CONF):
+            return label, conf
+
+        q = self._cache_key(rect)
+        if q in self._retry_done:
+            return label, conf
+        if self._retry_budget <= 0:
+            return label, conf  # 本帧重试预算用尽（防御性上限）
+        self._retry_done.add(q)
+        self._retry_budget -= 1
+
+        def _try(fdx, fsh):
+            """按 (相对 x 偏移, 相对内缩) 重切一次并分类。"""
+            dx = int(round(fdx * w))
+            sh = int(round(fsh * w))
+            x1 = max(0, x + dx + sh)
+            x2 = min(W, x + dx + w - sh)
+            if x2 - x1 < 24:
+                return None, 0.0
+            return self._classify_face(img[y:y + h, x1:x2])
+
+        # 注：曾经这里有个 _try_upscaled()（小牌面上采样到 120 再分类）。
+        # 尺度归一化上移到 _classify_face 入口（_canon_scale）后它已多余 ——
+        # 留着反而变成「先重采样到 120、再被归一到 168」的二次重采样，比直接
+        # 归一更糊。而且它的触发条件（长边 < 95）极其脆弱：放宽到 <110/<140
+        # 会让基准图也被卷进去，实测把 15 项压测从 13 项直接打到 2~5 项。
+        best_label, best_conf, best_off = label, conf, None
+        # ---- 先试本行已学到的相位提示（1 次分类就可能搞定）----
+        hint_key = y // max(8, h)
+        hint = self._phase_hint.get(hint_key)
+        if hint is not None:
+            lab2, conf2 = _try(*hint)
+            if lab2 is not None and conf2 > best_conf:
+                best_label, best_conf, best_off = lab2, conf2, hint
+        # ---- 提示不够用才做完整搜索 ----
+        if best_conf < 0.90:
+            for off in RETRY_OFFSETS:
+                if off == hint:
+                    continue  # 刚试过
+                lab2, conf2 = _try(*off)
+                if lab2 is not None and conf2 > best_conf:
+                    best_label, best_conf, best_off = lab2, conf2, off
+                    if best_conf >= 0.90:
+                        break  # 已经很有把握，不必再试
+        if best_label is not None and best_conf > conf:
+            # 回写缓存：thumb 用**原 rect** 的缩略图（下一帧查的也是原 rect），
+            # label/conf 用重试得到的更好结果。
+            self._cache_put(q, self._face_thumb(face), best_label, best_conf)
+            # 只有把牌救到「确信」区间的偏移才配当全行提示，
+            # 免得一个勉强的偏移把整行都带偏。
+            if best_off is not None and best_conf >= 0.85:
+                self._phase_hint[hint_key] = best_off
+        return best_label, best_conf
+
+    @staticmethod
+    def _cache_key(rect):
+        """牌面缓存 key：位置量化到 4px 网格，容忍帧间 ±4px 抖动。"""
+        return (rect[0] // 4, rect[1] // 4, rect[2] // 4, rect[3] // 4)
+
+    def _cache_put(self, q, thumb, label, conf):
+        if len(self._face_cache) >= self._FACE_CACHE_MAX:
+            self._face_cache.clear()
+        self._face_cache[q] = (thumb, label, conf)
+
+    def _classify_face_cached(self, face, rect):
+        """带缓存的牌面分类。
+
+        命中条件（同时满足）：
+          1. 量化位置一致（容忍 ±4px 抖动）
+          2. 16x16 缩略图平均绝对差 < FACE_CACHE_TOL（容忍 JPEG 噪声/亮度微变）
+        不命中才真正跑 _classify_face，并把结果写回缓存。
+
+        注意：label 为 None 的结果**不缓存**——那是"这张脸没认出来"，
+        缓存它会让一次偶然的漏检永久粘住这个位置。
+        """
+        # TTL：到期整体清空，强制重新分类。
+        # 这是缓存的"自愈"机制 —— 即使出现极端情况下的误命中，
+        # 也最多存活 _FACE_CACHE_TTL 秒就会被纠正。
+        now = time.time()
+        if self._face_cache_ts == 0.0:
+            self._face_cache_ts = now
+        elif now - self._face_cache_ts > _FACE_CACHE_TTL:
+            self._face_cache.clear()
+            # 重试标记与相位提示同 TTL 自愈：画面/布局变了要重新学
+            self._retry_done.clear()
+            self._phase_hint.clear()
+            self._face_cache_ts = now
+
+        q = self._cache_key(rect)
+        thumb = self._face_thumb(face)
+        prev = self._face_cache.get(q)
+        if prev is not None:
+            p_thumb, p_label, p_conf = prev
+            if p_label is not None:
+                diff = float(np.abs(thumb - p_thumb).mean())
+                if diff < FACE_CACHE_TOL:
+                    return p_label, p_conf
+        label, conf = self._classify_face(face)
+        self._cache_put(q, thumb, label, conf)
+        return label, conf
+
+    @staticmethod
+    def _sliding_max(a, k):
+        """窗口 k 的滑动最大值，中心对齐：out[i] = max(a[i-k//2 : i+k//2+1])。
+
+        手写实现（不用 np.lib.stride_tricks.sliding_window_view，
+        那是 numpy 1.20+ 才有的，真机是 numpy 1.19 —— 会直接崩）。
+        边界用 edge 填充，等价于原实现里越界就跳过。
+        """
+        n = len(a)
+        if n == 0:
+            return a
+        out = a.copy()
+        half = k // 2
+        for d in range(1, half + 1):
+            # 右移 d：out[i] = max(out[i], a[i+d])
+            sr = np.empty_like(a)
+            if n > d:
+                sr[:n - d] = a[d:]
+            else:
+                sr[:] = a[-1]
+            sr[n - d if n > d else 0:] = a[-1]
+            out = np.maximum(out, sr)
+            # 左移 d：out[i] = max(out[i], a[i-d])
+            sl = np.empty_like(a)
+            if n > d:
+                sl[d:] = a[:n - d]
+                sl[:d] = a[0]
+            else:
+                sl[:] = a[0]
+            out = np.maximum(out, sl)
+        return out
+
+    def _seg_search_best(self, sig, x0, span0, period):
+        """向量化网格搜索，返回 (score, xmin, tile_w, n)。
+
+        旧实现是 10(n) x 13(dw) x 13(dx) = 1690 次 Python 函数调用，
+        profile 实测 79ms/帧 —— 占了单帧 1/3。改成：
+          - 候选 n 只取自相关周期附近的 HAND_COUNTS（通常 1~3 个，而非 10 个）
+          - 每个 (n, tile_w) 下，所有 dx 一次性向量化算完（numpy 矩阵运算）
+          - cell mean 用前缀和 O(1) 查表；edge score 用预计算滑动 max 查表
+        结果：~3x13 = 39 次 numpy 批量操作，实测 <3ms。
+        """
+        sw = len(sig)
+        if sw < 16 or period <= 0 or span0 <= 0:
+            return None
+
+        # 前缀和：cell mean = (cum[b] - cum[a]) / (b - a)，O(1) 查表
+        cum = np.concatenate(([0.0], np.cumsum(sig, dtype=np.float64)))
+        # 滑动 max（窗口 5，中心对齐 sig[xi-2:xi+3]）
+        smax = self._sliding_max(sig, 5)
+
+        # 候选 n：只取自相关周期附近的合法张数（强先验 + 周期已很准）
+        n0 = int(round(span0 / period))
+        cands = [n for n in self._HAND_COUNTS if abs(n - n0) <= 2]
+        if not cands:
+            cands = [min(self._HAND_COUNTS, key=lambda n: abs(n - n0))]
+
+        dxs = np.arange(-self._SEG_XMIN_RANGE, self._SEG_XMIN_RANGE + 1, 2)
+        xmins = (x0 + dxs).astype(np.float64)
+
+        best = None
+        for n in cands:
+            if n > 17 or n < 1:
+                continue
+            base_w = span0 / float(n)
+            ks = np.arange(n + 1, dtype=np.float64)
+            for dw in np.linspace(-self._SEG_PERIOD_FRAC, self._SEG_PERIOD_FRAC,
+                                  self._SEG_PERIOD_STEPS):
+                tw = base_w * (1.0 + float(dw))
+                if tw <= 5:
+                    continue
+                # (D, n+1) 所有 dx 的所有边界位置
+                xs = xmins[:, None] + ks[None, :] * tw
+                xi = np.round(xs).astype(np.int64)
+                ok = (xi >= 2) & (xi + 3 <= sw)
+                idx = np.where(ok, xi, 0)
+                edge_vals = np.where(ok, smax[idx], 0.0)
+                n_edge = ok.sum(axis=1).astype(np.float64)
+                edge_sum = edge_vals.sum(axis=1)
+
+                # cell: [a, b)，a=左边界+3, b=右边界-3
+                a = xi[:, :-1] + 3
+                b = xi[:, 1:] - 3
+                valid_c = (b > a) & (a >= 0) & (b <= sw)
+                a_c = np.clip(a, 0, sw)
+                b_c = np.clip(b, 0, sw)
+                cell_sum = np.where(valid_c, cum[b_c] - cum[a_c], 0.0)
+                cell_len = np.where(valid_c, b_c - a_c, 0)
+                n_cell = valid_c.sum(axis=1).astype(np.float64)
+                cell_tot = cell_sum.sum(axis=1)
+                cell_len_tot = cell_len.sum(axis=1).astype(np.float64)
+
+                denom_e = np.maximum(n_edge, 1.0)
+                denom_c = np.maximum(cell_len_tot, 1.0)
+                edge_mean = edge_sum / denom_e
+                cell_mean = cell_tot / denom_c
+                pen = 2.0 * abs(tw - period) / period
+                scores = edge_mean + 0.5 * cell_mean - pen
+                scores = np.where((n_edge > 0) & (n_cell > 0), scores, -1e9)
+
+                i = int(np.argmax(scores))
+                sc = float(scores[i])
+                if best is None or sc > best[0]:
+                    best = (sc, float(xmins[i]), float(tw), n)
+        return best
+
+    def _segment_tiles(self, band_img, tile_h_hint=0):
+        """牌行 -> 逐张牌。
+
+        v2 算法（自相关周期 + 张数先验 + 网格搜索精修）：
+
+          旧实现问题：等宽网格用 span/n_tiles 切牌，n_tiles 靠 round(span/period)，
+          period 靠 FFT 估（频率分辨率受限）。周期估错 5% 就会把 13 张切成 14 张，
+          整张脸跨在两张牌上，识别全错。
+
+          新实现：
+            1. 列剖面信号 = "亮像素占比"（抗牌面图案干扰）
+            2. 周期 P：FFT 加速的归一化自相关，抛物线插值到亚像素（精度 ±0.5px）
+            3. 张数 n：枚举麻将手牌张数先验（_HAND_COUNTS），对每张牌算
+               "网格对齐得分"，取最高者。**禁止**盲目 round(span/P) ——
+               张数先验是强先验，应该用它做最后决断。
+            4. 网格搜索 (xmin ± 14px, period ± 6%) 精修，提升对齐得分。
+
+        行为不变量：
+          - 输入是 4-tuple Rect 列表 (x1, y1, x2, y2)
+          - 张数 < _SEG_MIN_TILES 返回空（与旧版一致）
+          - pad = max(3, int(0.05 * tile_w))：避免缝边切掉笔画
         """
         bh, bw = band_img.shape[:2]
         if bh < 20 or bw < 60:
             return []
         gray = (cv2.cvtColor(band_img, cv2.COLOR_BGR2GRAY)
-                if band_img.ndim == 3 else band_img)
+                if band_img.ndim == 3 else band_img).astype(np.float32)
         y1, y2 = 0, (tile_h_hint if tile_h_hint > 0 else bh)
         sub = gray[y1:y2, :]
         sh, sw = sub.shape
         if sh < 16 or sw < 60:
             return []
 
-        bright = float(np.percentile(sub, 88))
-        # 找"牌面"亮块：阈值取牌面典型亮度的 0.72 左右。
-        # 字符/牌框/牌缝都更暗，会被排除；相邻牌面的亮像素即使只通过很窄的桥相连，
-        # 只要整体是最大亮块即可。若 0.72 太激进导致碎块，则逐步降低阈值重试。
-        # 跨风格增强：扩展到 0.50，适配低对比度牌面（如绿色边框牌）
-        span, tile_w, xmin, xmax = 0.0, 0.0, 0, 0
-        for frac in (0.72, 0.65, 0.58, 0.52, 0.45, 0.40):
-            thr = frac * bright
-            mask = (sub >= thr).astype(np.uint8)
-            n, _ = cv2.connectedComponents(mask, connectivity=4)
-            stats = cv2.connectedComponentsWithStats(mask, connectivity=4)[2]
-            best_i = max(range(1, n), key=lambda i: stats[i][4])
-            x, _y, w, h, _ = stats[best_i]
-            if w >= 60 and h >= 0.35 * sh and w / max(1, h) >= 1.5:
-                span = float(w)
-                xmin, xmax = x, x + w
-                break
-        # 如果亮块方法失败，尝试用 HSV 饱和度找牌面（彩色边框牌）
-        if span < 60 and band_img.ndim == 3:
-            hsv = cv2.cvtColor(band_img[y1:y2, :], cv2.COLOR_BGR2HSV)
-            s_channel = hsv[:, :, 1]
-            # 牌面区域饱和度低（白色/奶油色），边框饱和度高
-            # 找低饱和度区域作为牌面
-            low_sat = (s_channel < 80).astype(np.uint8)
-            n, _ = cv2.connectedComponents(low_sat, connectivity=4)
-            stats = cv2.connectedComponentsWithStats(low_sat, connectivity=4)[2]
-            if n > 1:
-                best_i = max(range(1, n), key=lambda i: stats[i][4])
-                x, _y, w, h, _ = stats[best_i]
-                if w >= 60 and h >= 0.35 * sh and w / max(1, h) >= 1.5:
-                    span = float(w)
-                    xmin, xmax = x, x + w
-        if span < 60:
+        sig = self._col_profile(sub)
+        if sig.max() < 0.05:
             return []
 
-        # 用列亮度剖面 FFT 估计等宽周期（牌宽）
-        col = sub.mean(axis=0).astype(np.float32)
-        col -= np.mean(col)
-        fft = np.fft.rfft(col)
-        power = np.abs(fft) ** 2
-        freqs = np.fft.rfftfreq(sw)
-        fmask = (freqs > 1.0 / 140) & (freqs < 1.0 / 30)
-        period = 60.0
-        if np.any(fmask):
-            period = 1.0 / freqs[fmask][np.argmax(power[fmask])]
-        if period < 20 or period > 120:
-            period = max(30.0, span / 13.0)
+        # ---- 1. 找 active 区间 [x0, x1] ----
+        active = np.where(sig > max(0.06, 0.25 * sig.max()))[0]
+        if len(active) < 30:
+            return []
+        x0, x1 = int(active[0]), int(active[-1])
+        span0 = x1 - x0
+        if span0 < 30:
+            return []
 
-        # 牌张数落在 8..17；最终 tile_w 用区域宽度 / N 精修（消除 FFT 离散误差）
-        n_tiles = int(round(span / period))
-        n_tiles = max(8, min(17, n_tiles))
-        tile_w = span / float(n_tiles)
+        # ---- 2. FFT 自相关求周期 ----
+        period, strength = self._autocorr_period(
+            sig[x0:x1 + 1],
+            min_p=max(20.0, span0 / 17.0),
+            max_p=min(span0 / 3.0, 280.0),
+        )
+        if period is None or period <= 0:
+            period = span0 / 13.0
+            strength = 0.0
+
+        # ---- 3. 向量化网格搜索精修 (n, xmin, period) ----
+        # 见 _seg_search_best 的注释：旧的三重 Python 循环实测 79ms/帧，
+        # 向量化后 <3ms，且与旧实现选出完全相同的 (xmin, tile_w, n)。
+        best = self._seg_search_best(sig, x0, span0, period)
+
+        if best is None:
+            return []
+        _, xmin, tile_w, n = best
+        if n < self._SEG_MIN_TILES:
+            return []
         if tile_w < 12:
             return []
 
-        # 生成等宽边界；每张牌左右各留余量，避免缝边切掉笔画。
-        # 原 0.03 在大屏上只有 1~2 像素，最右牌右沿被裁掉一像素就足够让
-        # "一/二/三"等单像素笔画消失（实测 w=80 时 pad=2，最右牌的笔画端
-        # 经常被裁，3m 误判 2m）。改为 0.05 并设绝对下限 3 像素。
+        # ---- 4. 输出边界 ----
         pad = max(3, int(0.05 * tile_w))
-        out: List[Rect] = []
-        for k in range(n_tiles):
-            x1 = max(0, int(round(xmin + k * tile_w)) - pad)
-            x2 = min(sw, int(round(xmin + (k + 1) * tile_w)) + pad)
-            if x2 - x1 < 8:
+        out = []
+        for k in range(n):
+            x1b = max(0, int(round(xmin + k * tile_w)) - pad)
+            x2b = min(sw, int(round(xmin + (k + 1) * tile_w)) + pad)
+            if x2b - x1b < 8:
                 continue
-            out.append((x1, int(y1), x2, int(y2)))
+            out.append((x1b, int(y1), x2b, int(y2)))
         return out
 
     # -------------------------------------------------------------- 主入口
@@ -1541,8 +1984,17 @@ class StructuralDetector(Detector):
 
         return Stage(result=result, image=image, display_callback=display)
 
-    def detect_all_rows(self, image: CVImage) -> List[List[Tuple[Rect, Optional[str], float]]]:
+    def detect_all_rows(self, image: CVImage, classify: bool = True,
+                        allow_rotation: bool = True, allow_retry: bool = True
+                        ) -> List[List[Tuple[Rect, Optional[str], float]]]:
         """返回所有检测到的牌行（不挑选手牌行）。
+
+        classify=False：跳过分类（供方向探测用，快 10x）。
+        allow_rotation=False：禁用内部旋转重试（方向探测自己就在枚举
+        方向；engine 锁定方向后也不需要重试）。
+        allow_retry=False：禁用牌面「局部重试」。方向探测要跑 4 个方向，
+        每个方向都做重试会把冷启动从 400ms 拖到 1400ms；而探测只需要方向间的
+        **相对**质量对比，重试是锁定方向之后才需要的精修。
 
         每行是一组 [(rect, label, conf), ...]，已由 x 排序。
         引擎据此区分「自己手牌行」（张数最接近 13/14、牌最大）与
@@ -1557,15 +2009,19 @@ class StructuralDetector(Detector):
         img = image if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         ih, iw = img.shape[:2]
         self.last_screen = (iw, ih)
-        dets = self._detect_once(img)
+        # 每次检测重置重试预算，保证「单帧最坏耗时」有确定上界
+        self._retry_budget = self._RETRY_BUDGET
+        dets = self._detect_once(img, classify=classify,
+                                 allow_retry=allow_retry)
         # 旋转重试的触发条件改为"质量门限"而不是数量门限
-        if self._should_try_rotation(dets):
+        if allow_rotation and self._should_try_rotation(dets):
             for rot in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE):
                 try:
                     rot_img = cv2.rotate(img, rot)
                 except cv2.error:
                     continue
-                d2 = self._detect_once(rot_img)
+                d2 = self._detect_once(rot_img, classify=classify,
+                                       allow_retry=allow_retry)
                 if self._rotation_is_better(dets, d2):
                     dets = [(self._unrotate_rect(r, rot, iw, ih), l, c)
                             for (r, l, c) in d2]
@@ -1618,7 +2074,148 @@ class StructuralDetector(Detector):
         out.sort(key=lambda g: g[0][0][1])
         return out
 
-    def _detect_once(self, img: np.ndarray) -> List[Tuple[Rect, Optional[str], float]]:
+    def _tile_to_face_rect(self, tile, y1e, inv):
+        """把 work 坐标的 tile 换算成原图坐标的「牌面矩形」(x, y, w, h)。
+
+        分类必须在全分辨率上跑：_classify_face 内的相对阈值
+        (0.42*fw, 0.24*fh, largest_frac 等) 是按全分辨率牌面 (~168x140)
+        调出来的，套到 60x70 的 work 分辨率牌面会全部不达标（9m/3m 都跪）。
+        所以带检测（Sobel + 行列能量）走 work 求快，分类单独回原图求准。
+
+        太小的矩形（<20px）返回 None —— 不可能是牌。
+        """
+        tx1, ty1, tx2, ty2 = tile
+        ix_w = int((tx2 - tx1) * FACE_INSET)
+        iy_w = int((ty2 - ty1) * FACE_INSET)
+        fx1w, fy1w = tx1 + ix_w, y1e + ty1 + iy_w
+        fx2w, fy2w = tx2 - ix_w, y1e + ty2 - iy_w
+        fx1 = int(round(fx1w * inv))
+        fy1 = int(round(fy1w * inv))
+        fw_f = max(1, int(round((fx2w - fx1w) * inv)))
+        fh_f = max(1, int(round((fy2w - fy1w) * inv)))
+        if fw_f < 20 or fh_f < 20:
+            return None
+        return (fx1, fy1, fw_f, fh_f)
+
+    @staticmethod
+    def _bands_compete(a, b) -> bool:
+        """判断两个候选带是不是「同一物理牌行的竞争假设」。
+
+        条件：y 区间与 x 区间**同时**高度重叠（各 >50%）。
+
+        为什么 x 也要判：同一 y 高度上可以合法地存在两组横排牌
+        （例如对家牌河与某家副露），那是两个**真实**行，不能去重。
+        只有 x 也基本重合，才说明是同一片像素被切了两遍。
+        """
+        def _ov(lo1, hi1, lo2, hi2):
+            inter = min(hi1, hi2) - max(lo1, lo2)
+            if inter <= 0:
+                return 0.0
+            return inter / float(max(1, min(hi1 - lo1, hi2 - lo2)))
+
+        ay1 = min(r[1] for r in a)
+        ay2 = max(r[1] + r[3] for r in a)
+        by1 = min(r[1] for r in b)
+        by2 = max(r[1] + r[3] for r in b)
+        if _ov(ay1, ay2, by1, by2) <= 0.5:
+            return False
+        ax1 = min(r[0] for r in a)
+        ax2 = max(r[0] + r[2] for r in a)
+        bx1 = min(r[0] for r in b)
+        bx2 = max(r[0] + r[2] for r in b)
+        return _ov(ax1, ax2, bx1, bx2) > 0.5
+
+    @staticmethod
+    def _band_geom_score(rects) -> float:
+        """候选带的**几何**可信度（不做分类，供快速模式用）。
+
+        判据（麻将先验）：
+          - 张数越接近 13/14 越好（手牌行；副露后 10~12 也常见）
+          - 牌宽越一致越好（同一行的牌等宽，变异系数应接近 0）
+          - 宽高比越接近 0.85 越好（麻将牌正面的典型比例）
+        """
+        n = len(rects)
+        ws = [r[2] for r in rects]
+        w_med = float(np.median(ws))
+        w_cv = float(np.std(ws)) / max(1e-6, w_med)
+        asp = float(np.median([r[2] / float(max(1, r[3])) for r in rects]))
+        n_pen = min(abs(n - 13), abs(n - 14))
+        return -(0.30 * n_pen) - (2.0 * w_cv) - (3.0 * abs(asp - 0.85))
+
+    def _band_probe_score(self, rects, img) -> float:
+        """候选带的**分类**可信度：抽样若干格子跑分类，取平均置信度。
+
+        为什么必须用分类而不是纯几何：竞争假设的几何指标极其接近
+        （实测三个假设的牌宽变异系数都是 0.00~0.01、宽高比 0.763/0.868/0.921
+        全都落在合法区间 [0.52, 0.95] 内），几何判据根本分不出胜负。
+        而错周期切出来的「牌」其实是两张牌各一半的拼接，分类置信度会塌，
+        这是唯一可靠的直接指标。
+
+        只抽 3 格（均匀取位），成本 ~3x13ms，远低于把整带都分类掉。
+        """
+        n = len(rects)
+        idx = sorted(set([n // 6, n // 2, (5 * n) // 6]))
+        confs = []
+        for i in idx:
+            x, y, w, h = rects[i]
+            _lab, c = self._classify_face(img[y:y + h, x:x + w])
+            confs.append(c)
+        if not confs:
+            return 0.0
+        return float(sum(confs)) / len(confs)
+
+    def _dedup_bands(self, cand_bands, img, classify):
+        """把「同一物理牌行被不同周期重复切出」的竞争带收敛成一个。
+
+        _find_bands + _segment_tiles 在光照异常时会对同一手牌行给出多个
+        周期假设（实测亮度 +20% 时按 70/58/66px 切成 14/14/13 三份）。
+        若不去重：
+          - 性能：单帧分类次数 13 -> 41，冷启动从 600ms 涨到 2000ms+
+          - 正确性：结果里出现多个 len>=11 的行，下游 _pick_hand_row
+            在竞争行里挑，挑错就整手牌错（缩放场景混入 1z/2m/2s）
+        """
+        if len(cand_bands) < 2:
+            return cand_bands
+        # 先按几何分降序，保证每组的"组长"是几何上最像牌行的那个
+        order = sorted(cand_bands, key=lambda b: -self._band_geom_score(b))
+        groups: List[list] = []
+        for b in order:
+            for g in groups:
+                if self._bands_compete(b, g[0]):
+                    g.append(b)
+                    break
+            else:
+                groups.append([b])
+        out = []
+        for g in groups:
+            if len(g) == 1:
+                out.append(g[0])
+                continue
+            if not classify:
+                # 快速模式（方向探测）不值得为去重付分类代价，用几何分
+                out.append(g[0])
+                continue
+            best, best_s = g[0], -1.0
+            for b in g:
+                s = self._band_probe_score(b, img)
+                if s > best_s:
+                    best_s, best = s, b
+            out.append(best)
+        # 恢复自上而下的顺序，保持后续行分组的稳定性
+        out.sort(key=lambda b: min(r[1] for r in b))
+        return out
+
+    def _detect_once(self, img: np.ndarray, classify: bool = True,
+                     allow_retry: bool = True
+                     ) -> List[Tuple[Rect, Optional[str], float]]:
+        """检测一帧里的所有牌。
+
+        classify=False 时**跳过最贵的牌面分类**（实测 173ms → 17ms），
+        只返回切牌位置（label=None, conf=0）。仅供方向探测使用 ——
+        判断"哪个方向牌最多"根本不需要知道是什么牌。
+
+        allow_retry=False 时禁用牌面局部重试（见 detect_all_rows 说明）。
+        """
         h, w = img.shape[:2]
         # ===== 低光/色温预处理：CLAHE（仅作用于"工作图"，分类用的全分辨率 face 仍取自原图）=====
         # 必须只增强工作图，不能动原图——_classify_face 的几何守卫是按原始色相
@@ -1640,7 +2237,16 @@ class StructuralDetector(Detector):
         tile_h = max(10, int(TILE_H_RATIO * min(wh, ww)))
         bands = self._find_bands(work, tile_h)
 
-        dets: List[Tuple[Rect, Optional[str], float]] = []
+        # ================== 阶段 1：切牌（便宜），收集候选带 ==================
+        # 不在这里直接分类。原实现「边切边分类」有两个致命问题：
+        #   1. 同一个物理牌行会被 _find_bands + _segment_tiles 用**不同周期**
+        #      重复切出多个候选带（实测亮度 +20% 时手牌行被按 70/58/66px
+        #      切成三份 14/14/13 格），41 个格子里 28 个是同一行的错误切法。
+        #   2. 这些重复行会一起进入结果，下游 _pick_hand_row 要在多个
+        #      「len>=11 的行」里挑，挑错就整手牌错（缩放场景混入 1z/2m/2s
+        #      就是这么来的）。
+        # 所以先只切牌，再去重，最后才对胜出的带做昂贵的分类。
+        cand_bands = []
         for (y1, y2) in bands:
             # 向上多扩、向下几乎不扩：_find_bands 给的 band 已≈牌高，仅顶沿比真牌顶低
             # 约 0.1 牌高，向上补一点把牌顶补回；向下扩太多会吞进牌行下方的桌面。
@@ -1665,32 +2271,74 @@ class StructuralDetector(Detector):
             tiles = self._segment_tiles(band, y2 - y1)
             if len(tiles) < 3:
                 continue
-            for (tx1, ty1, tx2, ty2) in tiles:
-                # 在 work 坐标上做 FACE_INSET，得到牌的"内部矩形"在 work 坐标的范围
-                ix_w = int((tx2 - tx1) * FACE_INSET)
-                iy_w = int((ty2 - ty1) * FACE_INSET)
-                fx1w, fy1w = tx1 + ix_w, y1e + ty1 + iy_w
-                fx2w, fy2w = tx2 - ix_w, y1e + ty2 - iy_w
-                # 映射回原图坐标：分类必须在全分辨率上跑，_classify_face 内的相对阈值
-                # (0.42*fw, 0.24*fh, largest_frac 等) 是按全分辨率牌面 (~168x140) 调出来的，
-                # 套到 60x70 的 work 分辨率牌面会全部不达标 (9m/3m 在 work 上都跪)。
-                # 带"Sobel + 行列能量"走 work（快），分类单独走原图（准）。
-                fx1 = int(round(fx1w * inv))
-                fy1 = int(round(fy1w * inv))
-                fw_f = max(1, int(round((fx2w - fx1w) * inv)))
-                fh_f = max(1, int(round((fy2w - fy1w) * inv)))
-                fx2, fy2 = fx1 + fw_f, fy1 + fh_f
-                if fw_f < 20 or fh_f < 20:
+            rects = []
+            for t in tiles:
+                r = self._tile_to_face_rect(t, y1e, inv)
+                if r is not None:
+                    rects.append(r)
+            if len(rects) < 3:
+                continue
+            cand_bands.append(rects)
+
+        # ================== 阶段 2：手牌行预判 ==================
+        # 候选带可能很多（亮度 +20% 时实测有 3 个 14/13 格的带），但绝大多数是
+        # **误检**：UI 元素（倒计时牌、按钮、头像）在亮度异常时 unif 均匀度
+        # 检查会被过，按真实牌面的几何特征（等宽、13/14 格）误进入候选集。
+        # 经验上：手牌行几乎一定在画面**最靠下**那一条带；牌河/UI 元素都在
+        # 画面中部或上部。直接按 y 位置取**最下且格数≥11**的那条作为手牌行
+        # 候选 —— 不够格（<11）才退而求其次选格数最多的，避免副露时漏掉。
+        #
+        # **不分类就能判断**，省下 28 个 UI 误检格子的分类时间
+        # （= 364ms / 帧，约等于单帧冷启的一半）。
+        #
+        # 方向探测（classify=False）路径必须**保留所有带**，因为它要统计
+        # 哪个方向牌最多；其他行里可能恰好是某个方向的手牌行。
+        if classify and cand_bands:
+            bottom = max(cand_bands, key=lambda b: max(r[1] + r[3] for r in b))
+            if len(bottom) >= 11:
+                cand_bands = [bottom]
+            else:
+                cand_bands = [max(cand_bands, key=lambda b: len(b))]
+        # ================== 阶段 3：竞争带去重 ==================
+        cand_bands = self._dedup_bands(cand_bands, img, classify)
+
+        # ================== 阶段 4：分类（贵） ==================
+        dets: List[Tuple[Rect, Optional[str], float]] = []
+        for rects in cand_bands:
+            # 只对「像手牌行」的带开启局部重试。门限用 >=11 格，与 engine
+            # 判定 has_hand_row 的 `len(r) >= 11` 保持一致 —— 真手牌行是
+            # 13/14 张，副露后也还有 11 张以上。
+            #
+            # 为什么不能放宽到 >=8：牌河/背景带里几乎每格都是 None，
+            # 逐格跑 7 次重试纯浪费，还会把单帧拖到秒级。
+            band_retry = allow_retry and len(rects) >= 11
+            for (fx1, fy1, fw_f, fh_f) in rects:
+                if not classify:
+                    # 快速模式（方向探测用）：只返回位置，不分类
+                    dets.append(((fx1, fy1, fw_f, fh_f), None, 0.0))
                     continue
-                face = img[fy1:fy2, fx1:fx2]
-                label, conf = self._classify_face(face)
+                # 牌级缓存在 _classify_face_retry 内部按原 rect 命中；
+                # 命中时跳过 13ms 的分类，直接用上帧结果。
+                label, conf = self._classify_face_retry(
+                    img, (fx1, fy1, fw_f, fh_f), allow_retry=band_retry)
                 if label is None:
+                    # 仍然丢弃未识别的格子。
+                    # 试过「保留 None 格子让投票器从历史恢复」，结果更糟：
+                    # 下游（行分组、方向探测的 avg_conf、has_hand_row 判据）
+                    # 全都把 None 格子算进去，压力测试从 11/15 掉到 7/15。
+                    # 真正的解法是局部重试 —— 让 None 尽量不出现。
                     continue
                 aspect = fw_f / float(fh_f)
                 if aspect < MIN_TILE_ASPECT or aspect > MAX_TILE_ASPECT:
                     conf *= 0.55  # 牌形不对，降置信
                 dets.append(((fx1, fy1, fw_f, fh_f), label, conf))
 
+        # 同步刷新 last_top_score：之前只在 detect() 路径下更新，
+        # detect_all_rows() 路径下恒为 0.0，导致 engine.process() 的
+        # top_score 字段永远显示 0.0，诊断信息全废。
+        # 移到 _detect_once 末尾统一更新，两个路径都覆盖。
+        self.last_top_score = float(
+            max((c for (_, l, c) in dets if l is not None), default=0.0))
         # 注意：这里返回「所有检测到的牌」，不做行挑选。
         # detect() 仍只取手牌行（兼容旧测试）；detect_all_rows() 用全部行识别牌河。
         return dets
