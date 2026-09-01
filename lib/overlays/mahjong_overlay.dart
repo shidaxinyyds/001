@@ -27,8 +27,18 @@ class TileChip extends StatelessWidget {
   final String tile; // mpsz 形式，如 "5m" "7p" "1z"
   final double size;
   final bool dim;
+  // 绝张：手牌 + 牌河累计该牌型已出 ≥4 张。该牌在凑牌上已"死"，可放心打
+  // 且别人也几乎不可能拿它和牌 —— App 自动算出来的、肉眼看不出来的高价值信号。
+  // 配色：灰底 + 青绿描边 + 「绝」白底青字标，绝对不用红/橙/琥珀。
+  final bool dead;
 
-  const TileChip({super.key, required this.tile, this.size = 26, this.dim = false});
+  const TileChip({
+    super.key,
+    required this.tile,
+    this.size = 26,
+    this.dim = false,
+    this.dead = false,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -53,6 +63,11 @@ class TileChip extends StatelessWidget {
       charColor = const Color(0xFF202124);
     }
 
+    // 绝张的牌面底色换成中性灰，并加一道青绿描边把它从普通牌里顶出来 —— 一眼可见。
+    final Color tileBg = dead ? const Color(0xFFBDBDBD) : const Color(0xFFF7F3E8);
+    final Color tileBorder = dead ? const Color(0xFF00695C) : const Color(0xFFB7A98F);
+    final double tileBorderW = dead ? 1.0 : 0.6;
+
     return Opacity(
       opacity: dim ? 0.45 : 1.0,
       child: Container(
@@ -60,9 +75,9 @@ class TileChip extends StatelessWidget {
         height: size * 1.18,
         margin: const EdgeInsets.only(right: 2),
         decoration: BoxDecoration(
-          color: const Color(0xFFF7F3E8),
+          color: tileBg,
           borderRadius: BorderRadius.circular(3),
-          border: Border.all(color: const Color(0xFFB7A98F), width: 0.6),
+          border: Border.all(color: tileBorder, width: tileBorderW),
           boxShadow: [
             BoxShadow(
               color: Colors.black.withAlpha(40),
@@ -72,17 +87,44 @@ class TileChip extends StatelessWidget {
           ],
         ),
         alignment: Alignment.center,
-        child: FittedBox(
-          fit: BoxFit.scaleDown,
-          child: Text(
-            cn,
-            style: TextStyle(
-              color: charColor,
-              fontWeight: FontWeight.w800,
-              fontSize: size * 0.62,
-              height: 1.0,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Text(
+                cn,
+                style: TextStyle(
+                  color: charColor,
+                  fontWeight: FontWeight.w800,
+                  fontSize: size * 0.62,
+                  height: 1.0,
+                ),
+              ),
             ),
-          ),
+            if (dead)
+              Positioned(
+                right: -4,
+                top: -4,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFE0F2F1), // 青绿浅底，与主色统一
+                    borderRadius: BorderRadius.circular(3),
+                    border: Border.all(color: const Color(0xFF00695C), width: 0.5),
+                  ),
+                  child: const Text(
+                    '绝',
+                    style: TextStyle(
+                      color: Color(0xFF00695C),
+                      fontSize: 7,
+                      fontWeight: FontWeight.bold,
+                      height: 1.0,
+                    ),
+                  ),
+                ),
+              ),
+          ],
         ),
       ),
     );
@@ -90,10 +132,17 @@ class TileChip extends StatelessWidget {
 }
 
 /// 一排手牌 chip（最多 14 张）。多余空间自动 wrap。
+/// 可选地接收一个 deadTiles 集合（mpsz 形式），集合内的牌型会被自动标上「绝」标。
 class HandChipRow extends StatelessWidget {
   final String hand; // mpsz 形式
   final double chipSize;
-  const HandChipRow({super.key, required this.hand, this.chipSize = 24});
+  final Set<String>? deadTiles;
+  const HandChipRow({
+    super.key,
+    required this.hand,
+    this.chipSize = 24,
+    this.deadTiles,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -104,7 +153,13 @@ class HandChipRow extends StatelessWidget {
     return Wrap(
       spacing: 1,
       runSpacing: 3,
-      children: tiles.map((t) => TileChip(tile: t, size: chipSize)).toList(),
+      children: tiles
+          .map((t) => TileChip(
+                tile: t,
+                size: chipSize,
+                dead: deadTiles?.contains(t) ?? false,
+              ))
+          .toList(),
     );
   }
 }
@@ -276,6 +331,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   bool _draggingResize = false;
   bool _resizeInFlight = false;
 
+  // 牌河折叠态。常驻可见（默认 true），但用户可手动折叠/展开以释放空间。
+  // 状态在弹窗生命周期内持久化：用户收起 → 重新展开会保持上一次选择，
+  // 不强制每次都重置为展开。
+  bool _discardExpanded = true;
+
   @override
   void initState() {
     super.initState();
@@ -401,15 +461,68 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     }
   }
 
+  // 牌河段标题：左侧"牌河 · N 张"，右侧可点击的"展开▸ / 收起▾"。
+  Widget _discardSectionHeader({
+    required int discardCount,
+    required bool expanded,
+    required VoidCallback onToggle,
+  }) {
+    return Row(
+      children: [
+        const Text(
+          '牌河',
+          style: TextStyle(
+            color: Colors.white70,
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.5,
+          ),
+        ),
+        const SizedBox(width: 6),
+        Text(
+          '· $discardCount 张',
+          style: const TextStyle(
+            color: Colors.white38,
+            fontSize: 11,
+            fontWeight: FontWeight.w400,
+          ),
+        ),
+        const Spacer(),
+        GestureDetector(
+          onTap: onToggle,
+          behavior: HitTestBehavior.opaque,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+            child: Text(
+              expanded ? '收起 ▾' : '展开 ▸',
+              style: const TextStyle(
+                color: Color(0xFF80CBC4), // 青绿 200（主色家族），提示交互
+                fontSize: 10,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  // 牌河内容（展开态）：按花色分组的 chip 列表，绝张牌自动标灰底+青绿描边+"绝"标。
   // 牌河（所有玩家打出的牌）展示，按花色分组，与手牌同款 chip
-  Widget _discardSection(String discards, int discardCount) {
+  Widget _discardSection(
+    String discards,
+    int discardCount, {
+    required String hand,
+  }) {
     if (discards.isEmpty) return const SizedBox.shrink();
     final grouped = _groupHand(discards);
     final tilesAll = grouped.values.fold<int>(0, (s, l) => s + l.length);
     if (tilesAll == 0) return const SizedBox.shrink();
+    // 计算绝张：手牌 + 牌河 累计 ≥ 4 张的牌型（这是 App 自动算出来的、肉眼看不出来的高价值信息）。
+    final dead = _computeDeadTiles(hand, discards);
     final order = ['m', 'p', 's', 'z'];
     return Container(
-      padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
+      padding: const EdgeInsets.fromLTRB(8, 2, 8, 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -423,7 +536,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                     SizedBox(
                       width: 14,
                       child: Text(
-                        k == 'z' ? '字' : (k == 'm' ? '万' : (k == 'p' ? '筒' : '条')),
+                        k == 'z'
+                            ? '字'
+                            : (k == 'm' ? '万' : (k == 'p' ? '筒' : '条')),
                         style: TextStyle(
                           color: k == 'z'
                               ? const Color(0xFFB0BEC5)
@@ -438,14 +553,32 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                       ),
                     ),
                     Expanded(
-                        child: HandChipRow(
-                            hand: grouped[k]!.join(), chipSize: 18)),
+                      child: HandChipRow(
+                        hand: grouped[k]!.join(),
+                        chipSize: 18,
+                        deadTiles: dead,
+                      ),
+                    ),
                   ],
                 ),
               ),
         ],
       ),
     );
+  }
+
+  // 绝张计算：手牌 + 牌河 累计 ≥ 4 张的牌型（mpsz 形式）视为"绝张"。
+  // 绝张 = 该牌型 4 张全部可见（手牌里 + 牌河里），任何人都凑不出该牌。
+  // 对自己的意义：① 该牌不可能凑成对子/刻子，可作为优先弃牌；② 别人也几乎不可能拿它和牌 → 安全牌。
+  Set<String> _computeDeadTiles(String hand, String discards) {
+    final counts = <String, int>{};
+    for (final t in _mpszToTiles(hand)) {
+      counts[t] = (counts[t] ?? 0) + 1;
+    }
+    for (final t in _mpszToTiles(discards)) {
+      counts[t] = (counts[t] ?? 0) + 1;
+    }
+    return counts.entries.where((e) => e.value >= 4).map((e) => e.key).toSet();
   }
 
   // 缩放把手：右下角，可自由改变弹窗长宽
@@ -702,7 +835,19 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                 Expanded(
                   child: _section(
                     title: '牌河',
-                    child: _discardSection(discards, discardCount),
+                    titleOverride: _discardSectionHeader(
+                      discardCount: discardCount,
+                      expanded: _discardExpanded,
+                      onToggle: () =>
+                          setState(() => _discardExpanded = !_discardExpanded),
+                    ),
+                    child: _discardExpanded
+                        ? _discardSection(
+                            discards,
+                            discardCount,
+                            hand: hand,
+                          )
+                        : const SizedBox.shrink(),
                     fillHeight: true,
                   ),
                 ),
@@ -726,12 +871,25 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   }
 
   /// 段容器：固定高度的标题栏 + 可滚动内容。无 LayoutBuilder / 无 MediaQuery。
+  /// 可选 titleOverride：传入则用自定义标题组件（如带折叠开关的牌河标题），
+  /// 不传则回退到默认的纯文本标题。
   Widget _section({
     required String title,
     required Widget child,
     double? height,
     bool fillHeight = false,
+    Widget? titleOverride,
   }) {
+    final Widget header = titleOverride ??
+        Text(
+          title,
+          style: const TextStyle(
+            color: Colors.white70,
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.5,
+          ),
+        );
     final Widget body = Container(
       decoration: BoxDecoration(
         color: Colors.white.withAlpha(8),
@@ -746,15 +904,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final Widget content = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text(
-          title,
-          style: const TextStyle(
-            color: Colors.white70,
-            fontSize: 11,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 0.5,
-          ),
-        ),
+        header,
         const SizedBox(height: 4),
         // 必须 Expanded：body 内是 SingleChildScrollView，在 Column 中若不给出
         // 有界高度，它会取"子内容的完整高度"。牌河牌多时子内容远高于段高，

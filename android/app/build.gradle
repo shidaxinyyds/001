@@ -84,9 +84,17 @@ chaquopy {
             install("opencv-python~=4.5.1")
 
             install("pillow")
+
+            // TFLite 推理（Chaquopy 镜像提供 2.5.0 的 cp38 Android ABI wheels），
+            // 用于替换手写几何分类器——34 类小 CNN 在设备端单张推理 <5ms。
+            install("tflite-runtime~=2.5.0")
         }
         // Portable: chaquopy auto-detects python3; the previous Nix path only works inside a nix-shell.
         buildPython("python3")
+    }
+    // 把训练好的 .tflite 模型随 APK 发布；assets 会被 chaquopy 原样打入 app.imy。
+    sourceSets {
+        main.assets.srcDirs += ['src/main/python/tflite_assets']
     }
 }
 
