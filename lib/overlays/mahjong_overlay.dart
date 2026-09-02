@@ -332,6 +332,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   static const double _kMinPanelHExpanded = 320;
   static const double _kMinPanelHCollapsedPreview = 200;
   static const double maxPanelH = 760;
+  // 牌河折叠态下的标题行高度（仅显示「牌河 · N 张 + 展开」一行，不占弹性高度）。
+  static const double _kDiscardHeaderH = 32;
   double _minPanelH() => _previewCollapsed
       ? _kMinPanelHCollapsedPreview
       : _kMinPanelHExpanded;
@@ -612,6 +614,47 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             ),
           ),
       ],
+    );
+  }
+
+  // 牌河段容器：展开时占弹性高度（Expanded），折叠时收回成一行标题、
+  // 不占弹性高度，把纵向空间让给「建议 / 手牌」两段 —— 与识别区域收起行为一致。
+  // 之前牌河虽能折叠，但内容被 Expanded 包裹，折叠后仍占 1/3 弹性高度、
+  // 空间并未真正释放；这里按展开/折叠切换 Expanded ↔ 定高，彻底收回空间。
+  Widget _discardBlock({
+    required String discards,
+    required int discardCount,
+    required String hand,
+  }) {
+    if (_discardExpanded) {
+      return Expanded(
+        child: _section(
+          title: '牌河',
+          titleOverride: _discardSectionHeader(
+            discardCount: discardCount,
+            expanded: true,
+            onToggle: () => setState(() => _discardExpanded = !_discardExpanded),
+          ),
+          child: _discardSection(discards, discardCount, hand: hand),
+          fillHeight: true,
+        ),
+      );
+    }
+    // 折叠态：只保留标题行（含「展开 ▸」按钮），定高不占弹性空间。
+    return SizedBox(
+      height: _kDiscardHeaderH,
+      child: Container(
+        decoration: BoxDecoration(
+          color: Colors.white.withAlpha(8),
+          borderRadius: BorderRadius.circular(6),
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        child: _discardSectionHeader(
+          discardCount: discardCount,
+          expanded: false,
+          onToggle: () => setState(() => _discardExpanded = !_discardExpanded),
+        ),
+      ),
     );
   }
 
@@ -997,25 +1040,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                   ),
                 ),
                 const SizedBox(height: _kSectionGap),
-                Expanded(
-                  child: _section(
-                    title: '牌河',
-                    titleOverride: _discardSectionHeader(
-                      discardCount: discardCount,
-                      expanded: _discardExpanded,
-                      onToggle: () =>
-                          setState(() => _discardExpanded = !_discardExpanded),
-                    ),
-                    child: _discardExpanded
-                        ? _discardSection(
-                            discards,
-                            discardCount,
-                            hand: hand,
-                          )
-                        : const SizedBox.shrink(),
-                    fillHeight: true,
-                  ),
-                ),
+                _discardBlock(discards: discards, discardCount: discardCount, hand: hand),
                 const SizedBox(height: _kSectionGap),
                 Expanded(
                   child: _section(
