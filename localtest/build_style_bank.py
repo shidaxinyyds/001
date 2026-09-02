@@ -52,6 +52,7 @@ STYLES = [
     ("duma520", os.path.join(HERE, "tiles", "duma520"), _truth_duma),
     ("wikipedia", os.path.join(HERE, "real_tiles"), _truth_plain),
     ("app_shot", os.path.join(HERE, "tiles", "screenshot"), _truth_screenshot),
+    ("tencent_happy", os.path.join(HERE, "tiles", "tencent_happy"), _truth_plain),
 ]
 
 
@@ -66,8 +67,6 @@ def to_bgr(img):
 
 def main():
     det = StructuralDetector()
-    if os.path.isdir(OUT):
-        shutil.rmtree(OUT)
     total = 0
     for style, src, truth_fn in STYLES:
         files = sorted(glob.glob(os.path.join(src, "*.png")))
