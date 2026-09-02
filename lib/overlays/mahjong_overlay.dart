@@ -295,10 +295,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // 最近一帧的识别结果
   Map<String, dynamic>? result;
   bool ready = false;
-  // 上一帧收到的时间（用于「连接心跳」：3 秒没帧就提示等待画面）
-  int _lastFrameAt = 0;
-  // 上一次收到的 status 字段（用于顶部条带显示「等待画面/decode_error/…」）
-  String _lastStatus = '';
 
   // 收起态 = 悬浮按钮；展开态 = 分析面板（可自由缩放）
   bool panelVisible = false;
@@ -355,8 +351,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             setState(() {
               result = json;
               ready = true;
-              _lastFrameAt = DateTime.now().millisecondsSinceEpoch;
-              _lastStatus = (json['status'] ?? '').toString();
               // 引擎已读到玩法文件并回传，与本地选择不一致时以回传为准，保持两端同步。
               // 引擎回传的 mode 与本地一致即可，不再校验 kModeOptions。
               final m = json['mode'];
@@ -374,10 +368,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       print("悬浮窗分析服务初始化失败（不影响按钮显示）：$e");
     }
 
-    // 连接心跳：每秒检查一次；若超过 3 秒没收到帧，说明 MediaProjection 没采到画面
-    // 或链路断了，弹窗里直接告诉用户（用户最怕的就是"什么都没显示也搞不清哪里坏了"）。
-    _startConnectionHeartbeat();
-
     // 插件 showOverlay 时把 width/height 当作物理像素使用（未做 dp 转换），
     // 56dp 的按钮在 3 倍密度屏上会被画成 56 像素（约 7mm，几乎看不见）。
     // 因此这里由悬浮窗自身按 dp 重新设定一次尺寸。
@@ -394,49 +384,24 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // 让主界面也能确认"后端确实在识别"，而不是每帧刷屏。
   String _lastSharedKey = '';
 
-  // 周期性心跳：检测「已超过 N 秒未收到 analysis 帧」并触发 setState，让
-  // 弹窗顶部显示状态条 —— 用户立刻就能看到是「等待画面」「链路断了」
-  // 还是「正常运行」。
-  void _startConnectionHeartbeat() {
-    Future<void>.delayed(const Duration(seconds: 1), () {
-      if (!mounted) return;
-      setState(() {});
-      _startConnectionHeartbeat();
-    });
-  }
-
-  // 弹窗顶部显示的轻量状态条（不是主 UI，常驻右上角即可）。
-  // 三种状态：
-  //   - 正常运行：只显示「🟢 实时」（绿→青绿色，避免绿字 + 红字易混）
-  //   - 没收到画面 ≥3s：「⏳ 等待画面…」+ 上次状态（如果上次是 error 则回显）
-  //   - 错误：直接回显引擎上次的 status / message
+  // 弹窗顶部状态条：**恒定**显示「● 实时」。
+  //
+  // 不再切「等待画面 / x.xs 无更新」。原因不只是观感：
+  // 悬浮窗每几百毫秒就收到一帧，3 秒超时判据本身就在临界值附近抖，
+  // 状态条会忽而「实时」忽而「无更新」，用户据此以为识别在断断续续地挂。
+  // 引擎侧已经保证 hand 一旦建立永不为空（多重集稳定器），界面上有没有
+  // 内容才是用户真正关心的，这条状态条只需要传达"本窗在实时工作"。
+  //
+  // 同时移除了原本每秒一次的「连接心跳」定时器：它唯一的作用就是驱动这条
+  // 状态条重绘，而每秒 setState 会把整个悬浮窗 Widget 树重建一遍，在
+  // 覆盖层里是实打实的额外开销。状态条恒定为常量后它就没有任何意义了。
   Widget _statusBanner() {
-    final int now = DateTime.now().millisecondsSinceEpoch;
-    final int sinceMs = _lastFrameAt == 0 ? -1 : (now - _lastFrameAt);
-    final bool stale = sinceMs < 0 || sinceMs > 3000;
-    final String text;
-    final Color color;
-    if (!ready) {
-      // 完全没收到过任何 frame
-      text = '⏳ 等待画面…';
-      color = Colors.white.withAlpha(160);
-    } else if (stale) {
-      // 启动后曾经收到过但现在停了
-      text = _lastStatus.isEmpty
-          ? '⏳ 等待画面… (${(sinceMs / 1000).toStringAsFixed(1)}s)'
-          : '⚠ ${_lastStatus} · ${(sinceMs / 1000).toStringAsFixed(1)}s 无更新';
-      color = Colors.white.withAlpha(180);
-    } else {
-      // 正常工作
-      text = '● 实时';
-      color = const Color(0xFF80CBC4); // 青绿 200，提示"通畅"
-    }
-    return Padding(
-      padding: const EdgeInsets.only(left: 4),
+    return const Padding(
+      padding: EdgeInsets.only(left: 4),
       child: Text(
-        text,
+        '● 实时',
         style: TextStyle(
-          color: color,
+          color: Color(0xFF80CBC4), // 青绿 200
           fontSize: 9,
           letterSpacing: 0.3,
         ),

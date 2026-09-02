@@ -72,6 +72,11 @@ VOTE_MERGE_FRAC = 0.45
 # 位置投票最低票数：占总票数 ≥ 该比例的标签才采纳。
 VOTE_MIN_FRAC = 0.55
 
+# 「历史强势否决」门槛：历史众数的加权份额 ≥ 该值、且历史完全不支持最新帧
+# 的标签时，才判定最新帧是单帧错认并用历史众数覆盖。取值必须高——
+# 绝大多数情况下应当采信最新帧（见 _TileVoter.vote 内的注释）。
+VOTE_HIST_DOMINANT = 0.70
+
 # 单位置最低票数（绝对值）：必须 ≥VOTE_MIN_VOTES 票才采纳；
 # 否则该位置输出 None（视为未识别）——这是"一下有一下没有"的根因，
 # 原实现在投票不过半时回退到最后一帧的 label，结果就是单帧抖动直接污染输出。
@@ -97,6 +102,20 @@ ENGINE_MIN_CONF_RELAX = 0.42
 DISCARD_HISTORY_FRAMES = 6
 DISCARD_HISTORY_MIN_SAMPLES = 3
 MIN_DROP_DELTA = 4
+
+# ---------------------------------------------------------------- 手牌稳定化
+# 手牌的语义是「多重集」（13/14 张牌的无序集合），不是有序序列。
+# 因此稳定化必须在**牌型计数**层面做，绝不能在位置/序列层面做。
+#
+# 为什么：每次摸牌/打牌后手牌必然重排，每张牌的 x 平移约一个牌宽（真机
+# 实测 148px），远超位置投票的归并半径（0.45×牌高 ≈ 75px）。按位置归并
+# 的历史帧会**全部**失配，每个位置只剩最新帧 1 票，低于最低票数被判为
+# 「未识别」→ 手牌数从 13 掉到 0 → 悬浮窗整段空白 → 两帧后才恢复。
+# 这就是用户看到的「一会显示一会不显示」的决定性根因。
+HAND_CONFIRM_FRAMES = 2      # 连续多少帧牌型完全一致才采纳为新稳定手牌
+HAND_BIG_JUMP = 4            # 与稳定手牌差异超过这么多张，要求多确认 1 帧
+HAND_MODE_WINDOW = 8         # 众数兜底窗口：最近多少帧
+HAND_MODE_VOTES = 5          # 众数兜底：窗口内出现这么多次即强制采纳
 
 
 def _hand_diff_count(a: str, b: str) -> int:
@@ -321,10 +340,18 @@ class _TileVoter:
                         matches_w.append((w, l2, c2))
 
             if not matches_w:
-                # 窗口内没有任何 label（说明新位置刚出现）——以前投票不过半也会回退到
-                # last 的 label，那是跳变的根因。现在返回 None，让该位置当作"未识别"，
-                # UI 自然会保持上次的状态。
-                out.append((rect, None, 0.0))
+                # 窗口内没有任何历史匹配 —— 说明这个位置是**新出现的**
+                # （打牌后手牌重排、牌河新增牌、冷启动首帧、镜头/朝向变化）。
+                #
+                # 旧实现在这里返回 None，这是"打一张牌后整段建议消失 1~2 秒"的
+                # 决定性根因：重排让每张牌平移 ≈148px，远超归并半径 ≈75px，
+                # 历史帧全部失配，每格只剩最新帧 1 票 < VOTE_MIN_VOTES(2)
+                # → 全部输出 None → 手牌数 13 掉到 0 → 悬浮窗整段空白。
+                #
+                # 位置投票的职责是「修正单帧错认」，不是「否决新位置」。
+                # 后者属多重集稳定器（_HandStabilizer）管，它在牌型计数层面
+                # 工作，对平移/重排完全免疫。这里直接透传最新帧的判定。
+                out.append((rect, last_label, _last_conf))
                 continue
 
             # 按 label 求加权和
@@ -343,15 +370,31 @@ class _TileVoter:
             #     否则意味着"最新帧刚换了"，投票还没稳，宁可不输出。
             #     但如果 last_label 是 None（新位置刚出现/单帧漏检），宽容：
             #     只要历史加权份额达标就认，否则永远无法起步。
-            last_vote_w = label_weight.get(last_label, 0.0) if last_label else 0.0
             ok_share = (best_w / n_total_w) >= VOTE_MIN_FRAC
             ok_abs = label_weight[best_lab] >= VOTE_MIN_VOTES
             if last_label is None:
                 # last 没识别，依靠历史加权；放宽要求，但不能松到让单帧噪声混入
                 chosen: Optional[str] = best_lab if (ok_share and ok_abs) else None
             else:
-                ok_last = (last_label == best_lab and last_vote_w > 0.0)
-                chosen = best_lab if (ok_share and ok_abs and ok_last) else None
+                # ===== 最新帧优先 =====
+                # 位置对上了、但标签和历史众数不同时，**优先信最新帧**。
+                # 旧实现要求 last_label == best_lab 才输出，否则输出 None ——
+                # 于是"手牌刚变化"的那一帧必然被否决（历史全是旧标签），
+                # 又是一处整帧空白的来源。
+                #
+                # 唯一的例外是「历史强势否决」：历史票数足够厚、众数份额
+                # 压倒性、且历史里一次都没出现过最新帧的标签 —— 三条同时
+                # 成立才判定最新帧是单帧错认（典型：筒/索被误认成白板），
+                # 用历史众数纠正。否则一律采信最新帧。
+                w_last = weights[-1]
+                support_last = label_weight.get(last_label, 0.0) - w_last
+                hist_w = n_total_w - w_last
+                strong_hist = (
+                    hist_w >= 1.5
+                    and (best_w / n_total_w) >= VOTE_HIST_DOMINANT
+                    and support_last <= 1e-9
+                )
+                chosen = best_lab if strong_hist else last_label
             avg_conf = (
                 sum(label_conf[best_lab]) / len(label_conf[best_lab])
                 if best_lab in label_conf else 0.0
@@ -359,6 +402,194 @@ class _TileVoter:
             out.append((rect, chosen, avg_conf))
         out.sort(key=lambda d: d[0][0])
         return out
+
+
+def _mpsz_to_counter(mpsz: str) -> Counter:
+    """mpsz 串 → 牌型计数（已是排序归一化的，可直接当字典键比较）。"""
+    return Counter([mpsz[i:i + 2] for i in range(0, len(mpsz) - 1, 2)])
+
+
+def _counter_to_mpsz(cnt: Counter) -> str:
+    """牌型计数 → 排序归一化的 mpsz 串（同一副手牌永远得到同一个串）。"""
+    return "".join(t * n for t, n in sorted(cnt.items()))
+
+
+# 牌面亮度下限（灰度均值）。切牌器按"张数先验"强制切满 N 张，遇到非牌
+# 区域（桌面、UI 元素、牌之间的大缝隙）会把它也切成一张牌，并给出一个
+# **自信的错误标签**。实测：把真机截图里的一张牌涂成桌面背景后，切牌器
+# 仍切出 13 张，把背景判成了 1p（conf 0.95）——漏识别反而变成了认错一张
+# 牌。这种错误在置信度层面完全看不出来（conf 很高），只能看牌面本身。
+#
+# 判据标定（同一张真机截图 2712x1220 实测）：
+#     牌面   灰度均值 170~193，饱和度 28~52
+#     桌面   灰度均值  56~ 84，饱和度 117~119
+# 中间 85~165 是巨大空档，门槛取 120 落在正中，极稳。
+# 另配"整行自适应"：若整行牌面都很暗（暗色主题美术），说明这条判据
+# 不适用，整帧跳过亮度过滤，绝不至于把真牌全砍光。
+MIN_FACE_BRIGHTNESS = 120.0
+
+
+def _face_brightness(image: CVImage, rect) -> float:
+    """牌面中心区域的灰度均值（避开边框与相邻牌的缝隙）。"""
+    try:
+        x, y, w, h = int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])
+        ih_, iw_ = image.shape[:2]
+        ix = max(0, x + int(w * 0.15))
+        iy = max(0, y + int(h * 0.15))
+        iw = min(int(w * 0.7), iw_ - ix)
+        ih = min(int(h * 0.7), ih_ - iy)
+        if iw <= 0 or ih <= 0:
+            return 0.0
+        patch = image[iy:iy + ih, ix:ix + iw]
+        gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY) if patch.ndim == 3 else patch
+        return float(gray.mean())
+    except Exception:
+        return 0.0
+
+
+# 帧差去重最多连续跳过多少帧。
+# 麻将画面大部分时间是静止的（等别人出牌），帧差去重能省下大量 CPU；
+# 但不能无限期跳过——否则牌河里的新牌、手牌的细微变化永远刷新不了。
+# 4 帧 ≈ 1.6s 强制刷一次，CPU 仍省约 75%。
+MAX_SKIP_FRAMES = 4
+
+
+class _HandStabilizer:
+    """手牌多重集稳定器 —— 消除"一会显示一会不显示"的核心。
+
+    手牌在语义上是**多重集**（13/14 张牌的无序集合），不是有序序列。
+    所以稳定化必须在牌型计数层面做：把每帧的手牌行标签转成 Counter，
+    再对"最近若干帧的 Counter"求共识。这样做之后，
+
+      - 手牌重排 / 整行平移 / 摸牌插入 —— 完全不影响（Counter 不变）
+      - 单帧漏识别 1 张    —— 该帧张数不合法，直接不参与共识，稳定值不动
+      - 单帧把某张认错     —— 该帧 Counter 与前后都不同，拿不到共识，稳定值不动
+      - 真实摸牌 / 打牌    —— 连续 2 帧给出同一个新 Counter，立即切换
+
+    采纳规则（满足任一即更新稳定手牌）：
+      1) 连续 HAND_CONFIRM_FRAMES 帧给出完全相同的合法牌型；
+      2) 最近 HAND_MODE_WINDOW 帧里同一合法牌型出现 ≥HAND_MODE_VOTES 次
+         （兜底：应对"识别器稳定漏同一张牌"这类永远凑不满连续帧的情况）。
+
+    大跳变（与当前稳定手牌差异 > HAND_BIG_JUMP 张）额外要求多确认 1 帧，
+    因为正常一巡最多变化 1~2 张，一次差 5 张以上几乎一定是误识别爆发。
+
+    输出的 mpsz **永不为空**（除非从未识别到过合法手牌）——这正是
+    "识别不出来时界面也不要空着"的保证。
+    """
+
+    def __init__(self) -> None:
+        # 当前稳定手牌（排序归一化的 mpsz）
+        self.stable_mpsz: str = ""
+        # 连续多少帧给出了同一个牌型
+        self._streak: int = 0
+        self._last_key: str = ""
+        # 最近若干帧的合法牌型（供众数兜底）
+        self._recent: deque = deque(maxlen=HAND_MODE_WINDOW)
+        # 本帧是否看到了一个"尚未被采纳"的新牌型。引擎据此**强制**下一帧
+        # 跑完整识别（否则帧差去重会把后续帧全跳掉，永远攒不到第二票，
+        # 手牌就再也不更新了 —— 实测中这是"识别不出来"的根因之一）。
+        self.pending: bool = False
+
+    def reset(self) -> None:
+        """玩法切换 / 朝向变化时硬重置：旧手牌与新场景无关。"""
+        self.stable_mpsz = ""
+        self._streak = 0
+        self._last_key = ""
+        self._recent.clear()
+        self.pending = False
+
+    def observe(self, labels, valid_sizes, avail=None) -> str:
+        """喂入本帧手牌行的标签列表，返回应当对外输出的稳定 mpsz。"""
+        cnt: Counter = Counter()
+        for lab in labels:
+            if not lab:
+                continue
+            if avail is not None:
+                try:
+                    if mpsz_to_tile34_index(lab) not in avail:
+                        continue
+                except Exception:
+                    continue
+            cnt[lab] += 1
+
+        n = sum(cnt.values())
+        # 张数不合法（漏识别 / 多识别 / 根本没切到牌）→ 这一帧不参与共识。
+        # 稳定手牌原样保留，界面继续显示上一副确定的手牌。
+        if n not in valid_sizes:
+            self._streak = 0
+            self._last_key = ""
+            self.pending = False
+            return self.stable_mpsz
+
+        # 互斥校验：同字 ≥5 张必是误判（典型：筒/索被刷成白板）。
+        if any(c > MAX_DUP_PER_TILE for c in cnt.values()):
+            self._streak = 0
+            self._last_key = ""
+            self.pending = False
+            return self.stable_mpsz
+
+        key = _counter_to_mpsz(cnt)
+        self._recent.append(key)
+
+        if key == self._last_key:
+            self._streak += 1
+        else:
+            self._streak = 1
+            self._last_key = key
+
+        # 已经是稳定值 → 无待确认变化，下一帧可以正常按帧差跳过
+        if key == self.stable_mpsz:
+            self.pending = False
+            return self.stable_mpsz
+
+        # 需要多少帧共识：大跳变额外 +1 帧
+        need = HAND_CONFIRM_FRAMES
+        if self.stable_mpsz:
+            if _hand_diff_count(self.stable_mpsz, key) > HAND_BIG_JUMP:
+                need += 1
+        # 冷启动：还没有任何稳定手牌时，第一个合法牌型立即采纳。
+        # 再等 2 帧共识只会让界面多空白 800ms —— 用户最不能忍的正是"识别不出来"。
+        if not self.stable_mpsz:
+            self.stable_mpsz = key
+            self.pending = False
+            return self.stable_mpsz
+
+        # 众数兜底：窗口内出现次数够多，说明识别器已经稳定在（可能不完美的）
+        # 这个牌型上，再等下去也不会更好，直接采纳。
+        mode_hits = sum(1 for k in self._recent if k == key)
+        if self._streak >= need or mode_hits >= HAND_MODE_VOTES:
+            self.stable_mpsz = key
+            self.pending = False
+        else:
+            # 看到了新牌型但证据还不够 —— 通知引擎下一帧必须真跑一次，
+            # 别被帧差去重跳掉。
+            self.pending = True
+        return self.stable_mpsz
+
+
+def _reconcile_hand_tiles(row, stable_mpsz: str):
+    """让手牌行的逐张标签与稳定手牌对齐。
+
+    UI 渲染的是 tiles 里的逐张标签，建议/向听用的是 hand 字段。两者来自
+    同一帧的不同处理阶段，一旦不一致，用户会看到"显示的牌"和"建议打的牌"
+    对不上（建议打 9m，但屏幕上手牌行里根本没有 9m）。
+
+    策略：
+      - 逐张标签的牌型计数已经等于稳定手牌 → 原样保留（顺序最真实）。
+      - 否则用稳定手牌的排序序列按位置回填。麻将手牌在游戏里本来就是
+        排好序的，所以"第 i 个位置 = 排序后第 i 张"在绝大多数 UI 上成立。
+    """
+    if not stable_mpsz or not row:
+        return row
+    cnt_row = Counter(d[1] for d in row if d[1] is not None)
+    if cnt_row == _mpsz_to_counter(stable_mpsz):
+        return row
+    labels = [stable_mpsz[i:i + 2] for i in range(0, len(stable_mpsz), 2)]
+    out = []
+    for i, (rect, lab, conf) in enumerate(row):
+        out.append((rect, labels[i] if i < len(labels) else None, conf))
+    return out
 
 
 def _error_result(status: str, message: str) -> "EngineResult":
@@ -428,8 +659,10 @@ class Engine:
         self._frame_skipper = _FrameSkipper()
         # 动画突变帧（吃碰杠的牌移动帧、菜单弹出帧）：整帧丢弃
         self._motion_guard = _MotionGuard()
-        # 多帧投票：把最近 4 帧的同一位置检测做加权多数表决
+        # 多帧投票：把最近 4 帧的同一位置检测做加权多数表决（只负责"修正单帧错认"）
         self._tile_voter = _TileVoter(window=VOTE_WINDOW)
+        # 手牌多重集稳定器：真正决定"界面上显示哪副手牌"的地方
+        self._hand_stab = _HandStabilizer()
         # 行锁定：上一帧手牌行的 y 坐标，下一帧在 [y - HAND_LOCK_BAND, y + HAND_LOCK_BAND]
         # 范围内挑，避免 13↔14 跳变（手牌行被牌河/记分行抢走）的根因
         self._last_hand_y: Optional[float] = None
@@ -938,7 +1171,17 @@ class Engine:
             except Exception:
                 diff = float("inf")  # 帧差算不出来就当不动也跑完整识别
 
-            if diff < FRAME_DIFF_THRESHOLD and self._frame_skipper.cached is not None:
+            # 强制跑完整识别的两个条件：
+            #  1) 连续跳过已达上限 —— 画面可以长时间静止，但牌河/剩余数仍要刷新；
+            #  2) 稳定器报告"看到了新牌型但证据还不够"。
+            #     缺了第 2 条会有个很隐蔽的死结：麻将画面打完一张牌后就静止了，
+            #     帧差低于阈值 → 后续帧全被跳过 → 稳定器永远攒不到第二票 →
+            #     手牌再也不更新。用户看到的就是"识别不出来"。
+            force_run = (self._consecutive_skips >= MAX_SKIP_FRAMES
+                         or self._hand_stab.pending)
+            if (not force_run
+                    and diff < FRAME_DIFF_THRESHOLD
+                    and self._frame_skipper.cached is not None):
                 self._consecutive_skips += 1
                 return self._build_skip_result(image, self._frame_skipper.cached)
             self._consecutive_skips = 0
@@ -963,11 +1206,15 @@ class Engine:
             self.mode = load_mode()
             if self.mode != self._prev_mode:
                 self._tile_voter.reset()
+                self._hand_stab.reset()
                 self._last_hand_y = None
                 self._stable_hand_mpsz = ""
                 self._stable_hand_count = 0
                 self._advice_key = None
                 self._frame_skipper = _FrameSkipper()  # 旧缓存与新玩法无关
+                # 玩法的合法手牌张数/可用牌集合都变了，旧 trainer 里的
+                # 历史手牌会让 diff 判定全乱，必须重建（下一帧自动建立）。
+                self.trainer = None
                 self._prev_mode = self.mode
             avail = available_set(self.mode)
             hsizes = hand_sizes(self.mode)
@@ -988,9 +1235,27 @@ class Engine:
                 rows = detector.detect_all_rows(image, allow_rotation=False)
 
             # 置信过滤 + 牌形降权（低置信牌直接丢弃，宁可不识别也不臆测）。
+            #
+            # 牌面亮度校验：先看整行牌面是不是"亮底牌"（绝大多数麻将如此）。
+            # 只有确认是亮底牌时才启用单格过滤 —— 暗色主题美术下这条判据
+            # 不适用，整帧跳过，绝不至于把真牌全砍光（见 MIN_FACE_BRIGHTNESS）。
+            bright_all = [_face_brightness(image, r)
+                          for row in rows for (r, l, _c) in row if l is not None]
+            use_brightness = bool(bright_all) and (
+                sum(bright_all) / len(bright_all) >= MIN_FACE_BRIGHTNESS)
+
             filtered = []
             for row in rows:
-                fr = [(r, self._apply_conf(r, l, c), c) for (r, l, c) in row]
+                fr = []
+                for (r, l, c) in row:
+                    lab = self._apply_conf(r, l, c)
+                    if (lab is not None and use_brightness
+                            and _face_brightness(image, r) < MIN_FACE_BRIGHTNESS):
+                        # 这一格里根本没有牌（是桌面/UI/缝隙），切牌器只是
+                        # 按张数先验把它凑成了一张。判为未识别，让它掉出
+                        # 张数统计 —— 稳定器会因此保持上一副确定的手牌。
+                        lab = None
+                    fr.append((r, lab, c))
                 filtered.append(fr)
 
             # ===== TFLite 二次确认（可选、可热更、未来 hook）=====
@@ -1053,11 +1318,34 @@ class Engine:
                 voted = flat
             voted_rows = StructuralDetector._group_rows(voted)
 
-            # 区分手牌行与牌河行
+            # 区分手牌行与牌河行（用下标而非对象身份：下面会把手牌行整体
+            # 替换成"与稳定手牌对齐"后的新列表，身份比较会失效，进而把
+            # 整副手牌误当成牌河算进 discards —— 一个会让剩余牌数归零的坑）。
             hand_row = self._pick_hand_row(voted_rows)
+            hand_idx = None
+            for _i, _row in enumerate(voted_rows):
+                if _row is hand_row:
+                    hand_idx = _i
+                    break
+
+            # ===== 手牌：本帧原始标签 → 多重集稳定器定夺 =====
+            # 稳定器一旦建立起稳定手牌，输出就**永不为空**：单帧抖动、手牌
+            # 重排、漏识别都不会让它变空。是否真的变了由"连续帧共识"决定。
+            # 这是"界面永远有内容、且不会闪"的根本保证。
+            raw_labels: List[str] = []
+            if hand_row is not None:
+                raw_labels = [d[1] for d in hand_row if d[1] is not None]
+            hand_mpsz = self._hand_stab.observe(raw_labels, hsizes, avail)
+
+            # 手牌行的逐张标签与稳定手牌对齐（避免"显示的牌"和"建议打的牌"对不上）
+            if hand_idx is not None and hand_mpsz:
+                voted_rows[hand_idx] = _reconcile_hand_tiles(
+                    voted_rows[hand_idx], hand_mpsz)
+                hand_row = voted_rows[hand_idx]
+
             discard_labels = []
-            for row in voted_rows:
-                if row is hand_row:
+            for _i, row in enumerate(voted_rows):
+                if _i == hand_idx:
                     continue
                 for (rect, label, conf) in row:
                     if label is not None:
@@ -1070,14 +1358,7 @@ class Engine:
                 except Exception:
                     pass
 
-            # 手牌
-            hand_mpsz = ""
-            hand = None
-            if hand_row is not None:
-                hand_labels = [d[1] for d in hand_row if d[1] is not None]
-                hand_mpsz = self._labels_to_mpsz(hand_labels, avail)
-                if hand_mpsz:
-                    hand = TileCollection.from_mpsz(hand_mpsz)
+            hand = TileCollection.from_mpsz(hand_mpsz) if hand_mpsz else None
 
             status = "no_tiles"
             commentary: Optional[str] = None
@@ -1088,46 +1369,23 @@ class Engine:
 
             if hand is not None:
                 tile_count = len(hand)
-                if tile_count in hsizes:
-                    # 互斥校验：同字 ≥5 张必是误判（如白板刷屏）。
-                    # 把这一帧降级为 incomplete，等下一帧重识别。
-                    if self._check_dup_explosion(hand_mpsz):
-                        status = "incomplete"
-                        # 降级路径也要拿建议（复用缓存）
-                        if self.trainer is not None:
-                            shanten, advice = self.build_advice(hand, disc_counts)
-                    else:
-                        # 行级稳定性兜底：本帧 hand_mpsz 与上一次稳定手牌张数相同
-                        # 但差异 ≥3 张——典型"识别跳变"（帧间某张被误改了 label）。
-                        # 这种本帧降级为 incomplete 并沿用上次 stable_hand，避免
-                        # UI 出现一闪而过的错误手牌。
-                        diff_with_stable = -1
-                        if (self._stable_hand_mpsz
-                                and self._stable_hand_count == tile_count):
-                            diff_with_stable = _hand_diff_count(
-                                self._stable_hand_mpsz, hand_mpsz)
-                        stable_threshold = max(2, tile_count // 4)
-                        if (diff_with_stable >= 0
-                                and diff_with_stable > stable_threshold):
-                            status = "incomplete"
-                            # 降级路径也要拿建议
-                            if self.trainer is not None:
-                                shanten, advice = self.build_advice(hand, disc_counts)
-                        else:
-                            status = "ok"
-                            commentary = self.update_trainer(hand)
-                            shanten, advice = self.build_advice(hand, disc_counts)
-                            self._stable_hand_mpsz = hand_mpsz
-                            self._stable_hand_count = tile_count
-                else:
-                    status = "incomplete"
-                    # 关键：incomplete 也调 build_advice。
-                    # 内部会走"复用缓存"分支（len(hand) not in hand_sizes），
-                    # 把上一次稳定 advice 带回 UI。否则 UI 在牌数抖动时
-                    # advice 闪空 → 用户看到"识别在动但建议消失"，体验
-                    # 比"一直显示旧建议"差得多。
-                    if self.trainer is not None:
-                        shanten, advice = self.build_advice(hand, disc_counts)
+                # 走到这里，稳定器已经保证了三件事：张数合法、无同字刷屏、
+                # 连续帧共识。因此**不再做 incomplete 降级** ——
+                # 那套"本帧可疑就整帧降级"的旧逻辑是"一会有一会没有"的
+                # 另一半根因：UI 收到 status=incomplete 的同时还收到本帧的
+                # 脏 hand，于是闪出一副错牌，下一帧又闪回来。
+                status = "ok"
+                commentary = self.update_trainer(hand)
+                shanten, advice = self.build_advice(hand, disc_counts)
+                self._stable_hand_mpsz = hand_mpsz
+                self._stable_hand_count = tile_count
+            else:
+                # 还没建立起任何稳定手牌（冷启动 / 画面里确实没有牌）。
+                # 仍然尽量把上一次算好的建议带回去：build_advice 内部对
+                # "张数不合法"走复用缓存分支，UI 不会因此空掉。
+                if self.trainer is not None:
+                    shanten, advice = self.build_advice(
+                        TileCollection.from_mpsz(""), disc_counts)
 
             # 标记"最优"那张牌（最高 ukeire），UI 上加"最优"角标
             if advice:
@@ -1195,7 +1453,10 @@ class Engine:
             # ===== 方向自愈：连续 3 帧整帧 0 牌 → 解锁重探方向 =====
             # 用户中途旋转手机/切后台再回来，VirtualDisplay 朝向可能变了，
             # 旧锁定的方向不再适用。此时重新探测，避免永久卡在 0 牌。
-            total_detected = (len(hand_mpsz) // 2) + (len(disc_mpsz_out) // 2)
+            # 必须用**本帧**的检测数，不能用稳定手牌：稳定手牌一旦建立就
+            # 永不为空，拿它判 "0 牌" 会让方向自愈永远不触发 —— 用户旋转
+            # 手机后就会永久卡在"识别不出来"上。（踩过的坑）
+            total_detected = len(raw_labels) + (len(disc_mpsz) // 2)
             if total_detected == 0:
                 self._orient_zerocount += 1
                 if self._orient_zerocount >= 3:
@@ -1203,6 +1464,7 @@ class Engine:
                     self._orient = None
                     self._last_hand_y = None
                     self._tile_voter.reset()
+                    self._hand_stab.reset()
                     self._frame_skipper = _FrameSkipper()
             else:
                 self._orient_zerocount = 0
@@ -1224,9 +1486,36 @@ class Engine:
                 for (rect, label, _conf) in row
             ]
 
+            # ===== 链路诊断 =====
+            # 真机"识别不出来"时，光看 count=0 无法判断断在哪一环。这里把
+            # 每一环的产出量都带出来，一眼定位：
+            #   raw      切牌器切出的牌总数。0 = 根本没找到牌行（多半是朝向错
+            #            了，或画面里没有麻将牌）；正常应为 13~40。
+            #   rows     每行 [张数, 平均置信, 角色]。看手牌行有没有被挑对、
+            #            张数是不是接近 13/14。
+            #   raw_hand 本帧手牌行里过了置信门槛的标签数。<13 = 有牌被
+            #            置信度砍掉了（ENGINE_MIN_CONF 太高或画质太差）。
+            #   stab     稳定手牌是否已建立。
+            #   orient   当前锁定的旋转方向；null = 尚未锁定。
+            row_stats = []
+            for _i, row in enumerate(voted_rows):
+                cs = [d[2] for d in row if d[1] is not None]
+                row_stats.append([
+                    len(row),
+                    round(float(sum(cs)) / len(cs), 2) if cs else 0.0,
+                    "hand" if _i == hand_idx else "discard",
+                ])
+
             result = {
                 "mode": self.mode,
                 "mode_name": MODES.get(self.mode, {}).get("name", self.mode),
+                "diag": {
+                    "raw": sum(len(r) for r in rows),
+                    "rows": row_stats,
+                    "raw_hand": len(raw_labels),
+                    "stab": bool(self._hand_stab.stable_mpsz),
+                    "orient": self._orient,
+                },
                 "hand": hand_mpsz,
                 "count": tile_count,
                 "status": status,
