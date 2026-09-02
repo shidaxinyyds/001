@@ -4,8 +4,8 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
-import 'package:realtime_mahjong_trainer/overlays/tile_labels.dart';
-import 'package:realtime_mahjong_trainer/server.dart';
+import 'package:ace_mahjong/overlays/tile_labels.dart';
+import 'package:ace_mahjong/server.dart';
 
 // 解析原生层发来的分析结果：前 10('\n') 之前为 JSON，之后为 PNG 预览图字节。
 // 预览图当前不在界面上展示（仅保留字节以备扩展），因此这里不做解码，
@@ -351,6 +351,12 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // 收起后不再显示实时 preview，避免"画中画"遮挡，也降低解码/传输开销。
   bool _previewCollapsed = false;
 
+  // 手动方向覆盖（悬浮窗「旋转」按钮）。0/90/180/270，点一下循环切换到下
+  // 一个角度，经 shareData 发给主 App → 引擎 set_orient。自动方向探测在
+  // 特殊画面/异常朝向下可能选错导致"识别不出来"，用户一眼看到牌被横置时
+  // 点一下即可校正，无需等自动重探，也不依赖任何设备日志。
+  int _orientDeg = 0;
+
   // ===== 实时画面预览 + 可拖动识别框（ROI）=====
   // 引擎每帧随结果一起发来一张全屏缩略图（PNG），这里解码出来显示在面板顶部，
   // 用户拖动上面的"高亮带"对准自己手牌所在的纵向位置；带的比例经 MethodChannel
@@ -387,6 +393,24 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       });
     } catch (e) {
       print('识别框位置发送失败（已忽略）: $e');
+    }
+  }
+
+  // 手动方向覆盖：点一下循环切换到下一个角度（0→90→180→270→0）。
+  // 经 shareData 回主 App → 引擎 set_orient。自动方向探测在特殊画面/异常
+  // 朝向下可能选错导致"识别不出来"，用户一眼看到牌被横置时点一下即可校正。
+  void _cycleOrient() {
+    final int next = (_orientDeg + 90) % 360;
+    setState(() {
+      _orientDeg = next;
+    });
+    try {
+      FlutterOverlayWindow.shareData({
+        'type': 'orient',
+        'deg': next,
+      });
+    } catch (e) {
+      print('方向覆盖发送失败（已忽略）: $e');
     }
   }
 
@@ -489,6 +513,41 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     );
   }
 
+  // 诊断行：恒定显示识别链路关键指标，便于"识别不出来"时一眼定位断在哪：
+  //   状态  引擎最终状态（ok / no_tiles / 各种错误）
+  //   切牌  本帧结构识别器切出的牌总数（0 = 根本没找到牌，多半是朝向/画面问题）
+  //   方向  当前锁定的旋转角度
+  //   张数  已建立稳定手牌的张数
+  // 全部做空安全处理，任何字段缺失都不渲染、绝不抛错。
+  Widget _diagnosticFooter() {
+    final Map<String, dynamic>? r = result;
+    if (r == null) return const SizedBox.shrink();
+    final String status = (r['status'] is String) ? r['status'] as String : '?';
+    final Map<dynamic, dynamic>? diag =
+        (r['diag'] is Map) ? r['diag'] as Map<dynamic, dynamic> : null;
+    final int raw =
+        (diag != null && diag['raw'] is int) ? diag['raw'] as int : -1;
+    final dynamic orient = diag != null ? diag['orient'] : null;
+    final int count = (r['count'] is int) ? r['count'] as int : 0;
+    final String orientStr = (orient is int) ? '$orient°' : '?';
+    final String txt = '状态:$status  切牌:$raw  方向:$orientStr  张数:$count';
+    return SizedBox(
+      height: 16,
+      child: Padding(
+        padding: const EdgeInsets.only(top: 2),
+        child: Text(
+          txt,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: Colors.white38,
+            fontSize: 9,
+            letterSpacing: 0.2,
+          ),
+        ),
+      ),
+    );
+  }
+
   void _maybeShareStatus(Map<String, dynamic> json) {
     final key =
         "${json['hand']}|${json['shanten']}|${json['status']}|${json['count']}|${json['best']}";
@@ -566,9 +625,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     }
   }
 
-  // 牌河段标题：左侧"牌河 · N 张"。右侧的"展开▸ / 收起▾"只在有牌时
-  // 才显示——牌河为空时按钮"能点但无可见反馈"，给用户造成"按钮坏了"的
-  // 错觉。空牌河直接留白比假装可交互更好。
+  // 牌河段标题：左侧"牌河 · N 张"。右侧的"展开▸ / 收起▾"**始终显示**——
+  // 即便牌河为空也允许用户折叠这一段以释放屏幕空间（用户明确要求牌河也能
+  // 收起）。空牌河时文字显示"· 暂无"，但折叠按钮照常可用。
   Widget _discardSectionHeader({
     required int discardCount,
     required bool expanded,
@@ -596,23 +655,23 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           ),
         ),
         const Spacer(),
-        // 只有真有牌时才渲染折叠按钮，避免空状态下"按钮能点却什么变化都没有"
-        if (hasContent)
-          GestureDetector(
-            onTap: onToggle,
-            behavior: HitTestBehavior.opaque,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-              child: Text(
-                expanded ? '收起 ▾' : '展开 ▸',
-                style: const TextStyle(
-                  color: Color(0xFF80CBC4), // 青绿 200（主色家族），提示交互
-                  fontSize: 10,
-                  fontWeight: FontWeight.w500,
-                ),
+        // 始终渲染折叠按钮：用户要求牌河区也能收起。空牌河时折叠只是把
+        // 这段占位收成一行标题，同样释放弹性高度。
+        GestureDetector(
+          onTap: onToggle,
+          behavior: HitTestBehavior.opaque,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+            child: Text(
+              expanded ? '收起 ▾' : '展开 ▸',
+              style: const TextStyle(
+                color: Color(0xFF80CBC4), // 青绿 200（主色家族），提示交互
+                fontSize: 10,
+                fontWeight: FontWeight.w500,
               ),
             ),
           ),
+        ),
       ],
     );
   }
@@ -1051,6 +1110,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                     fillHeight: true,
                   ),
                 ),
+                const SizedBox(height: _kSectionGap),
+                _diagnosticFooter(),
               ],
             ),
           ),
@@ -1128,6 +1189,20 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                     color: Colors.white54,
                     fontSize: 9.5,
                     letterSpacing: 0.3,
+                  ),
+                ),
+              ),
+            ),
+            GestureDetector(
+              onTap: _cycleOrient,
+              child: Padding(
+                padding: const EdgeInsets.only(left: 6, bottom: 3),
+                child: Text(
+                  '旋转 $_orientDeg° ⟳',
+                  style: const TextStyle(
+                    color: Color(0xFF80CBC4),
+                    fontSize: 10,
+                    fontWeight: FontWeight.w500,
                   ),
                 ),
               ),

@@ -1,4 +1,4 @@
-package com.example.realtime_mahjong_trainer;
+package com.example.ace_mahjong;
 
 import android.app.Activity;
 import android.content.Context;
@@ -96,6 +96,16 @@ public class MainActivity extends FlutterActivity {
         float top = (aTop instanceof Number) ? ((Number) aTop).floatValue() : 0f;
         float bottom = (aBottom instanceof Number) ? ((Number) aBottom).floatValue() : 1f;
         ImageProcessor.setRoi(top, bottom);
+        result.success(0);
+        return;
+      }
+
+      if (call.method.equals("setOrient")) {
+        // 手动方向覆盖（悬浮窗「旋转」按钮）：用户看到牌被横置时点一下校正。
+        // 参数缺失/非法也安全兜底，绝不抛异常。
+        Object aDeg = call.argument("deg");
+        int deg = (aDeg instanceof Number) ? ((Number) aDeg).intValue() : 0;
+        ImageProcessor.setOrient(deg);
         result.success(0);
         return;
       }

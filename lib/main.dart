@@ -1,8 +1,8 @@
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
-import 'package:realtime_mahjong_trainer/home_page.dart';
-import 'package:realtime_mahjong_trainer/overlays/mahjong_overlay.dart';
+import 'package:ace_mahjong/home_page.dart';
+import 'package:ace_mahjong/overlays/mahjong_overlay.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();

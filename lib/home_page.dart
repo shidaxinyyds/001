@@ -4,8 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:realtime_mahjong_trainer/channel.dart';
-import 'package:realtime_mahjong_trainer/mode_store.dart';
+import 'package:ace_mahjong/channel.dart';
+import 'package:ace_mahjong/mode_store.dart';
 
 /// 主色调：青绿。
 /// 全局禁用红/橙/琥珀系，避免用户把"强调色"误读为"错误提示"。
@@ -76,6 +76,11 @@ class _HomePageState extends State<HomePage> {
         final top = (event['top'] as num?)?.toDouble() ?? 0.0;
         final bottom = (event['bottom'] as num?)?.toDouble() ?? 1.0;
         channel.invokeMethod<dynamic>('setRoi', {'top': top, 'bottom': bottom});
+      }
+      // 悬浮窗「旋转」按钮：把方向覆盖经主引擎 MethodChannel 转给 Java/引擎。
+      if (event is Map && event['type'] == 'orient') {
+        final deg = (event['deg'] as num?)?.toInt() ?? 0;
+        channel.invokeMethod<dynamic>('setOrient', {'deg': deg});
       }
     });
   }

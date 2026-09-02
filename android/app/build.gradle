@@ -27,7 +27,7 @@ apply plugin: 'kotlin-android'
 apply from: "$flutterRoot/packages/flutter_tools/gradle/flutter.gradle"
 
 android {
-    namespace "com.example.realtime_mahjong_trainer"
+    namespace "com.example.ace_mahjong"
     compileSdkVersion 34
     // 固定 NDK 版本，确保 CI（GitHub Actions）构建确定可复现
     ndkVersion "27.0.12077973"
@@ -47,7 +47,7 @@ android {
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId "com.example.realtime_mahjong_trainer"
+        applicationId "com.example.ace_mahjong"
         // You can update the following values to match your application needs.
         // For more information, see: https://docs.flutter.dev/deployment/android#reviewing-the-gradle-build-configuration.
         minSdkVersion 21

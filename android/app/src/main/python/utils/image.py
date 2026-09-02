@@ -94,7 +94,7 @@ def join_vertical(images: List[Image.Image]):
     return dst
 
 def save_image(image: CVImage, tag: str):
-    filepath = f"/storage/emulated/0/Android/data/com.example.realtime_mahjong_trainer/files/{datetime.now()}_{tag}.png"
+    filepath = f"/storage/emulated/0/Android/data/com.example.ace_mahjong/files/{datetime.now()}_{tag}.png"
     try:
         image_bytes: bytes = cv2.imencode('.png', image)[1].tobytes()
         with open(filepath, 'wb') as f:

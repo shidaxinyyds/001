@@ -1,4 +1,4 @@
-package com.example.realtime_mahjong_trainer;
+package com.example.ace_mahjong;
 
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;

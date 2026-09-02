@@ -566,6 +566,13 @@ class StructuralDetector(Detector):
         （见 _min_area 的说明，防止调用方单位用错导致静默全过滤）。
         """
         min_area = StructuralDetector._min_area(min_area_frac, face_area)
+        # 防御：OpenCV 的 C 层在收到非 8-bit 单通道 / 空 / 非连续数组时会直接
+        # SIGSEGV（不可被 Python try/except 捕获，进程表现为闪退）。进入
+        # findContours 前用纯 numpy 拦截坏数据，从根上消除这类崩溃。
+        if (not isinstance(m, np.ndarray) or m.ndim != 2
+                or m.dtype != np.uint8 or m.size == 0):
+            return []
+        m = np.ascontiguousarray(m)
         cnts, hier = cv2.findContours(m, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
         out = []
         if hier is None:
@@ -608,6 +615,7 @@ class StructuralDetector(Detector):
         sub = (m[y:y + h, x:x + w] > 0).astype(np.uint8)
         if sub.sum() < 5:
             return 0.0
+        sub = np.ascontiguousarray(sub)
         cnts, _ = cv2.findContours(sub, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not cnts:
             return 0.0
@@ -1882,6 +1890,20 @@ class StructuralDetector(Detector):
         bh, bw = band_img.shape[:2]
         if bh < 20 or bw < 60:
             return []
+        # 防御：cv2.cvtColor(..., COLOR_BGR2GRAY) 在非 3 通道 / 非 uint8 输入上
+        # 会直接 SIGSEGV。先归一化成「3 通道 uint8 且内存连续」再转灰度。
+        if not isinstance(band_img, np.ndarray):
+            return []
+        if band_img.ndim == 2:
+            band_img = cv2.cvtColor(band_img, cv2.COLOR_GRAY2BGR)
+        elif band_img.ndim != 3:
+            return []
+        if band_img.dtype != np.uint8:
+            try:
+                band_img = band_img.astype(np.uint8)
+            except Exception:
+                return []
+        band_img = np.ascontiguousarray(band_img)
         gray = (cv2.cvtColor(band_img, cv2.COLOR_BGR2GRAY)
                 if band_img.ndim == 3 else band_img).astype(np.float32)
         y1, y2 = 0, (tile_h_hint if tile_h_hint > 0 else bh)

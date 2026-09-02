@@ -6,7 +6,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:realtime_mahjong_trainer/overlays/mahjong_overlay.dart';
+import 'package:ace_mahjong/overlays/mahjong_overlay.dart';
 
 /// 判定一个颜色是否"看起来是红/橙系"。
 /// 判据：红通道明显高于绿和蓝，且红通道本身较亮。

@@ -1,4 +1,4 @@
-package com.example.realtime_mahjong_trainer;
+package com.example.ace_mahjong;
 
 import android.app.Notification;
 import android.app.NotificationChannel;

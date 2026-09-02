@@ -104,6 +104,13 @@ HAND_LOCK_BAND = 30
 # 避免启动时把噪音当真。
 ENGINE_MIN_CONF_RELAX = 0.42
 
+# 冷启动 bootstrap 门槛：尚未建立稳定手牌时，对「最像手牌行」的那一行用此更低门槛
+# 放行，打破「严格门槛(0.50) → 首帧所有牌被砍 → raw_labels 空 → 稳定手牌永远建不起来
+# → 放宽门槛(0.42，依赖已建稳定手牌)永不生效」的死锁。真机画面比干净测试图噪声大，
+# 单张 best-match conf 常落在 0.42~0.50，没有这层就会永久「识别不出来」。
+# 只在冷启动且只对手牌行候选生效；稳定手牌一旦建立，正常严格/放宽逻辑接管，不再用此门槛。
+BOOTSTRAP_CONF = 0.40
+
 # 牌河稳定性兜底：避免识别器瞬时漏抓牌河中的几张牌，导致 remaining/dead
 # 当帧剧烈变化。追踪最近 N 帧的 disc_mpsz 长度与 mpsz 增量；当前帧若
 # 显著少于历史最小值（差距 ≥MIN_DROP_DELTA），回退到历史最大稳定值。
@@ -655,6 +662,13 @@ def _is_valid_image(img) -> bool:
         return False
 
 
+# 方向重探「熔断」上限：连续 0 牌触发重探本是好意，但真机若因朝向/画面问题
+# 持续 0 牌，无限重探会反复跑重型 4 方向探测 → OOM/SIGSEGV 闪退。限制最多重探
+# MAX_ORIENT_REPROBES 次，之后停止重探、优雅报告 no_tiles，绝不让"识别不出来"
+# 演变成"程序闪退"。用户可用悬浮窗「旋转」按钮手动指定方向。
+MAX_ORIENT_REPROBES = 2
+
+
 class Engine:
     def __init__(self):
         self.trainer: Optional[Trainer] = None
@@ -696,6 +710,11 @@ class Engine:
         # 中途方向变化（用户旋转手机/切换 App）连续 3 帧 0 牌时自动解锁重探。
         self._orient: Optional[int] = None
         self._orient_zerocount: int = 0
+        # 手动方向覆盖（悬浮窗「旋转」按钮设置）。非 None 时跳过自动探测，
+        # 直接旋到指定方向。0/90/180/270 或 None（解除）。
+        self._orient_override: Optional[int] = None
+        # 方向重探熔断计数：已达上限后停止重探，避免无限重型探测闪退。
+        self._orient_reprobe_count: int = 0
         # 方向探测/快路径时已算出的检测结果，供 process() 复用，
         # 避免同一帧做两次完整检测。用完即清。
         self._cached_rows: Optional[list] = None
@@ -823,6 +842,31 @@ class Engine:
             return
         self._roi = (t, b)
 
+    def set_orient(self, deg) -> None:
+        """手动指定方向（0/90/180/270 或 None 解除）。悬浮窗「旋转」按钮调用。
+
+        用于自动方向探测失败（特殊画面/异常朝向）时的兜底：用户一眼看到牌被
+        横置，点一下旋转即可校正，无需等自动重探。参数非法直接忽略，绝不抛异常
+        （否则会经 chaquopy 冒泡到 Java 再冒泡到 UI 线程，可能触发闪退）。
+        """
+        try:
+            if deg is None:
+                self._orient_override = None
+                return
+            d = int(deg)
+            if d not in (0, 90, 180, 270):
+                return
+            self._orient_override = d
+            # 立即解锁自动方向，下一帧按覆盖方向重旋；同时清掉与方向强相关的状态。
+            self._orient = None
+            self._orient_zerocount = 0
+            self._orient_reprobe_count = 0
+            self._last_hand_y = None
+            self._tile_voter.reset()
+            self._cached_rows = None
+        except (TypeError, ValueError):
+            return
+
     def process_bytes(self, image_data) -> Optional[EngineResult]:
         try:
             arr = _to_uint8_buffer(image_data)
@@ -874,17 +918,19 @@ class Engine:
 
     # ---------------------------------------------------------- 引擎侧辅助
 
-    def _apply_conf(self, rect, label, conf):
+    def _apply_conf(self, rect, label, conf, bootstrap=False):
         """置信 + 牌形比例过滤：低于门槛或牌形不对的牌直接判为「不识别」，
         宁可漏识别也绝不臆测（白板刷屏、半张牌等假命中在此被挡掉）。
 
-        双门槛机制：
-          - 严格门槛 ENGINE_MIN_CONF（0.55）：默认走这条，防白板/伪命中。
+        三门槛机制：
+          - 严格门槛 ENGINE_MIN_CONF（0.50）：默认走这条，防白板/伪命中。
           - 放宽门槛 ENGINE_MIN_CONF_RELAX（0.42）：仅当引擎已建立稳定手牌
             （self._stable_hand_mpsz 非空）时才允许。这是"漏 1 张 → 自动补漏"
             的关键：若投票窗口里有 2~4 张牌稳定为 Xm，但第 N 张本来被投票器
             因 0.50 分拒了，会导致手牌数对（13/14 张）但实际少识别了一张。
             放宽门槛只在"补漏"时启用——启动期仍走严格门槛，避免噪声被当真。
+          - bootstrap 门槛 BOOTSTRAP_CONF（0.40）：仅冷启动（尚无稳定手牌）
+            且本张属于「手牌行候选」时生效，用于打破上述死锁，详见 BOOTSTRAP_CONF。
         """
         if label is None:
             return None
@@ -896,8 +942,11 @@ class Engine:
             return None
         if conf >= ENGINE_MIN_CONF:
             return label
-        # 已建立稳定手牌 + 严格门槛不过 + 放宽门槛过 → 允许（但仅一次）
+        # 已建立稳定手牌 + 严格门槛不过 + 放宽门槛过 → 允许（补漏）
         if conf >= ENGINE_MIN_CONF_RELAX and self._stable_hand_mpsz:
+            return label
+        # 冷启动 bootstrap：让手牌行候选先立住稳定器，之后正常逻辑接管
+        if bootstrap and conf >= BOOTSTRAP_CONF:
             return label
         return None
 
@@ -1068,58 +1117,73 @@ class Engine:
             self._cached_rows = []
             return 0, image
 
-        # ---------- 阶段 B：分类质检 + retry 精修（合并）----------
-        # 关键优化点：原来「B 阶段对比 + C 阶段精修」是**重复劳动** ——
-        # B 跑过的 rect 不会被 C 阶段命中缓存（cv2.rotate 后 rect 全变），
-        # 导致完整分类被做了两遍。
+        # ---------- 阶段 B：仅用几何判据选方向（不做分类，快 ~10x）----------
+        # 方向选择只需要"哪个旋转牌最多、牌行最长、且手牌行在下方"的**相对**
+        # 对比，分类标签在此阶段毫无用处。分类（最贵的步骤，涉及全模板匹配）
+        # 留到锁定方向后的 process() 里只做一遍。这样把启动期 OpenCV 负载
+        # 砍掉一大半，显著降低低内存机型上 OOM/SIGSEGV 闪退的概率。
         #
-        # 现在：直接让每个候选跑带 retry 的完整分类。retry 只调**相位**
-        # （x 偏移 + 内缩），不调**旋转**，所以：
-        #   - 0°（正确方向）：retry 帮临界牌把 conf 拉到 0.9+
-        #   - 180°（图案倒置）：retry 救不回上下颠倒的字形（万/索倒置后
-        #     误认成其他牌，conf 仍 < 0.5），总分必低于 0°
-        # 这一来一回让 0° 永远胜过 180°，无需额外偏置。
-        #
-        # 90/270 输入：A 阶段只 1 个候选（cands=[0°]），跑 1 次完整 retry
-        #   约 450ms，总冷启 ~520ms。
-        # 180 输入：A 阶段 2 个候选，0°/180° 各跑 1 次完整 retry ~900ms，
-        #   总冷启 ~970ms —— 比原来 1410ms 省 1/3。
-        def _full_score(rim):
+        # 实测：0° 候选几何分（牌数 12 + 长牌行 + 位置 12）远高于 180°（9+8+12）
+        # 与 90/270（极少），选向结论与旧"分类质检"完全一致，但快很多。
+        def _geo_score(rim):
             try:
-                rows = det.detect_all_rows(rim, classify=True,
-                                           allow_rotation=False,
-                                           allow_retry=True)
+                rows = det.detect_all_rows(rim, classify=False,
+                                           allow_rotation=False)
             except Exception:
                 return -1.0, []
             n = sum(len(r) for r in rows)
             has_long = any(len(r) >= 8 for r in rows)
-            confs = [d[2] for r in rows for d in r if d[1] is not None]
-            avg_conf = (sum(confs) / len(confs)) if confs else 0.0
-            # 位置项：手牌行在下半部才像"正确朝向"。没有它，0° 与 180° 的
-            # 总分只差 ~1.5（38.2 vs 36.6），一次抽样波动就能翻转；
-            # 加 12 分后判决是决定性的。avg_conf 在这里同样不可单独依赖
-            # （倒置因存活者偏差反而更高，见 _longest_row_at_bottom）。
             pos_bonus = 12.0 if self._longest_row_at_bottom(rows, rim.shape[0]) else 0.0
-            return (n + (8 if has_long else 0) + 20.0 * avg_conf + pos_bonus), rows
+            return (n + (8 if has_long else 0) + pos_bonus), rows
 
         best_rot, best_img = cands[0][0], cands[0][1]
         best_score, best_rows = -1.0, []
         for rot, rim, _n, _h in cands:
-            s, rows = _full_score(rim)
+            s, rows = _geo_score(rim)
             if s > best_score:
                 best_score, best_rot, best_img, best_rows = s, rot, rim, rows
+
+        # 锁定方向后，对最优方向补一次「带分类」的检测，作为首帧缓存
+        # （process() 直接复用，不重复检测）。allow_retry=False 控制单帧开销上限。
+        # 任何异常都不影响：最坏只是首帧无标签，下一帧（已锁方向）会重新分类。
+        try:
+            best_rows = det.detect_all_rows(best_img, classify=True,
+                                            allow_rotation=False,
+                                            allow_retry=False)
+        except Exception:
+            traceback.print_exc()
         # 缓存最优方向的检测结果，process() 直接复用，避免重复检测
         self._cached_rows = best_rows
         return best_rot, best_img
 
+    @staticmethod
+    def _rotate_to(image: CVImage, deg) -> CVImage:
+        """把图旋到指定角度（0/90/180/270），其余值原样返回。"""
+        if deg == 90:
+            return cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+        if deg == 180:
+            return cv2.rotate(image, cv2.ROTATE_180)
+        if deg == 270:
+            return cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return image
+
     def _apply_orientation(self, image: CVImage) -> CVImage:
         """按当前锁定的方向把图旋到规范横屏朝向。未锁定时做一次探测并锁定。
+
+        手动方向覆盖（悬浮窗「旋转」按钮）优先级最高：直接旋到用户指定的方向，
+        跳过自动探测。自动探测在特殊画面/异常朝向下可能选错，用户一眼看到牌被
+        横置时点一下即可校正，无需等自动重探。
 
         快路径：先按原方向做一次**快速**检测（classify=False，~17ms）。
         绝大多数情况用户是正常持机的，原方向就是对的 —— 这时直接锁定 0°，
         省掉 3 个多余方向的探测（3x17ms）和一次重复的方向探测开销。
         只有原方向明显不对（牌数 <8 或没有长牌行）时才走 4 方向全探测。
         """
+        # 手动方向覆盖优先级最高：跳过自动探测，直接旋到用户指定的方向。
+        if self._orient_override is not None:
+            self._orient = self._orient_override
+            self._orient_zerocount = 0
+            return self._rotate_to(image, self._orient_override)
         if self._orient is None:
             # 快路径：原方向够好就直接用
             det = self.get_detector()
@@ -1161,13 +1225,7 @@ class Engine:
             if rot != 0:
                 print(f"[engine] 方向自检锁定 {rot}°（原图疑似被旋转）")
             return image
-        if self._orient == 90:
-            return cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
-        if self._orient == 180:
-            return cv2.rotate(image, cv2.ROTATE_180)
-        if self._orient == 270:
-            return cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        return image
+        return self._rotate_to(image, self._orient)
 
     def process(self, image: CVImage) -> Optional[EngineResult]:
         try:
@@ -1326,11 +1384,33 @@ class Engine:
             use_brightness = bool(bright_all) and (
                 sum(bright_all) / len(bright_all) >= MIN_FACE_BRIGHTNESS)
 
+            # ===== 冷启动 bootstrap：选「最像手牌行」的那一行，给更低门槛放行 =====
+            # 尚未建立稳定手牌时，在 rows 里挑「最靠画面底部 + 11~15 张」的行作为
+            # 手牌行候选；只有这一行里的牌允许走 BOOTSTRAP_CONF(0.40) 门槛。
+            # 这样真机首帧（噪声大、conf 0.42~0.50）也能攒够票数立住稳定手牌，
+            # 之后严格/放宽逻辑正常接管。限定 11~15 张 + 最底部，能避开牌河行
+            # （牌河多在屏幕中上部且长度不固定），避免把牌河误当手牌立住。
+            bootstrap_row_idx = -1
+            if not self._stable_hand_mpsz:
+                best_yc = -1.0
+                for ri, row in enumerate(rows):
+                    if not (11 <= len(row) <= 15):
+                        continue
+                    ys = [d[0][1] + d[0][3] / 2.0
+                          for d in row if len(d[0]) >= 4]
+                    if not ys:
+                        continue
+                    yc = sum(ys) / len(ys)
+                    if yc > best_yc:
+                        best_yc = yc
+                        bootstrap_row_idx = ri
+
             filtered = []
-            for row in rows:
+            for ri, row in enumerate(rows):
                 fr = []
                 for (r, l, c) in row:
-                    lab = self._apply_conf(r, l, c)
+                    lab = self._apply_conf(r, l, c,
+                                          bootstrap=(ri == bootstrap_row_idx))
                     if (lab is not None and use_brightness
                             and _face_brightness(image, r) < MIN_FACE_BRIGHTNESS):
                         # 这一格里根本没有牌（是桌面/UI/缝隙），切牌器只是
@@ -1541,15 +1621,23 @@ class Engine:
             total_detected = len(raw_labels) + (len(disc_mpsz) // 2)
             if total_detected == 0:
                 self._orient_zerocount += 1
-                if self._orient_zerocount >= 3:
-                    print("[engine] 连续 3 帧 0 牌，解锁方向重探")
+                # 熔断：连续 0 牌超过阈值，且重探次数未达上限 → 解锁重探一次。
+                # 达上限后停止重探，优雅报告 no_tiles，绝不无限重探致闪退
+                # （无限重型 4 方向探测是低内存机型 OOM/SIGSEGV 闪退的主因）。
+                # 用户可用悬浮窗「旋转」按钮手动指定方向，绕开自动重探。
+                if (self._orient_zerocount >= 3
+                        and self._orient_reprobe_count < MAX_ORIENT_REPROBES):
+                    print("[engine] 连续 0 牌，解锁方向重探")
                     self._orient = None
+                    self._orient_reprobe_count += 1
                     self._last_hand_y = None
                     self._tile_voter.reset()
                     self._hand_stab.reset()
                     self._frame_skipper = _FrameSkipper()
+                    self._cached_rows = None
             else:
                 self._orient_zerocount = 0
+                self._orient_reprobe_count = 0
 
             # ===== 冷启动递减 =====
             # 每完整识别一帧（命中"实际跑了 _detect_once"的路径），递减；扣到 0 后

@@ -1,4 +1,4 @@
-package com.example.realtime_mahjong_trainer;
+package com.example.ace_mahjong;
 
 
 import android.content.Context;
@@ -30,12 +30,28 @@ public class ImageProcessor {
     private static float roiBottom = 1f;
     private static boolean roiDirty = true;
 
+    // ===== 手动方向覆盖（悬浮窗「旋转」按钮）=====
+    // 经 MainActivity 的 setOrient 通道写入；下一帧处理前推给 Python 引擎
+    // （set_orient），引擎按指定角度旋转后再识别。默认 -1 = 未设置（走自动探测）。
+    private static int orientOverride = -1;
+    private static boolean orientDirty = false;
+
     public static void setRoi(float top, float bottom) {
         float t = Math.max(0f, Math.min(1f, top));
         float b = Math.max(t + 0.02f, Math.min(1f, bottom));
         roiTop = t;
         roiBottom = b;
         roiDirty = true;
+    }
+
+    public static void setOrient(int deg) {
+        // deg 仅接受 0/90/180/270；其它值视为解除覆盖（传 -1 给引擎）。
+        if (deg == 0 || deg == 90 || deg == 180 || deg == 270) {
+            orientOverride = deg;
+        } else {
+            orientOverride = -1;
+        }
+        orientDirty = true;
     }
 
     private Timer timer;
@@ -142,6 +158,16 @@ public class ImageProcessor {
                 roiDirty = false;
             } catch (Throwable t) {
                 TimedLog.e(TAG, "set_roi 推送失败（不影响本帧）: " + t);
+            }
+        }
+
+        // 把悬浮窗「旋转」按钮设置的方向覆盖推给引擎（仅在变化时）。
+        if (orientDirty && engine != null) {
+            try {
+                engine.callAttr("set_orient", orientOverride);
+                orientDirty = false;
+            } catch (Throwable t) {
+                TimedLog.e(TAG, "set_orient 推送失败（不影响本帧）: " + t);
             }
         }
 
