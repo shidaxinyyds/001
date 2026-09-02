@@ -7,7 +7,7 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.os.IBinder;
-import com.example.realtime_mahjong_trainer.R;
+import com.example.ace_mahjong.R;
 import androidx.core.app.NotificationCompat;
 
 public class MediaProjectionService extends Service {
