@@ -88,6 +88,17 @@ public class MainActivity extends FlutterActivity {
           result.success(readModeFile());
         };
       }
+      if (call.method.equals("setRoi")) {
+        // 同步即时生效：悬浮窗拖动"识别框"时实时对准手牌区域。
+        // 参数缺失也安全兜底，绝不抛异常（否则会冒泡到 UI 线程致闪退）。
+        Object aTop = call.argument("top");
+        Object aBottom = call.argument("bottom");
+        float top = (aTop instanceof Number) ? ((Number) aTop).floatValue() : 0f;
+        float bottom = (aBottom instanceof Number) ? ((Number) aBottom).floatValue() : 1f;
+        ImageProcessor.setRoi(top, bottom);
+        result.success(0);
+        return;
+      }
 
       if (toRun == null) {
         result.notImplemented();

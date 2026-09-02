@@ -691,6 +691,13 @@ class Engine:
         # 方向探测/快路径时已算出的检测结果，供 process() 复用，
         # 避免同一帧做两次完整检测。用完即清。
         self._cached_rows: Optional[list] = None
+        # ===== 用户可调识别区域（ROI）=====
+        # 真机游戏美术/布局与训练截图差异大时，自动行检测可能挑错区域
+        # （挑到 banner/UI 而非手牌行）→ 表现为"识别不出来"。
+        # 悬浮窗里用户拖动"识别框"对准手牌后，通过 set_roi(top,bottom) 把
+        # 识别范围收敛到屏幕的 [top,bottom] 纵向比例带内。默认 None = 整屏。
+        # 即便用户不动它也是全屏，绝不退化。
+        self._roi: Optional[tuple] = None
 
     def start(self):
         pass
@@ -789,6 +796,24 @@ class Engine:
         self._advice_key = key
         self._advice = advice
         return shanten, advice
+
+    def set_roi(self, top_frac, bottom_frac) -> None:
+        """设置识别区域（纵向比例带）。top/bottom ∈ [0,1]，自上而下的屏幕比例。
+
+        由悬浮窗拖动"识别框"时实时调用。参数非法（非数/越界）直接忽略，
+        绝不抛异常——这是 Engine 的方法，抛错会经 chaquopy 冒泡到 Java
+        再冒泡到 UI 线程，可能触发闪退。
+        """
+        try:
+            t = float(top_frac)
+            b = float(bottom_frac)
+        except (TypeError, ValueError):
+            return
+        if not (0.0 <= t <= 1.0 and 0.0 <= b <= 1.0):
+            return
+        if b - t < 0.02:  # 带太窄没意义，保底 2%
+            return
+        self._roi = (t, b)
 
     def process_bytes(self, image_data) -> Optional[EngineResult]:
         try:
@@ -1149,6 +1174,41 @@ class Engine:
             # ===== 方向归一（旋转鲁棒性）=====
             # 必须在帧差/检测之前做，保证后续所有几何都基于规范朝向。
             image = self._apply_orientation(image)
+
+            # 全图（方向归一后）留作预览用：无论用户是否框选 ROI，发给
+            # 悬浮窗的预览都画的是整屏，这样"识别框"的比例才是相对整屏的，
+            # 拖动对准才直观。
+            full_for_preview = image
+
+            # ===== 超大图降采样（防爆内存原生崩溃）=====
+            # 真机某些机型/分辨率下 imdecode 出来的图可能极大（≥4000px 边），
+            # 后续 FFT 自相关 / 多帧投票 / 预览会在 C 层吃下远超常量的内存，
+            # 触发 OOM 或 SIGSEGV 闪退。这里把最长边压到 1800 以内再继续，
+            # 几何识别在 1800 边以下与 2712（训练基准）表现一致，无精度损失。
+            try:
+                ih, iw = image.shape[:2]
+                if max(ih, iw) > 1800:
+                    s = (1800.0 / max(ih, iw)) ** 0.5
+                    image = cv2.resize(
+                        image, (max(1, int(iw * s)), max(1, int(ih * s))),
+                        interpolation=cv2.INTER_AREA)
+                    full_for_preview = image
+            except Exception:
+                pass
+
+            # ===== 用户 ROI 裁剪 =====
+            # 只识别 [top,bottom] 纵向比例带内的画面。默认 None = 整屏。
+            # 切片后显式 .copy() 成 contiguous 数组：OpenCV 某些版本对
+            # 非连续（被父数组 stride 影响的）视图做运算会触发 C 层崩溃。
+            if self._roi is not None:
+                ih, _ = image.shape[:2]
+                y0 = int(self._roi[0] * ih)
+                y1 = int(self._roi[1] * ih)
+                if y1 - y0 >= 8:
+                    image = np.ascontiguousarray(image[y0:y1, :])
+                else:
+                    # 带太窄（几乎不可能，set_roi 已保底 2%）→ 忽略，整屏识别
+                    pass
 
             start_time = time.time()
 
@@ -1544,7 +1604,7 @@ class Engine:
             self._frame_skipper.remember(payload, result["top_score"])
 
             res = EngineResult(
-                image=_make_preview(image),
+                image=_make_preview(full_for_preview),
                 result=payload,
                 stage=None,
             )

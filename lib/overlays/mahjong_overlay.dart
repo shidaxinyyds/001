@@ -1,4 +1,6 @@
 import 'dart:convert';
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
@@ -304,7 +306,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
   static const double collapsed = 56;
   double panelW = 296;
-  double panelH = 380;
+  // 默认高度含预览区（~150）+ 三段；加大到 540 让首屏即可看清识别框与建议。
+  double panelH = 540;
 
   // ── 固定三段布局的尺寸常量 ────────────────────────────────────────────
   // 这组常量同时决定"每段多高"和"面板最矮能拖到多少"（minPanelH 由它们推导）。
@@ -324,7 +327,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // 现在三段全部改为 Expanded 弹性高度（段内内容超出时自身滚动），窗口高度可
   // 自由收缩到 minPanelH 而绝不会 overflow。minPanelH 只是"可读性下限"，
   // 不再是硬性布局约束。上限 760 给足放大空间（系统会按屏幕实际高度再裁切）。
-  static const double minPanelH = 240;
+  // 下限提到 320：预览区（~150）加上标题/三段最小可读高度，缩到此仍不溢出。
+  static const double minPanelH = 320;
   static const double maxPanelH = 760;
 
   // 缩放中：此期间关闭原生拖动，避免"拖把手时整窗跟着跑"
@@ -335,6 +339,65 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // 状态在弹窗生命周期内持久化：用户收起 → 重新展开会保持上一次选择，
   // 不强制每次都重置为展开。
   bool _discardExpanded = true;
+
+  // ===== 实时画面预览 + 可拖动识别框（ROI）=====
+  // 引擎每帧随结果一起发来一张全屏缩略图（PNG），这里解码出来显示在面板顶部，
+  // 用户拖动上面的"高亮带"对准自己手牌所在的纵向位置；带的比例经 MethodChannel
+  // 告诉引擎，引擎只识别带内 → 真机布局与训练截图不同时也能对准，解决"识别不出来"。
+  ui.Image? _preview;
+  // 识别框纵向比例（相对整屏高度，[0,1]）。默认整屏。
+  double _roiTop = 0.0;
+  double _roiBottom = 1.0;
+  // 拖动识别框时，本次手势锁定操作的边（按下瞬间按落点决定）。
+  String _roiDragMode = 'both';
+  // 预览区固定高度。预览图按 BoxFit.fill 拉伸到该框，比例带据此线性映射。
+  static const double _kPreviewH = 132.0;
+
+  void _decodePreview(List<int> png) {
+    if (png.isEmpty) return;
+    // 异步解码：即便某帧解码失败也只是少一张预览，绝不抛错影响主流程。
+    ui.instantiateImageCodec(Uint8List.fromList(png)).then((codec) {
+      return codec.getNextFrame();
+    }).then((frame) {
+      if (mounted) setState(() => _preview = frame.image);
+    }).catchError((Object e) {
+      print('预览解码失败（已忽略）: $e');
+    });
+  }
+
+  void _sendRoi() {
+    // 悬浮窗是独立 Flutter 引擎，直接调 MethodChannel 到不了 MainActivity。
+    // 必须经 shareData 回主 App，由主 App 的 overlayListener 转成 MethodChannel。
+    try {
+      FlutterOverlayWindow.shareData({
+        'type': 'roi',
+        'top': _roiTop,
+        'bottom': _roiBottom,
+      });
+    } catch (e) {
+      print('识别框位置发送失败（已忽略）: $e');
+    }
+  }
+
+  // 拖动识别框：which 决定动哪条边。
+  //  'top'    仅移上边；'bottom' 仅移下边；'both' 整条带跟随手指移动。
+  void _dragRoi(double dy, String which) {
+    final double f = (dy / _kPreviewH).clamp(0.0, 1.0);
+    setState(() {
+      if (which == 'top') {
+        _roiTop = f.clamp(0.0, _roiBottom - 0.05);
+      } else if (which == 'bottom') {
+        _roiBottom = f.clamp(_roiTop + 0.05, 1.0);
+      } else {
+        // 整条带跟随：保持当前高度，中心移到手指处。
+        final double h = _roiBottom - _roiTop;
+        double c = f;
+        _roiTop = (c - h / 2).clamp(0.0, 1.0 - h);
+        _roiBottom = _roiTop + h;
+      }
+    });
+    _sendRoi();
+  }
 
   @override
   void initState() {
@@ -347,6 +410,12 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         callback: (data) {
           final json = parseEngineResult(data);
           if (json == null) return;
+          // 解析出 PNG 预览（JSON 之后第一个 '\n' 之后），异步解码显示。
+          // 解码失败只影响预览，不影响识别结果本身。
+          final int sep = data.indexOf(10);
+          if (sep > 0 && sep + 1 < data.length) {
+            _decodePreview(data.sublist(sep + 1));
+          }
           if (mounted) {
             setState(() {
               result = json;
@@ -897,6 +966,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                   ),
                 ),
                 const SizedBox(height: _kTitleGap),
+                // 实时画面预览 + 可上下滑动/缩放的识别框。用户把高亮带对准
+                // 自己手牌所在的纵向区域，引擎只识别带内 —— 真机布局与训练
+                // 截图不同时也能对准，直接解决"识别不出来"。
+                _previewArea(),
+                const SizedBox(height: _kSectionGap),
                 // 三段严格按"建议 / 牌河 / 手牌"顺序，自上而下排列。
                 // 三段都是 Expanded 弹性高度，随窗口一起伸缩：窗口调高则三段一起
                 // 长大、调低则一起压缩（内容超出时各自段内滚动），永不溢出。
@@ -944,6 +1018,103 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           _resizeHandle(),
         ],
       ),
+    );
+  }
+
+  /// 实时画面预览区 + 可拖动/缩放的识别框（ROI）。
+  ///
+  /// 整块区域是一个 GestureDetector：按下瞬间按落点判定操作"上边/下边/整条带"，
+  /// 拖动时所有 dy 都是相对整块预览区的局部坐标 → 比例直接等于相对整屏高度，
+  /// 引擎据此裁剪识别区域。识别框仅仅是个视觉指示，真正的识别范围由比例决定。
+  /// 即便预览还没解码出来（_preview 为 null），拖动依然有效——比例照常发送。
+  Widget _previewArea() {
+    final double bandTop = _roiTop * _kPreviewH;
+    final double bandH = (_roiBottom - _roiTop) * _kPreviewH;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Padding(
+          padding: EdgeInsets.only(bottom: 3),
+          child: Text(
+            '识别区域 · 拖动高亮框对准手牌',
+            style: TextStyle(
+              color: Colors.white54,
+              fontSize: 9.5,
+              letterSpacing: 0.3,
+            ),
+          ),
+        ),
+        SizedBox(
+          height: _kPreviewH,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onVerticalDragStart: (d) {
+              final double y = (d.localPosition.dy / _kPreviewH).clamp(0.0, 1.0);
+              setState(() {
+                if (y < _roiTop + 0.06) {
+                  _roiDragMode = 'top';
+                } else if (y > _roiBottom - 0.06) {
+                  _roiDragMode = 'bottom';
+                } else {
+                  _roiDragMode = 'both';
+                }
+              });
+            },
+            onVerticalDragUpdate: (d) => _dragRoi(d.localPosition.dy, _roiDragMode),
+            onVerticalDragEnd: (_) => _sendRoi(),
+            child: Stack(
+              children: [
+                // 预览底图（或占位）
+                Positioned.fill(
+                  child: Container(
+                    color: Colors.black.withAlpha(120),
+                    child: _preview == null
+                        ? const Center(
+                            child: Text(
+                              '等待画面…',
+                              style: TextStyle(color: Colors.white54, fontSize: 10),
+                            ),
+                          )
+                        : RawImage(image: _preview, fit: BoxFit.fill),
+                  ),
+                ),
+                // 被识别区域高亮带（纯视觉）
+                Positioned(
+                  top: bandTop,
+                  left: 0,
+                  right: 0,
+                  height: bandH,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      border: Border.all(
+                        color: const Color(0xFF80CBC4),
+                        width: 1.5,
+                      ),
+                      color: const Color(0x2080CBC4),
+                    ),
+                  ),
+                ),
+                // 上边把手（视觉提示）
+                Positioned(
+                  top: bandTop - 1.5,
+                  left: 0,
+                  right: 0,
+                  height: 3,
+                  child: Container(color: const Color(0xFF80CBC4)),
+                ),
+                // 下边把手（视觉提示）
+                Positioned(
+                  top: bandTop + bandH - 1.5,
+                  left: 0,
+                  right: 0,
+                  height: 3,
+                  child: Container(color: const Color(0xFF80CBC4)),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 

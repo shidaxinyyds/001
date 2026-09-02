@@ -1,11 +1,41 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 import 'package:realtime_mahjong_trainer/home_page.dart';
 import 'package:realtime_mahjong_trainer/overlays/mahjong_overlay.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  _installNeutralErrorWidget();
+  _installErrorGuards();
   runApp(const MyApp());
+}
+
+/// 全局错误兜底：杜绝「应用程序停止运行」式闪退。
+///
+/// 根因：Flutter 有三道会**直接终止进程**的崩溃路径，普通的 ErrorWidget.builder
+/// 只能替换 UI、拦不住它们：
+///   1. 未捕获的 Dart 异常（build/layout/async 抛错落到平台线程）—— 进程直接死；
+///   2. PlatformDispatcher 层错误（平台回调里抛错）—— 进程直接死；
+///   3. FlutterError（非 debug 下默认也会终止）。
+/// 这里统一装三道 handler：打印日志但不向上抛，进程继续活。
+/// 即便某一帧识别结果字段异常、某次解码失败，悬浮窗也只会显示占位，
+/// 而不是整窗消失、App 重启。
+void _installErrorGuards() {
+  // 平台层（平台回调 / isolate 错误）兜底，返回 true = 已处理，不终止。
+  ui.PlatformDispatcher.instance.onError = (Object error, StackTrace stack) {
+    FlutterError.reportError(FlutterErrorDetails(
+      exception: error,
+      stack: stack,
+      library: 'app-guard',
+      context: ErrorDescription('全局兜底：已拦截，未终止进程'),
+    ));
+    return true;
+  };
+  // 普通 FlutterError 改为仅上报（不再触发红色错误页 / 终止）。
+  FlutterError.onError = (FlutterErrorDetails details) {
+    FlutterError.dumpErrorToConsole(details, forceReport: true);
+  };
+  _installNeutralErrorWidget();
 }
 
 /// 彻底消除"红色字符"的最后一道防线。
@@ -58,7 +88,7 @@ final ThemeData _appTheme = ThemeData(
 @pragma("vm:entry-point")
 void overlayMain() {
   WidgetsFlutterBinding.ensureInitialized();
-  _installNeutralErrorWidget();
+  _installErrorGuards();
   runApp(
     MaterialApp(
       debugShowCheckedModeBanner: false,

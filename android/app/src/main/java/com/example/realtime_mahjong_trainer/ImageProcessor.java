@@ -21,6 +21,23 @@ public class ImageProcessor {
 
     private Supplier<Image> callback;
 
+    // ===== 用户可调识别区域（ROI，纵向比例带）=====
+    // 悬浮窗里拖动"识别框"时经 MainActivity 的 setRoi 通道写入；下一帧处理前
+    // 推给 Python 引擎（set_roi），引擎只识别 [top,bottom] 带内。
+    // 默认整屏（0..1）不退化。用静态字段，因为引擎实例在 startStream 里重建，
+    // 但 ROI 是用户偏好，应跨重建保留。
+    private static float roiTop = 0f;
+    private static float roiBottom = 1f;
+    private static boolean roiDirty = true;
+
+    public static void setRoi(float top, float bottom) {
+        float t = Math.max(0f, Math.min(1f, top));
+        float b = Math.max(t + 0.02f, Math.min(1f, bottom));
+        roiTop = t;
+        roiBottom = b;
+        roiDirty = true;
+    }
+
     private Timer timer;
 
     // ===== 流水线自诊断 =====
@@ -116,6 +133,16 @@ public class ImageProcessor {
         if (encoded == null || encoded.length == 0) {
             sendStatus(NetworkClient.statusJson("java_error", "帧编码失败（Bitmap为空）"));
             return;
+        }
+
+        // 把用户刚拖动的识别区域推给引擎（仅在变化时），默认整屏不退化。
+        if (roiDirty && engine != null) {
+            try {
+                engine.callAttr("set_roi", roiTop, roiBottom);
+                roiDirty = false;
+            } catch (Throwable t) {
+                TimedLog.e(TAG, "set_roi 推送失败（不影响本帧）: " + t);
+            }
         }
 
         PyObject engineResult = engine.callAttr("process_bytes", encoded);

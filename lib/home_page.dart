@@ -69,6 +69,14 @@ class _HomePageState extends State<HomePage> {
           });
         }
       }
+      // 悬浮窗拖动态识别框：把 ROI 比例经主引擎 MethodChannel 转给 Java/引擎。
+      // 注意：悬浮窗是独立 Flutter 引擎，它的 MethodChannel 到不了 MainActivity
+      // （那是主引擎的 messenger）—— 必须借 shareData 回主 App，再转 MethodChannel。
+      if (event is Map && event['type'] == 'roi') {
+        final top = (event['top'] as num?)?.toDouble() ?? 0.0;
+        final bottom = (event['bottom'] as num?)?.toDouble() ?? 1.0;
+        channel.invokeMethod<dynamic>('setRoi', {'top': top, 'bottom': bottom});
+      }
     });
   }
 
