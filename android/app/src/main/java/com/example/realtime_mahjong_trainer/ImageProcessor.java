@@ -145,7 +145,19 @@ public class ImageProcessor {
             }
         }
 
-        PyObject engineResult = engine.callAttr("process_bytes", encoded);
+        if (engine == null) {
+            sendStatus(NetworkClient.statusJson("java_error", "引擎尚未初始化"));
+            return;
+        }
+
+        PyObject engineResult;
+        try {
+            engineResult = engine.callAttr("process_bytes", encoded);
+        } catch (Throwable t) {
+            TimedLog.e(TAG, "process_bytes 调用失败: " + t);
+            sendStatus(NetworkClient.statusJson("java_error", "识别调用失败: " + t));
+            return;
+        }
         if (engineResult == null) {
             // Python 端现在保证连异常都返回错误结果（见 engine.py），
             // 走到这里说明链路有未预期的断点，上报而不是静默丢帧。

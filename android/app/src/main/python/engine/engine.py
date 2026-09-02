@@ -32,7 +32,15 @@ VALID_HAND_SIZES = (13, 14)
 
 # 预览图最大宽度。原实现每帧都把全屏截图做 PNG 编码（100~300ms），
 # 而 Dart 端并没有使用这张图，纯属浪费，是识别卡顿的主因之一。
-PREVIEW_MAX_WIDTH = 240
+# 现在 Dart 端实时展示预览，清晰度必须够用户对准识别框。
+# 高 DPI 屏（3x）上 240px 会被拉伸到 720 物理像素而模糊，480px 更清晰。
+PREVIEW_MAX_WIDTH = 480
+
+# 输入图最长边上限。超过此值先降采样，避免 OpenCV 在超大图上触发 OOM/SIGSEGV。
+MAX_INPUT_LONG_EDGE = 2400
+
+# ROI 裁剪后最小高度（像素）。低于此值放弃裁剪，整屏识别，防止窄条导致 FFT/切牌崩溃。
+MIN_ROI_HEIGHT = 80
 
 # 引擎侧的最低置信度：比结构识别器的 MIN_CONF 更严，挡掉"卡在两张牌之间"的假命中。
 # 调高到 0.55：漏掉的牌由多帧投票补回（要求 4 帧里 ≥3 帧同标签才采纳），
@@ -1173,7 +1181,16 @@ class Engine:
 
             # ===== 方向归一（旋转鲁棒性）=====
             # 必须在帧差/检测之前做，保证后续所有几何都基于规范朝向。
-            image = self._apply_orientation(image)
+            # 方向探测涉及 cv2.rotate 和多次完整检测，是最容易触发原生崩溃
+            # 的环节之一。先包一层 try/except：即使方向探测崩了，也回退
+            # 到原图继续识别，至少不会闪退。
+            try:
+                image = self._apply_orientation(image)
+            except Exception as e:
+                traceback.print_exc()
+                print(f"[engine] 方向归一异常，回退到原图: {e}")
+                # 重置方向锁，下一帧重新探测
+                self._orient = None
 
             # 全图（方向归一后）留作预览用：无论用户是否框选 ROI，发给
             # 悬浮窗的预览都画的是整屏，这样"识别框"的比例才是相对整屏的，
@@ -1183,14 +1200,17 @@ class Engine:
             # ===== 超大图降采样（防爆内存原生崩溃）=====
             # 真机某些机型/分辨率下 imdecode 出来的图可能极大（≥4000px 边），
             # 后续 FFT 自相关 / 多帧投票 / 预览会在 C 层吃下远超常量的内存，
-            # 触发 OOM 或 SIGSEGV 闪退。这里把最长边压到 1800 以内再继续，
-            # 几何识别在 1800 边以下与 2712（训练基准）表现一致，无精度损失。
+            # 触发 OOM 或 SIGSEGV 闪退。这里把最长边压到 MAX_INPUT_LONG_EDGE
+            # 以内再继续。注意预览图用同一张降采样后的全图，清晰度已足够。
             try:
                 ih, iw = image.shape[:2]
-                if max(ih, iw) > 1800:
-                    s = (1800.0 / max(ih, iw)) ** 0.5
+                long_edge = max(ih, iw)
+                if long_edge > MAX_INPUT_LONG_EDGE:
+                    scale = MAX_INPUT_LONG_EDGE / float(long_edge)
+                    new_w = max(1, int(iw * scale))
+                    new_h = max(1, int(ih * scale))
                     image = cv2.resize(
-                        image, (max(1, int(iw * s)), max(1, int(ih * s))),
+                        image, (new_w, new_h),
                         interpolation=cv2.INTER_AREA)
                     full_for_preview = image
             except Exception:
@@ -1200,15 +1220,17 @@ class Engine:
             # 只识别 [top,bottom] 纵向比例带内的画面。默认 None = 整屏。
             # 切片后显式 .copy() 成 contiguous 数组：OpenCV 某些版本对
             # 非连续（被父数组 stride 影响的）视图做运算会触发 C 层崩溃。
-            if self._roi is not None:
-                ih, _ = image.shape[:2]
-                y0 = int(self._roi[0] * ih)
-                y1 = int(self._roi[1] * ih)
-                if y1 - y0 >= 8:
-                    image = np.ascontiguousarray(image[y0:y1, :])
-                else:
-                    # 带太窄（几乎不可能，set_roi 已保底 2%）→ 忽略，整屏识别
-                    pass
+            try:
+                if self._roi is not None:
+                    ih, _ = image.shape[:2]
+                    y0 = max(0, min(ih, int(self._roi[0] * ih)))
+                    y1 = max(y0, min(ih, int(self._roi[1] * ih)))
+                    if y1 - y0 >= MIN_ROI_HEIGHT:
+                        image = np.ascontiguousarray(image[y0:y1, :])
+                    # 否则太窄，忽略 ROI，整屏识别
+            except Exception:
+                # ROI 切片异常（坏比例/坏尺寸）不阻塞主流程，回退整屏识别
+                pass
 
             start_time = time.time()
 

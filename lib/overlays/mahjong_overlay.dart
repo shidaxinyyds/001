@@ -327,9 +327,14 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // 现在三段全部改为 Expanded 弹性高度（段内内容超出时自身滚动），窗口高度可
   // 自由收缩到 minPanelH 而绝不会 overflow。minPanelH 只是"可读性下限"，
   // 不再是硬性布局约束。上限 760 给足放大空间（系统会按屏幕实际高度再裁切）。
-  // 下限提到 320：预览区（~150）加上标题/三段最小可读高度，缩到此仍不溢出。
-  static const double minPanelH = 320;
+  // 下限：展开预览时 320（预览区 ~150 + 标题/三段）；折叠预览后 200，
+  // 只显示标题+三段，大幅减小占位，也避免弹窗挡住自己的手牌。
+  static const double _kMinPanelHExpanded = 320;
+  static const double _kMinPanelHCollapsedPreview = 200;
   static const double maxPanelH = 760;
+  double _minPanelH() => _previewCollapsed
+      ? _kMinPanelHCollapsedPreview
+      : _kMinPanelHExpanded;
 
   // 缩放中：此期间关闭原生拖动，避免"拖把手时整窗跟着跑"
   bool _draggingResize = false;
@@ -339,6 +344,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // 状态在弹窗生命周期内持久化：用户收起 → 重新展开会保持上一次选择，
   // 不强制每次都重置为展开。
   bool _discardExpanded = true;
+
+  // 识别区域（实时预览区）折叠态。默认展开，用户可一键收起以释放屏幕空间。
+  // 收起后不再显示实时 preview，避免"画中画"遮挡，也降低解码/传输开销。
+  bool _previewCollapsed = false;
 
   // ===== 实时画面预览 + 可拖动识别框（ROI）=====
   // 引擎每帧随结果一起发来一张全屏缩略图（PNG），这里解码出来显示在面板顶部，
@@ -350,7 +359,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   double _roiBottom = 1.0;
   // 拖动识别框时，本次手势锁定操作的边（按下瞬间按落点决定）。
   String _roiDragMode = 'both';
-  // 预览区固定高度。预览图按 BoxFit.fill 拉伸到该框，比例带据此线性映射。
+  // 预览区固定高度。预览图按 BoxFit.contain 原比例显示，不再拉伸变形。
   static const double _kPreviewH = 132.0;
 
   void _decodePreview(List<int> png) {
@@ -709,7 +718,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           setState(() {
             // 显式 toDouble()：旧版 Dart 的 clamp 返回 num，直接赋给 double 会报错
             panelW = (panelW + e.delta.dx).clamp(minPanelW, maxPanelW).toDouble();
-            panelH = (panelH + e.delta.dy).clamp(minPanelH, maxPanelH).toDouble();
+            panelH = (panelH + e.delta.dy).clamp(_minPanelH(), maxPanelH).toDouble();
           });
           _resizeLive(panelW, panelH);
         },
@@ -851,16 +860,21 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       // 原实现在这里直接返回 SizedBox.shrink()，导致用户刚开始时看到一段空白
       // ——不知道是「正在识别」「没牌可看」还是「坏了」。给个轻量的初始提示。
       final bool hasHand = count > 0;
+      final String hint = hasHand
+          ? '向听 / 打牌建议（识别稳定后会显示）'
+          : '尚无手牌 — 等待识别到 13/14 张再给出推荐\n'
+              '· 若持续无牌：请把弹窗拖到不遮挡手牌的位置\n'
+              '· 也可点上方"收起"只保留悬浮按钮\n'
+              '· 仍无法识别可能是牌面美术与内置模板不匹配';
       return Padding(
         padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
         child: Text(
-          hasHand
-              ? '向听 / 打牌建议（识别稳定后会显示）'
-              : '尚无手牌 — 等待识别到 13/14 张再给出推荐',
+          hint,
           style: TextStyle(
             color: Colors.white.withAlpha(110),
             fontSize: 10,
             fontStyle: FontStyle.italic,
+            height: 1.35,
           ),
         ),
       );
@@ -1028,21 +1042,91 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   /// 引擎据此裁剪识别区域。识别框仅仅是个视觉指示，真正的识别范围由比例决定。
   /// 即便预览还没解码出来（_preview 为 null），拖动依然有效——比例照常发送。
   Widget _previewArea() {
+    // 折叠态：只显示一行提示+展开按钮，释放屏幕空间，避免弹窗遮挡手牌。
+    if (_previewCollapsed) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  '识别区域 · 已收起',
+                  style: TextStyle(
+                    color: Colors.white54,
+                    fontSize: 9.5,
+                    letterSpacing: 0.3,
+                  ),
+                ),
+              ),
+              GestureDetector(
+                onTap: () => setState(() {
+                  _previewCollapsed = false;
+                  // 展开后把面板高度恢复到能容纳预览区的最小值，避免挤压
+                  if (panelH < _kMinPanelHExpanded) {
+                    panelH = _kMinPanelHExpanded;
+                    _ensureSize(panelW, panelH);
+                  }
+                }),
+                child: const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                  child: Text(
+                    '展开 ▾',
+                    style: TextStyle(
+                      color: Color(0xFF80CBC4),
+                      fontSize: 10,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      );
+    }
+
     final double bandTop = _roiTop * _kPreviewH;
     final double bandH = (_roiBottom - _roiTop) * _kPreviewH;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const Padding(
-          padding: EdgeInsets.only(bottom: 3),
-          child: Text(
-            '识别区域 · 拖动高亮框对准手牌',
-            style: TextStyle(
-              color: Colors.white54,
-              fontSize: 9.5,
-              letterSpacing: 0.3,
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            const Expanded(
+              child: Padding(
+                padding: EdgeInsets.only(bottom: 3),
+                child: Text(
+                  '识别区域 · 拖动高亮框对准手牌',
+                  style: TextStyle(
+                    color: Colors.white54,
+                    fontSize: 9.5,
+                    letterSpacing: 0.3,
+                  ),
+                ),
+              ),
             ),
-          ),
+            GestureDetector(
+              onTap: () => setState(() {
+                _previewCollapsed = true;
+                // 收起后允许面板更矮，并立即把当前高度限制在折叠后的最小值以上
+                panelH = panelH.clamp(_minPanelH(), maxPanelH).toDouble();
+                _ensureSize(panelW, panelH);
+              }),
+              child: const Padding(
+                padding: EdgeInsets.only(left: 6, bottom: 3),
+                child: Text(
+                  '收起 ▴',
+                  style: TextStyle(
+                    color: Color(0xFF80CBC4),
+                    fontSize: 10,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            ),
+          ],
         ),
         SizedBox(
           height: _kPreviewH,
@@ -1064,7 +1148,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             onVerticalDragEnd: (_) => _sendRoi(),
             child: Stack(
               children: [
-                // 预览底图（或占位）
+                // 预览底图（或占位）。用 BoxFit.contain 保持原比例，不再拉伸变形。
                 Positioned.fill(
                   child: Container(
                     color: Colors.black.withAlpha(120),
@@ -1075,7 +1159,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                               style: TextStyle(color: Colors.white54, fontSize: 10),
                             ),
                           )
-                        : RawImage(image: _preview, fit: BoxFit.fill),
+                        : RawImage(
+                            image: _preview,
+                            fit: BoxFit.contain,
+                            alignment: Alignment.center,
+                          ),
                   ),
                 ),
                 // 被识别区域高亮带（纯视觉）
