@@ -725,6 +725,20 @@ class Engine:
         # 识别范围收敛到屏幕的 [top,bottom] 纵向比例带内。默认 None = 整屏。
         # 即便用户不动它也是全屏，绝不退化。
         self._roi: Optional[tuple] = None
+        # ===== 调试页可调开关（经 set_config 实时修改，不重启引擎）=====
+        # auto_orient：自动方向探测（横屏/竖屏旋转归一）。关掉则只用手动覆盖/0°。
+        # bootstrap：冷启动宽松门槛（BOOTSTRAP_CONF），用于打破严格门槛死锁。
+        # strict：严格门槛开关。关掉则一律走放宽门槛（更易识别出，但更易误识）。
+        self._cfg: Dict[str, bool] = {
+            "auto_orient": True,
+            "bootstrap": True,
+            "strict": True,
+        }
+
+    def set_config(self, key: str, value) -> None:
+        """调试页开关：实时修改识别策略。未知 key 静默忽略。"""
+        if key in self._cfg:
+            self._cfg[key] = bool(value)
 
     def start(self):
         pass
@@ -945,8 +959,13 @@ class Engine:
         # 已建立稳定手牌 + 严格门槛不过 + 放宽门槛过 → 允许（补漏）
         if conf >= ENGINE_MIN_CONF_RELAX and self._stable_hand_mpsz:
             return label
-        # 冷启动 bootstrap：让手牌行候选先立住稳定器，之后正常逻辑接管
-        if bootstrap and conf >= BOOTSTRAP_CONF:
+        # 冷启动 bootstrap：让手牌行候选先立住稳定器，之后正常逻辑接管。
+        # 受调试页「冷启动」开关控制；关掉则不走此宽门槛。
+        if bootstrap and self._cfg.get("bootstrap", True) and conf >= BOOTSTRAP_CONF:
+            return label
+        # 调试页「严格门槛」开关关掉时，一律放宽到 RELAX 门槛（更易识别出，但更易误识）。
+        # 仅当已建立稳定手牌时才允许（避免启动期噪声被当真）。
+        if (not self._cfg.get("strict", True)) and self._stable_hand_mpsz and conf >= ENGINE_MIN_CONF_RELAX:
             return label
         return None
 
@@ -1185,6 +1204,12 @@ class Engine:
             self._orient_zerocount = 0
             return self._rotate_to(image, self._orient_override)
         if self._orient is None:
+            # 调试页关掉「自动方向探测」：直接用 0°（或手动覆盖），不做任何方向探测，
+            # 避免误旋转，也省下 4 方向探测的开销/崩溃风险。
+            if not self._cfg.get("auto_orient", True):
+                self._orient = 0
+                self._orient_zerocount = 0
+                return image
             # 快路径：原方向够好就直接用
             det = self.get_detector()
             if det is not None:

@@ -80,7 +80,7 @@ def _find_model_path() -> Optional[str]:
         # Chaquopy exposes CHAQUOPY_ASSET_DIR env var at runtime.
         os.path.join(os.environ.get("CHAQUOPY_ASSET_DIR", ""), _MODEL_FILENAME),
         # Android internal files dir (written by sideload scripts)
-        f"/data/data/com.example.ace_mahjong/files/{_MODEL_FILENAME}",
+        f"/data/data/com.example.auto_vision/files/{_MODEL_FILENAME}",
         # Dev / sideload convenience
         os.path.join(os.path.dirname(__file__), "..", "tflite_assets", _MODEL_FILENAME),
         _MODEL_FILENAME,  # CWD

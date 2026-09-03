@@ -4,8 +4,8 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
-import 'package:ace_mahjong/overlays/tile_labels.dart';
-import 'package:ace_mahjong/server.dart';
+import 'package:auto_vision/overlays/tile_labels.dart';
+import 'package:auto_vision/server.dart';
 
 // 解析原生层发来的分析结果：前 10('\n') 之前为 JSON，之后为 PNG 预览图字节。
 // 预览图当前不在界面上展示（仅保留字节以备扩展），因此这里不做解码，
@@ -1053,7 +1053,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                       const SizedBox(width: 5),
                       const Expanded(
                         child: Text(
-                          '麻将助手',
+                          '识牌助手',
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                             color: Colors.white,

@@ -1,4 +1,4 @@
-package com.example.ace_mahjong;
+package com.example.auto_vision;
 
 
 import android.content.Context;
@@ -52,6 +52,24 @@ public class ImageProcessor {
             orientOverride = -1;
         }
         orientDirty = true;
+    }
+
+    // 调试页开关：经 MainActivity 的 setConfig 通道写入，下一帧处理前推给 Python 引擎。
+    // 用 3 个独立布尔而非 Map，避免额外的 import 与 Chaquopy 类型转换摩擦。
+    private static boolean cfgAutoOrient = true;
+    private static boolean cfgBootstrap = true;
+    private static boolean cfgStrict = true;
+    private static boolean configDirty = false;
+
+    public static void setConfig(String key, boolean value) {
+        if (key == null) return;
+        switch (key) {
+            case "auto_orient": cfgAutoOrient = value; break;
+            case "bootstrap":   cfgBootstrap = value; break;
+            case "strict":      cfgStrict = value; break;
+            default: return;
+        }
+        configDirty = true;
     }
 
     private Timer timer;
@@ -168,6 +186,18 @@ public class ImageProcessor {
                 orientDirty = false;
             } catch (Throwable t) {
                 TimedLog.e(TAG, "set_orient 推送失败（不影响本帧）: " + t);
+            }
+        }
+
+        // 把调试页开关（自动旋转/冷启动/严格门槛）推给引擎（仅在变化时）。
+        if (configDirty && engine != null) {
+            try {
+                engine.callAttr("set_config", "auto_orient", cfgAutoOrient);
+                engine.callAttr("set_config", "bootstrap", cfgBootstrap);
+                engine.callAttr("set_config", "strict", cfgStrict);
+                configDirty = false;
+            } catch (Throwable t) {
+                TimedLog.e(TAG, "set_config 推送失败（不影响本帧）: " + t);
             }
         }
 

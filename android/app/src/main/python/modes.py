@@ -24,7 +24,7 @@ from typing import Dict, List, Set
 # 与 Dart 端 (lib/overlays/mahjong_overlay.dart) 完全一致的绝对路径。
 # 这是 Android 上该 App 的「外部私有存储 / files」目录，App 进程内的
 # Java / Chaquopy-Python 与 Dart 都能读写，无需任何额外权限。
-MODE_PATH = "/storage/emulated/0/Android/data/com.example.ace_mahjong/files/mahjong_mode.json"
+MODE_PATH = "/storage/emulated/0/Android/data/com.example.auto_vision/files/mahjong_mode.json"
 
 DEFAULT_MODE = "4p"
 

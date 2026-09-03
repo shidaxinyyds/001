@@ -1,4 +1,4 @@
-package com.example.ace_mahjong;
+package com.example.auto_vision;
 
 import io.flutter.Log;
 import java.time.Instant;

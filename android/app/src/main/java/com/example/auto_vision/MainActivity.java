@@ -1,4 +1,4 @@
-package com.example.ace_mahjong;
+package com.example.auto_vision;
 
 import android.app.Activity;
 import android.content.Context;
@@ -106,6 +106,17 @@ public class MainActivity extends FlutterActivity {
         Object aDeg = call.argument("deg");
         int deg = (aDeg instanceof Number) ? ((Number) aDeg).intValue() : 0;
         ImageProcessor.setOrient(deg);
+        result.success(0);
+        return;
+      }
+
+      if (call.method.equals("setConfig")) {
+        // 调试页开关：实时修改识别策略（自动旋转/冷启动/严格门槛）。
+        Object aKey = call.argument("key");
+        Object aVal = call.argument("value");
+        boolean val = (aVal instanceof Boolean) ? (Boolean) aVal : true;
+        String key = (aKey instanceof String) ? (String) aKey : "";
+        ImageProcessor.setConfig(key, val);
         result.success(0);
         return;
       }

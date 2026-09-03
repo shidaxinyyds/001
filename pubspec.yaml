@@ -1,4 +1,4 @@
-name: ace_mahjong
+name: auto_vision
 description: 实时麻将训练器：通过屏幕录制与机器学习识别牌面，并在悬浮窗中给出弃牌策略建议。
 publish_to: "none"
 

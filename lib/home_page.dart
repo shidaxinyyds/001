@@ -4,8 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:ace_mahjong/channel.dart';
-import 'package:ace_mahjong/mode_store.dart';
+import 'package:auto_vision/channel.dart';
+import 'package:auto_vision/debug_page.dart';
+import 'package:auto_vision/mode_store.dart';
 
 /// 主色调：青绿。
 /// 全局禁用红/橙/琥珀系，避免用户把"强调色"误读为"错误提示"。
@@ -94,6 +95,15 @@ class _HomePageState extends State<HomePage> {
   String _recogScreen = '';
   String _recogMessage = '';
 
+  // 底部导航栏当前页（0=主页, 1=调试）
+  int _tab = 0;
+  // 调试页：手动方向覆盖的当前角度（用于「旋转」按钮循环显示）
+  int _orientDeg = 0;
+  // 调试页开关的 UI 镜像（实际生效在引擎侧，经 setConfig 推送）
+  bool _cfgAutoOrient = true;
+  bool _cfgBootstrap = true;
+  bool _cfgStrict = true;
+
   Future<void> setProcessingState(bool start) async {
     try {
       if (start) {
@@ -141,7 +151,7 @@ class _HomePageState extends State<HomePage> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
             content: Text(
-                '悬浮窗需要"显示在其他应用上层"权限。请到系统设置→应用→麻将训练器→权限中开启，再点一次"开始识别"。'),
+                '悬浮窗需要"显示在其他应用上层"权限。请到系统设置→应用→AutoVision→权限中开启，再点一次"开始识别"。'),
             duration: Duration(seconds: 6),
           ));
         }
@@ -160,8 +170,8 @@ class _HomePageState extends State<HomePage> {
       // 最终尺寸再由悬浮窗自身用 resizeOverlay(按 dp) 校正。
       await FlutterOverlayWindow.showOverlay(
         enableDrag: true,
-        overlayTitle: "麻将助手",
-        overlayContent: '麻将助手已开启',
+        overlayTitle: "识牌助手",
+        overlayContent: '识牌助手已开启',
         flag: OverlayFlag.defaultFlag,
         visibility: NotificationVisibility.visibilityPublic,
         // 关键：必须是 none。若为 auto，松手后插件会把窗口吸附到最近的左右边缘，
@@ -240,7 +250,7 @@ class _HomePageState extends State<HomePage> {
       return '（还没收到第一帧，确认已授权录屏并打开牌局）';
     }
     if (_recogTopScore < 0.20) {
-      return '屏幕 $scr｜匹配分 $score\n屏幕里没找到麻将牌，确认已打开牌局且手牌可见';
+      return '屏幕 $scr｜匹配分 $score\n屏幕里没找到牌，确认已打开牌局且手牌可见';
     }
     return '屏幕 $scr｜匹配分 $score\n有牌但匹配分偏低：本 App 的牌面样式与内置模板差异较大';
   }
@@ -300,89 +310,157 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     final String mode = selectedMode ?? '';
-    final bool canStart = !isProcessing && _modeReady && mode.isNotEmpty;
     return Scaffold(
-      appBar: AppBar(
-        title: const Text("麻将训练器"),
-      ),
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const SizedBox(height: 6),
-              const Text(
-                '选择玩法',
-                style: TextStyle(fontSize: 14, color: Colors.black54),
-              ),
-              const SizedBox(height: 8),
-              _modeRow(mode),
-              const SizedBox(height: 24),
-              SizedBox(
-                height: 52,
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: canStart ? _kAccent : Colors.grey.shade400,
-                    foregroundColor: Colors.white,
-                    disabledBackgroundColor: Colors.grey.shade300,
-                    disabledForegroundColor: Colors.grey.shade600,
-                    elevation: canStart ? 2 : 0,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                  ),
-                  onPressed: canStart
-                      ? () async {
-                          await showOverlay();
-                          setProcessingState(true);
-                          setState(() {
-                            isProcessing = true;
-                          });
-                        }
-                      : null,
-                  child: Text(
-                    isProcessing
-                        ? '停止识别'
-                        : (mode.isEmpty ? '请先选择玩法' : '开始识别'),
-                    style: const TextStyle(
-                        fontSize: 18, fontWeight: FontWeight.w600),
-                  ),
-                ),
-              ),
-              if (isProcessing)
-                Padding(
-                  padding: const EdgeInsets.only(top: 12),
-                  child: SizedBox(
-                    height: 44,
-                    child: OutlinedButton(
-                      onPressed: () {
-                        setProcessingState(false);
-                        hideOverlay();
-                        setState(() {
-                          isProcessing = false;
-                        });
-                      },
-                      child: const Text('停止识别'),
-                    ),
-                  ),
-                ),
-              const SizedBox(height: 16),
-              Text(
-                _status,
-                style: const TextStyle(fontSize: 13, color: Colors.black54),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                _recognitionText(),
-                style: const TextStyle(
-                    fontSize: 14, color: Colors.black87, height: 1.35),
-              ),
-            ],
+      appBar: AppBar(title: const Text("AutoVision")),
+      body: IndexedStack(
+        index: _tab,
+        children: [
+          _buildHomeBody(mode),
+          DebugPage(
+            status: _recogStatus,
+            count: _recogCount,
+            shanten: _recogShanten,
+            hand: _recogHand,
+            topScore: _recogTopScore,
+            screen: _recogScreen,
+            message: _recogMessage,
+            isProcessing: isProcessing,
+            orientDeg: _orientDeg,
+            cfgAutoOrient: _cfgAutoOrient,
+            cfgBootstrap: _cfgBootstrap,
+            cfgStrict: _cfgStrict,
+            onToggle: _setConfig,
+            onRotate: _rotate,
+            onReprobe: _reprobe,
+            onStartStop: _toggleProcessing,
           ),
+        ],
+      ),
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _tab,
+        onTap: (i) => setState(() => _tab = i),
+        selectedItemColor: _kAccent,
+        items: const [
+          BottomNavigationBarItem(icon: Icon(Icons.home), label: '主页'),
+          BottomNavigationBarItem(icon: Icon(Icons.bug_report), label: '调试'),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHomeBody(String mode) {
+    final bool canStart = !isProcessing && _modeReady && mode.isNotEmpty;
+    return SafeArea(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const SizedBox(height: 6),
+            const Text(
+              '选择玩法',
+              style: TextStyle(fontSize: 14, color: Colors.black54),
+            ),
+            const SizedBox(height: 8),
+            _modeRow(mode),
+            const SizedBox(height: 24),
+            SizedBox(
+              height: 52,
+              child: ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: canStart ? _kAccent : Colors.grey.shade400,
+                  foregroundColor: Colors.white,
+                  disabledBackgroundColor: Colors.grey.shade300,
+                  disabledForegroundColor: Colors.grey.shade600,
+                  elevation: canStart ? 2 : 0,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+                onPressed: canStart ? _toggleProcessing : null,
+                child: Text(
+                  isProcessing
+                      ? '停止识别'
+                      : (mode.isEmpty ? '请先选择玩法' : '开始识别'),
+                  style: const TextStyle(
+                      fontSize: 18, fontWeight: FontWeight.w600),
+                ),
+              ),
+            ),
+            if (isProcessing)
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: SizedBox(
+                  height: 44,
+                  child: OutlinedButton(
+                    onPressed: _toggleProcessing,
+                    child: const Text('停止识别'),
+                  ),
+                ),
+              ),
+            const SizedBox(height: 16),
+            Text(
+              _status,
+              style: const TextStyle(fontSize: 13, color: Colors.black54),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              _recognitionText(),
+              style: const TextStyle(
+                  fontSize: 14, color: Colors.black87, height: 1.35),
+            ),
+          ],
         ),
       ),
     );
+  }
+
+  // 开始/停止识别（主页按钮与调试页共用）
+  Future<void> _toggleProcessing() async {
+    if (isProcessing) {
+      setProcessingState(false);
+      hideOverlay();
+      setState(() => isProcessing = false);
+    } else {
+      await showOverlay();
+      setProcessingState(true);
+      setState(() => isProcessing = true);
+    }
+  }
+
+  // 调试页开关：实时修改引擎识别策略
+  void _setConfig(String key, bool value) {
+    setState(() {
+      if (key == 'auto_orient') _cfgAutoOrient = value;
+      else if (key == 'bootstrap') _cfgBootstrap = value;
+      else if (key == 'strict') _cfgStrict = value;
+    });
+    try {
+      channel.invokeMethod<dynamic>('setConfig', {'key': key, 'value': value});
+    } on Exception catch (e) {
+      print(e);
+    }
+  }
+
+  // 调试页「旋转」：循环 0→90→180→270→0，经主引擎 MethodChannel 推给 Java/引擎。
+  Future<void> _rotate() async {
+    final next = (_orientDeg + 90) % 360;
+    setState(() => _orientDeg = next);
+    try {
+      await channel.invokeMethod<dynamic>('setOrient', {'deg': next});
+    } on Exception catch (e) {
+      print(e);
+    }
+  }
+
+  // 调试页「重探方向」：解除手动覆盖并强制引擎重新探测方向。
+  Future<void> _reprobe() async {
+    setState(() => _orientDeg = 0);
+    try {
+      await channel.invokeMethod<dynamic>('setOrient', {'deg': -1});
+    } on Exception catch (e) {
+      print(e);
+    }
   }
 
   // 玩法选择：3 个等宽 SegmentedButton 风格卡。当前选中项高亮 + 上边框加粗。
