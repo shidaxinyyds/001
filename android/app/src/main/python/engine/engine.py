@@ -111,6 +111,22 @@ ENGINE_MIN_CONF_RELAX = 0.42
 # 只在冷启动且只对手牌行候选生效；稳定手牌一旦建立，正常严格/放宽逻辑接管，不再用此门槛。
 BOOTSTRAP_CONF = 0.40
 
+# ===== 部分识别（partial）兜底：消灭"全有或全无"断崖 =====
+# 实测证据（localtest/_probe_encoding.py）：同一张图，切牌只少 1 张（14→13），
+# 最终结果就从「13 张全对 status=ok」直接变成「count=0 status=no_tiles 完全空白」。
+# 原因是多重集稳定器只接受**张数完全合法**（13/14）的帧，一帧都凑不齐就永远输出空。
+# 真机是动态视频（摸打动画、半透明遮挡、模糊、分辨率各异），几乎每帧都会掉 1 张，
+# 于是用户看到的是永久空白 —— 这是"识别不出来"比模板标签严重得多的头号根因。
+#
+# 兜底策略：稳定手牌尚未建立时，只要本帧手牌行认出的牌数达到 PARTIAL_MIN_TILES，
+# 就以 status="partial" 把这些牌照实输出（悬浮窗已支持 count<13 的"已识别 N 张"渲染）。
+# 关键：**不写入 self._stable_hand_mpsz、不喂 trainer**，因此不会污染建议与向听逻辑，
+# 只是把"已经认出来的东西"如实显示出来，而不是一律清空。
+PARTIAL_MIN_TILES = 6
+# 部分识别的保持帧数（滞后窗口）。没有它，partial 会随帧抖动闪进闪出，
+# 观感比空白更糟。命中一次后维持 PARTIAL_TTL_FRAMES 帧，期间被新的 partial 刷新。
+PARTIAL_TTL_FRAMES = 10
+
 # 牌河稳定性兜底：避免识别器瞬时漏抓牌河中的几张牌，导致 remaining/dead
 # 当帧剧烈变化。追踪最近 N 帧的 disc_mpsz 长度与 mpsz 增量；当前帧若
 # 显著少于历史最小值（差距 ≥MIN_DROP_DELTA），回退到历史最大稳定值。
@@ -691,6 +707,10 @@ class Engine:
         # 最近一次"稳定"的手牌 mpsz 与张数：用于本帧识别失败/可疑时做兜底
         self._stable_hand_mpsz: str = ""
         self._stable_hand_count: int = 0
+        # 部分识别兜底（见 PARTIAL_MIN_TILES 注释）：稳定手牌未建立时，把"已经认出的
+        # 那几张"如实显示出来，而不是整帧清空。带 TTL 滞后，避免逐帧闪进闪出。
+        self._partial_mpsz: str = ""
+        self._partial_ttl: int = 0
         # 当前模式（process() 每帧 reload，对比是否变了）
         self.mode: str = "4p"
         self._prev_mode: str = self.mode
@@ -864,22 +884,24 @@ class Engine:
         （否则会经 chaquopy 冒泡到 Java 再冒泡到 UI 线程，可能触发闪退）。
         """
         try:
-            if deg is None:
-                self._orient_override = None
-                return
-            d = int(deg)
-            if d not in (0, 90, 180, 270):
-                return
-            self._orient_override = d
-            # 立即解锁自动方向，下一帧按覆盖方向重旋；同时清掉与方向强相关的状态。
-            self._orient = None
-            self._orient_zerocount = 0
-            self._orient_reprobe_count = 0
-            self._last_hand_y = None
-            self._tile_voter.reset()
-            self._cached_rows = None
+            d = None if deg is None else int(deg)
         except (TypeError, ValueError):
             return
+        # 约定：0/90/180/270 = 锁定该方向；其它任意值（Java 侧用 -1，Dart 侧「重探
+        # 方向」按钮发 -1）= 解除手动覆盖并让自动探测重新跑一遍。
+        # 早期实现对 -1 直接 return，导致「重探方向」按钮静默失效，这里必须兜住。
+        self._orient_override = d if d in (0, 90, 180, 270) else None
+        # 无论锁定还是解除，都要解锁自动方向让下一帧重新定向，并清掉与方向强相关的
+        # 状态（历史手牌 y、投票窗口、行缓存），否则旧方向的脏数据会污染新方向。
+        self._orient = None
+        self._orient_zerocount = 0
+        self._orient_reprobe_count = 0
+        self._last_hand_y = None
+        try:
+            self._tile_voter.reset()
+        except Exception:
+            pass
+        self._cached_rows = None
 
     def process_bytes(self, image_data) -> Optional[EngineResult]:
         try:
@@ -1566,6 +1588,9 @@ class Engine:
                 shanten, advice = self.build_advice(hand, disc_counts)
                 self._stable_hand_mpsz = hand_mpsz
                 self._stable_hand_count = tile_count
+                # 有合法手牌了，partial 兜底立即让位（否则会与真手牌打架）
+                self._partial_mpsz = ""
+                self._partial_ttl = 0
             else:
                 # 还没建立起任何稳定手牌（冷启动 / 画面里确实没有牌）。
                 # 仍然尽量把上一次算好的建议带回去：build_advice 内部对
@@ -1573,6 +1598,30 @@ class Engine:
                 if self.trainer is not None:
                     shanten, advice = self.build_advice(
                         TileCollection.from_mpsz(""), disc_counts)
+
+                # ===== 部分识别兜底：消灭"少 1 张 → 整屏空白"的断崖 =====
+                # 稳定器只接受张数完全合法（13/14）的帧，真机几乎每帧掉 1 张，
+                # 于是永远输出空。这里把本帧手牌行"已经认出来的牌"照实输出。
+                # 只做展示：不写 _stable_hand_mpsz、不喂 trainer，不污染建议逻辑。
+                try:
+                    partial_now = self._labels_to_mpsz(raw_labels, avail)
+                except Exception:
+                    partial_now = ""
+                partial_n = len(partial_now) // 2
+                if partial_n >= PARTIAL_MIN_TILES:
+                    self._partial_mpsz = partial_now
+                    self._partial_ttl = PARTIAL_TTL_FRAMES
+                elif self._partial_ttl > 0:
+                    # 本帧没认出足够的牌，但滞后窗口内 —— 继续显示上一次的部分结果，
+                    # 避免 partial 逐帧闪进闪出（那比空白更难看）。
+                    self._partial_ttl -= 1
+                else:
+                    self._partial_mpsz = ""
+
+                if self._partial_mpsz:
+                    status = "partial"
+                    tile_count = len(self._partial_mpsz) // 2
+                    hand_mpsz = self._partial_mpsz
 
             # 标记"最优"那张牌（最高 ukeire），UI 上加"最优"角标
             if advice:

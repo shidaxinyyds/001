@@ -58,10 +58,13 @@ public class ImageEncoder {
       return null;
     }
     ByteArrayOutputStream stream = new ByteArrayOutputStream();
-    // 质量 95：之前用 50，整屏（2712x1220 级）高压缩把麻将牌面细小数字/花色糊成
-    // 一团，模板匹配几乎必然误判——这是"识别不准"的头号画质元凶。95 在画质与体积
-    // 之间取得平衡，localhost 传输不是瓶颈。
-    bitmap.compress(Bitmap.CompressFormat.JPEG, 95, stream);
+    // 质量 100：之前 50 会把牌面数字/花色糊成一团（识别不准的头号画质元凶），
+    // 后改 95 已可用，但 localtest/_probe_encoding.py 实测证明检测对压缩伪影
+    // 极其敏感 —— 同一张图 JPEG95 切出 14 张（识别全对），JPEG90 只切出 13 张
+    // （少 1 张就触发整帧空白）。也就是说 95 距离失败边界只差一档，真机画面比
+    // 测试图更糟。这里直接给到 100（体积约 1.8x，~560KB/帧；按 2fps 走
+    // Chaquopy 内存传递，完全不是瓶颈），把这一档余量买回来。
+    bitmap.compress(Bitmap.CompressFormat.JPEG, 100, stream);
     return stream.toByteArray();
   }
 }
