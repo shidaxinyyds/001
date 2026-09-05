@@ -47,7 +47,22 @@ jobs:
         run: flutter analyze --no-fatal-infos --no-fatal-warnings
 
       - name: 构建 APK（release，使用 debug 签名，可直接安装）
-        run: flutter build apk --release --no-shrink
+        run: |
+          set -euo pipefail
+          flutter build apk --release --no-shrink
+
+      # 防「绿灯但无 APK」假成功：构建步骤即便异常返回 0，也必须在此处
+      # 断言产物真实存在且非空，否则显式失败，避免误以为发布成功。
+      - name: 校验 APK 产物
+        run: |
+          set -euo pipefail
+          APK=build/app/outputs/flutter-apk/app-release.apk
+          if [ ! -s "$APK" ]; then
+            echo "::error::构建步骤结束但未生成有效 APK（$APK 不存在或为空），判定为构建异常"
+            exit 1
+          fi
+          echo "APK 路径: $APK"
+          echo "APK 大小: $(du -h "$APK" | cut -f1)"
 
       - name: 上传 APK 制品
         uses: actions/upload-artifact@v4

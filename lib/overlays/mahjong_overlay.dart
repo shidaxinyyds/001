@@ -1,9 +1,12 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
+import 'package:auto_vision/config_store.dart';
 import 'package:auto_vision/overlays/tile_labels.dart';
 import 'package:auto_vision/server.dart';
 
@@ -202,16 +205,61 @@ Map<String, List<String>> _groupHand(String hand) {
   return groups;
 }
 
+/// 危险牌预警小标：防点炮 / 防杠 的等级提示。
+/// 配色遵守全局约束（禁红 / 橙 / 琥珀）：安全 = 青绿、中等 = 蓝灰、危险 = 深蓝灰 + 白字描边。
+Widget _dangerTag(String label, String level) {
+  final Color bg;
+  final String text;
+  if (level == 'safe') {
+    bg = const Color(0xFF00695C);
+    text = '$label·安全';
+  } else if (level == 'mid') {
+    bg = const Color(0xFF546E7A);
+    text = '$label·中';
+  } else {
+    // risky：深蓝灰底 + 白字加粗 + 一道白描边，足够醒目但不触碰红/橙/琥珀。
+    bg = const Color(0xFF263238);
+    text = '$label·危险';
+  }
+  return Container(
+    margin: const EdgeInsets.only(top: 2),
+    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+    decoration: BoxDecoration(
+      color: bg,
+      borderRadius: BorderRadius.circular(3),
+      border: level == 'risky'
+          ? Border.all(color: Colors.white, width: 0.6)
+          : null,
+    ),
+    child: Text(
+      text,
+      style: const TextStyle(
+        color: Colors.white,
+        fontSize: 8.5,
+        fontWeight: FontWeight.bold,
+        height: 1.0,
+      ),
+    ),
+  );
+}
+
 /// "推荐打这张"卡片。打 [牌] → 进张 N 张。
 class AdviceCard extends StatelessWidget {
   final String tile;
   final int ukeire;
   final bool best;
+  // 危险牌预警（防点炮 / 防杠）：仅当调试页对应开关开启、且引擎算出该字段时非空。
+  // 值：deal_in ∈ {"safe","risky"}；pon_kong ∈ {"safe","mid","risky"}。
+  // 来自引擎 build_advice，悬浮窗视自身渲染能力决定是否展示。
+  final String? dealIn;
+  final String? ponKong;
   const AdviceCard({
     super.key,
     required this.tile,
     required this.ukeire,
     this.best = false,
+    this.dealIn,
+    this.ponKong,
   });
 
   @override
@@ -266,6 +314,17 @@ class AdviceCard extends StatelessWidget {
               ],
             ),
           ),
+          if (dealIn != null || ponKong != null) ...[
+            const SizedBox(width: 6),
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (dealIn != null) _dangerTag('防点炮', dealIn!),
+                if (ponKong != null) _dangerTag('防杠', ponKong!),
+              ],
+            ),
+          ],
           if (best) ...[
             const SizedBox(width: 6),
             Container(
@@ -303,6 +362,14 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
   // 当前玩法：悬浮窗写入共享文件，Python 引擎每帧读取。默认四麻。
   String selectedMode = '4p';
+
+  // 防封号：建议做人类式延迟显示。手牌/牌河随 result 立即刷新，
+  // 仅「建议」段经 _shownAdvice/_shownBest 延迟（随机 180–420ms）呈现，
+  // 避免每帧瞬时刷新建议带来的「机械/外挂」节奏特征。
+  bool _antiBan = false;
+  List<dynamic> _shownAdvice = const [];
+  String _shownBest = '';
+  Timer? _adviceTimer;
 
   static const double collapsed = 56;
   double panelW = 296;
@@ -438,6 +505,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   void initState() {
     super.initState();
 
+    // 防封号：读取调试页写下的开关（悬浮窗独立运行，启动时读一次即可）。
+    DebugConfig.load().then((c) {
+      if (mounted) setState(() => _antiBan = c.antiBan);
+    });
+
     // 监听原生层通过本地 socket 发来的每帧分析结果（端口 12345 与 ImageProcessor 发送端一致）。
     // 即便 socket 启动失败也不能让悬浮窗引擎崩溃（否则按钮永远不渲染），因此整体 try/catch 兜底。
     try {
@@ -462,6 +534,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                 selectedMode = m;
               }
             });
+            // 防封号：建议做人类式延迟显示（手牌/牌河已随 result 立即刷新）。
+            _applyAdviceDelay(json);
           }
           _maybeShareStatus(json);
         },
@@ -482,6 +556,36 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
     // 玩法文件已改由主页通过 Java MethodChannel 写入；这里不再读 dart:io 文件。
     // （注：本 Flutter 端的 selectedMode 仍保留，仅用于把当前模式透传给主界面。）
+  }
+
+  @override
+  void dispose() {
+    _adviceTimer?.cancel();
+    super.dispose();
+  }
+
+  // 防封号：建议做人类式延迟显示。关闭开关时立即呈现（与以往一致）；
+  // 开启时随机延迟 180–420ms 再刷新 _shownAdvice/_shownBest，
+  // 让建议出现节奏更接近人类而非每帧瞬时刷新。手牌/牌河仍随 result 立即刷新。
+  void _applyAdviceDelay(Map<String, dynamic> json) {
+    final List<dynamic> advice =
+        (json['advice'] ?? const []) as List<dynamic>;
+    final String best = (json['best'] ?? '') as String;
+    _adviceTimer?.cancel();
+    if (!_antiBan) {
+      _shownAdvice = advice;
+      _shownBest = best;
+      return;
+    }
+    final int delay = 180 + Random().nextInt(241); // [180, 420]
+    _adviceTimer = Timer(Duration(milliseconds: delay), () {
+      if (mounted) {
+        setState(() {
+          _shownAdvice = advice;
+          _shownBest = best;
+        });
+      }
+    });
   }
 
   // 只在识别内容真正变化时回传一次摘要给主 App，
@@ -994,6 +1098,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             tile: (sorted[i]['tile'] ?? '') as String,
             ukeire: (sorted[i]['ukeire'] ?? 0) as int,
             best: best.isNotEmpty && sorted[i]['tile'] == best,
+            dealIn: sorted[i]['deal_in'] as String?,
+            ponKong: sorted[i]['pon_kong'] as String?,
           ),
       ],
     );
@@ -1010,9 +1116,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
     final String hand = (result?['hand'] ?? '') as String;
     final int count = (result?['count'] ?? 0) as int;
-    final List<dynamic> advice =
-        (result?['advice'] ?? const []) as List<dynamic>;
-    final String best = (result?['best'] ?? '') as String;
+    // 「建议」段走防封号延迟态（_shownAdvice/_shownBest），手牌/牌河用 result 即时值。
+    final List<dynamic> advice = _shownAdvice;
+    final String best = _shownBest;
     final String discards = (result?['discards'] ?? '') as String;
     final int discardCount = (result?['discard_count'] ?? 0) as int;
 

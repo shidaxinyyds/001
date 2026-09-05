@@ -1,6 +1,8 @@
-# 麻将训练器（TileTrainer）
+# AutoVision（麻将训练器）
 
-麻将训练器（TileTrainer）旨在提升你在 [Let's Mahjong](https://play.google.com/store/apps/details?id=com.gdapp.mjlafree&hl=en&gl=US) 中的对局体验，通过实时分析，给出每一手“打哪张牌更优”的策略建议。
+[![Build APK](https://github.com/shidaxinyyds/001/actions/workflows/build.yml/badge.svg)](https://github.com/shidaxinyyds/001/actions/workflows/build.yml)
+
+AutoVision（麻将训练器）旨在提升你在 [Let's Mahjong](https://play.google.com/store/apps/details?id=com.gdapp.mjlafree&hl=en&gl=US) 中的对局体验，通过实时分析，给出每一手“打哪张牌更优”的策略建议。
 
 ![应用截图示例](docs/screenshot.jpg)
 _截图：在 Let's Mahjong 对局过程中显示的分析建议_
@@ -40,7 +42,7 @@ _截图：在 Let's Mahjong 对局过程中显示的分析建议_
 ## 使用说明
 
 1. 在 Google Play 商店安装 Let's Mahjong App：[链接](https://play.google.com/store/apps/details?id=com.gdapp.mjlafree&hl=en&gl=US)
-1. 安装本应用“麻将训练器”（可从 Releases 页面获取 APK）。
+1. 安装本应用“AutoVision 麻将训练器”（APK 由 GitHub Actions 自动构建，请从工作流运行的 Artifacts 下载）。
 1. 打开“麻将训练器”，点击“授权通知”以允许显示通知。这是因为 Android 要求前台服务必须显示一条常驻通知（前台服务用于录制屏幕）。
 1. 先确保手机处于横屏模式，再点击“开始识别”，并授予屏幕录制权限。
 1. 打开 Let's Mahjong 开始任意一局麻将。快速开始的方法：点击 开始 → 自由对战（Freeplay）进行离线对局。
@@ -57,7 +59,7 @@ _截图：在 Let's Mahjong 对局过程中显示的分析建议_
 ## 编译说明
 
 1. 确保已具备以下构建环境（使用 [Nix 包管理器](https://www.wikipedia.com/en/Nix_(package_manager)) 的用户可直接运行 `nix develop` 一键安装）：
-   - Flutter SDK
+   - Flutter SDK（3.13.x，与 CI 同版本）
    - Android SDK
    - Python 3
 1. 下载 Flutter 依赖：
@@ -66,9 +68,10 @@ _截图：在 Let's Mahjong 对局过程中显示的分析建议_
    ```
 1. 编译 APK：
    ```
-   flutter build apk --debug
+   flutter build apk --release   # 发布包（默认用 debug 签名，可直接安装）
+   flutter build apk --debug     # 调试包
    ```
-   生成的 APK 位于 `build/app/outputs/apk/` 目录下。
+   生成的 APK 位于 `build/app/outputs/flutter-apk/` 目录下。
 
 > 说明：由于本应用通过 Chaquopy 在 Android 内运行 Python，首次构建时 Gradle 会自动下载 OpenCV（约 4.5.1）、Pillow、mahjong 等 Python 包，耗时较长，请耐心等待；请确保网络可访问 Chaquopy 的 PyPI 镜像。
 

@@ -7,9 +7,12 @@ import 'channel.dart';
 ///
 /// 引擎侧现状决定了两类参数必须走**两条不同通道**：
 ///
-/// - **布尔识别策略**（auto_orient / bootstrap / strict）：MethodChannel
-///   `setConfig` → Java `ImageProcessor.setConfig` → Python `Engine.set_config`，
-///   直接改引擎 `self._cfg`，下一帧生效。
+/// - **布尔识别策略**（auto_orient / bootstrap / strict / anti_ban /
+///   anti_detect）：MethodChannel `setConfig` → Java `ImageProcessor.setConfig`
+///   → Python `Engine.set_config`，直接改引擎 `self._cfg`，下一帧生效。
+///   - `anti_ban` / `anti_detect`（防封号 / 防平台检测）的**真实行为在 Java 侧**：
+///     截屏节奏随机抖动、前台感知采样，由 `ImageProcessor` 的采集循环直接执行；
+///     Python 侧仅存档，不影响识别结果。
 /// - **出牌建议配置**（show_advice 布尔 + min_ukeire 整数）：MethodChannel
 ///   `setAdviceConfig` → Java 写 `mahjong_advice.json` → Python 每帧 reload。
 ///   原因：`min_ukeire` 是整数，而 `setConfig` 只接受布尔，塞不进去。
@@ -32,6 +35,11 @@ class DebugConfig {
   // 接入后端前，绝不声称该功能已生效（避免假开关误导）。
   static const bool defWarnDealIn = false;
   static const bool defWarnPonKong = false;
+  // 防封号 / 防平台检测：默认关闭。
+  // 两者都是「行为层」隐私措施（见 ImageProcessor 采集循环），默认关意味着
+  // 不改动任何既有行为，用户主动打开才生效。
+  static const bool defAntiBan = false;
+  static const bool defAntiDetect = false;
 
   /// 好牌机率可选项（百分比）。
   static const List<int> rates = [10, 20, 30, 40, 50, 60, 70, 80, 90];
@@ -43,6 +51,8 @@ class DebugConfig {
   int rate;
   bool warnDealIn;
   bool warnPonKong;
+  bool antiBan;
+  bool antiDetect;
 
   DebugConfig({
     this.autoOrient = defAutoOrient,
@@ -52,6 +62,8 @@ class DebugConfig {
     this.rate = defRate,
     this.warnDealIn = defWarnDealIn,
     this.warnPonKong = defWarnPonKong,
+    this.antiBan = defAntiBan,
+    this.antiDetect = defAntiDetect,
   });
 
   /// 好牌机率 → 引擎「进张数下限」。
@@ -67,6 +79,8 @@ class DebugConfig {
     int? rate,
     bool? warnDealIn,
     bool? warnPonKong,
+    bool? antiBan,
+    bool? antiDetect,
   }) {
     return DebugConfig(
       autoOrient: autoOrient ?? this.autoOrient,
@@ -76,6 +90,8 @@ class DebugConfig {
       rate: rate ?? this.rate,
       warnDealIn: warnDealIn ?? this.warnDealIn,
       warnPonKong: warnPonKong ?? this.warnPonKong,
+      antiBan: antiBan ?? this.antiBan,
+      antiDetect: antiDetect ?? this.antiDetect,
     );
   }
 
@@ -87,6 +103,8 @@ class DebugConfig {
   static const String _kRate = 'dbg_rate';
   static const String _kWarnDealIn = 'dbg_warn_deal_in';
   static const String _kWarnPonKong = 'dbg_warn_pon_kong';
+  static const String _kAntiBan = 'dbg_anti_ban';
+  static const String _kAntiDetect = 'dbg_anti_detect';
 
   static Future<DebugConfig> load() async {
     try {
@@ -101,6 +119,8 @@ class DebugConfig {
         rate: rates.contains(rate) ? rate : defRate,
         warnDealIn: p.getBool(_kWarnDealIn) ?? defWarnDealIn,
         warnPonKong: p.getBool(_kWarnPonKong) ?? defWarnPonKong,
+        antiBan: p.getBool(_kAntiBan) ?? defAntiBan,
+        antiDetect: p.getBool(_kAntiDetect) ?? defAntiDetect,
       );
     } catch (_) {
       return DebugConfig();
@@ -117,6 +137,8 @@ class DebugConfig {
       await p.setInt(_kRate, rate);
       await p.setBool(_kWarnDealIn, warnDealIn);
       await p.setBool(_kWarnPonKong, warnPonKong);
+      await p.setBool(_kAntiBan, antiBan);
+      await p.setBool(_kAntiDetect, antiDetect);
     } catch (_) {
       // 存不下就算了，不能因为本地存储失败影响识别主流程
     }
@@ -138,6 +160,9 @@ class DebugConfig {
       'auto_orient': autoOrient,
       'bootstrap': bootstrap,
       'strict': strict,
+      // 防封号 / 防平台检测：行为在 Java 侧采集循环执行，这里只下发开关。
+      'anti_ban': antiBan,
+      'anti_detect': antiDetect,
     }.entries) {
       try {
         await _ch.invokeMethod<dynamic>('setConfig', {

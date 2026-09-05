@@ -176,6 +176,28 @@ class _DebugPageState extends State<DebugPage> {
             ),
             const SizedBox(height: 16),
             _groupCard(
+              title: '隐私与防检测',
+              children: [
+                _switchRow(
+                  title: '防封号',
+                  desc: '开启后截屏节奏在 350–550ms 间随机抖动，并让建议稍作'
+                      '人类式延迟显示，避免固定节奏被识别为机械/外挂。'
+                      '只改变采集与展示节奏，不影响识别准确率',
+                  value: _cfg.antiBan,
+                  onChanged: (v) => _update(_cfg.copyWith(antiBan: v)),
+                ),
+                _switchRow(
+                  title: '防平台检测',
+                  desc: '开启后仅在目标麻将 App 处于前台时才采帧，'
+                      '切回本 App 或回到桌面自动暂停识别，降低持续扫描特征。'
+                      '需「使用情况访问」权限；未授予时自动降级为常开',
+                  value: _cfg.antiDetect,
+                  onChanged: (v) => _update(_cfg.copyWith(antiDetect: v)),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            _groupCard(
               title: '危险牌预警',
               children: [
                 _switchRow(

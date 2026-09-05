@@ -43,7 +43,21 @@ jobs:
         run: flutter analyze --no-fatal-infos --no-fatal-warnings
 
       - name: Build APK (debug)
-        run: flutter build apk --debug
+        run: |
+          set -euo pipefail
+          flutter build apk --debug
+
+      # 防「绿灯但无 APK」假成功：断言产物真实存在且非空，否则显式失败。
+      - name: Verify APK artifact
+        run: |
+          set -euo pipefail
+          APK=build/app/outputs/flutter-apk/app-debug.apk
+          if [ ! -s "$APK" ]; then
+            echo "::error::Build finished but no valid APK produced ($APK missing or empty)"
+            exit 1
+          fi
+          echo "APK path: $APK"
+          echo "APK size: $(du -h "$APK" | cut -f1)"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4

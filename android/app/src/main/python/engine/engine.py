@@ -759,6 +759,10 @@ class Engine:
             "auto_orient": True,
             "bootstrap": True,
             "strict": True,
+            # 防封号 / 防平台检测：真实行为在 Java 侧采集循环执行（截屏节奏抖动、
+            # 前台感知采样），这里仅存档，供 set_config 接受，不影响识别结果。
+            "anti_ban": False,
+            "anti_detect": False,
         }
         # 出牌建议配置（调试页开关，process() 每帧从 mahjong_advice.json reload）。
         # 这里给一份安全默认：显示出牌建议、不过滤进张。即便文件永远不存在，

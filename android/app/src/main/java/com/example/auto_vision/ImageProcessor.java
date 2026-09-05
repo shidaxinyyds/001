@@ -4,6 +4,17 @@ package com.example.auto_vision;
 import android.content.Context;
 import android.media.Image;
 
+import android.app.AppOpsManager;
+import android.app.usage.UsageStats;
+import android.app.usage.UsageStatsManager;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
+import android.os.Build;
+import android.os.Process;
+
+import java.util.List;
+import java.util.Random;
 import java.util.Timer;
 import java.util.TimerTask;
 import com.chaquo.python.PyObject;
@@ -36,6 +47,16 @@ public class ImageProcessor {
     private static int orientOverride = -1;
     private static boolean orientDirty = false;
 
+    // ===== 防封号 / 防平台检测（调试页开关，经 setConfig 写入，采集循环读取）=====
+    // anti_ban：截屏节奏随机抖动（350–550ms）+ 建议延迟显示，避免固定节奏的 bot 特征。
+    // anti_detect：仅在目标麻将 App 前台时采帧，切回本 App/桌面自动暂停。
+    // 两者默认关闭，打开才改变采集行为；缺权限/缺 Context 时自动降级为常开。
+    private static boolean cfgAntiBan = false;
+    private static boolean cfgAntiDetect = false;
+    // 前台检测需要 Context，在 prepare() 里缓存（用 ApplicationContext，避免持有 Activity）。
+    private static Context sContext = null;
+    private static final Random sRng = new Random();
+
     public static void setRoi(float top, float bottom) {
         float t = Math.max(0f, Math.min(1f, top));
         float b = Math.max(t + 0.02f, Math.min(1f, bottom));
@@ -55,7 +76,7 @@ public class ImageProcessor {
     }
 
     // 调试页开关：经 MainActivity 的 setConfig 通道写入，下一帧处理前推给 Python 引擎。
-    // 用 3 个独立布尔而非 Map，避免额外的 import 与 Chaquopy 类型转换摩擦。
+    // 用独立布尔而非 Map，避免额外的 import 与 Chaquopy 类型转换摩擦。
     private static boolean cfgAutoOrient = true;
     private static boolean cfgBootstrap = true;
     private static boolean cfgStrict = true;
@@ -67,6 +88,8 @@ public class ImageProcessor {
             case "auto_orient": cfgAutoOrient = value; break;
             case "bootstrap":   cfgBootstrap = value; break;
             case "strict":      cfgStrict = value; break;
+            case "anti_ban":    cfgAntiBan = value; break;
+            case "anti_detect": cfgAntiDetect = value; break;
             default: return;
         }
         configDirty = true;
@@ -88,6 +111,10 @@ public class ImageProcessor {
     }
 
     public boolean prepare(Context context) {
+        // 缓存 ApplicationContext 供前台检测使用（避免持有 Activity 导致泄漏）。
+        if (context != null) {
+            sContext = context.getApplicationContext();
+        }
         if (!Python.isStarted()) {
             Python.start(new AndroidPlatform(context));
         }
@@ -116,43 +143,131 @@ public class ImageProcessor {
 
     public void start() {
         timer = new Timer();
-        timer.schedule( new TimerTask() {
+        // 改为自调度（见 scheduleNextCapture）：固定 period 无法逐帧改间隔，
+        // 防封号开启时需要随机抖动间隔，故每帧跑完再排下一帧。
+        scheduleNextCapture(0);
+    }
+
+    // 自调度采集：每跑完一帧再排下一帧，间隔可随「防封号」开关变化。
+    // 固定 schedule(...,0,400) 无法逐帧改间隔，故用递归 one-shot 调度。
+    private void scheduleNextCapture(long delayMs) {
+        final Timer t = timer;
+        if (t == null) return;
+        t.schedule(new TimerTask() {
             public void run() {
-                if (!busy.compareAndSet(false, true)) {
-                    return;
-                }
-                Image image = null;
                 try {
-                    image = callback.get();
-                    if (image == null) {
-                        // 收不到画面：屏幕静止（虚拟显示不重复出帧），
-                        // 或者 VirtualDisplay 建流失败/会话被系统结束。
-                        // 以前这里直接 return，一旦采集挂掉就是永久静默。
-                        heartbeat("no_frames");
-                        return;
-                    }
-                    framesAcquired++;
-                    processCapturedImage(image);
-                } catch (Throwable t) {
-                    TimedLog.e(TAG, "处理帧时出错: " + t.toString());
-                    sendStatus(NetworkClient.statusJson("java_error", "处理帧出错: " + t));
+                    runCaptureOnce();
                 } finally {
-                    if (image != null) {
+                    // 无论本帧成功/异常/被跳过，都排下一帧。
+                    // stop() 会 cancel 并置 timer=null；若本帧恰好在 stop 之后调度，
+                    // schedule 会抛 IllegalStateException，这里静默吞掉，避免 Timer 线程崩溃。
+                    if (timer != null) {
                         try {
-                            image.close();
-                        } catch (Exception ignore) {
+                            scheduleNextCapture(captureDelayMs());
+                        } catch (IllegalStateException ignore) {
+                            // Timer 已被 stop() 取消，忽略。
                         }
                     }
-                    busy.set(false);
                 }
             }
-        // 采集间隔 400ms。
-        // 原来是 600ms，配合稳定器"连续 2 帧共识"的判据，一次真实的手牌
-        // 变化要 1.2s 才反映到界面上，用户会觉得"迟钝、像没识别"。
-        // 400ms 下响应约 0.8s。单帧处理实测远低于这个数（PC 14ms，真机
-        // ARM 上按 5 倍估也只有 ~70ms），且 busy 标志保证处理不完就跳过
-        // 下一帧，不会出现队列堆积。
-        }, 0, 400);
+        }, delayMs);
+    }
+
+    // 下一帧采集间隔。
+    // 防封号开启：350–550ms 随机抖动（拟人节奏，避免固定节奏的 bot 特征）；
+    // 否则固定 400ms，行为与原先完全一致。
+    private long captureDelayMs() {
+        if (cfgAntiBan) {
+            return 350 + sRng.nextInt(201); // [350, 550]
+        }
+        return 400;
+    }
+
+    // 单帧采集 + 识别（原函数体从 TimerTask.run 抽出，便于自调度复用）。
+    private void runCaptureOnce() {
+        if (!busy.compareAndSet(false, true)) {
+            return;
+        }
+        Image image = null;
+        try {
+            // 防平台检测：仅当目标麻将 App 在前台才采帧；否则暂停识别，
+            // 避免「本 App 在设置页 / 回到桌面」时仍持续扫描屏幕。
+            if (cfgAntiDetect && !isTargetAppForeground()) {
+                heartbeat("paused_foreground");
+                return;
+            }
+            image = callback.get();
+            if (image == null) {
+                // 收不到画面：屏幕静止（虚拟显示不重复出帧），
+                // 或者 VirtualDisplay 建流失败/会话被系统结束。
+                // 以前这里直接 return，一旦采集挂掉就是永久静默。
+                heartbeat("no_frames");
+                return;
+            }
+            framesAcquired++;
+            processCapturedImage(image);
+        } catch (Throwable t) {
+            TimedLog.e(TAG, "处理帧时出错: " + t.toString());
+            sendStatus(NetworkClient.statusJson("java_error", "处理帧出错: " + t));
+        } finally {
+            if (image != null) {
+                try {
+                    image.close();
+                } catch (Exception ignore) {
+                }
+            }
+            busy.set(false);
+        }
+    }
+
+    // 防平台检测：判断当前是否「可识别」状态——即某个麻将 App 在前台。
+    // 返回 true = 采帧；false = 暂停（前台是本 App 或桌面启动器）。
+    // 无 Context / 无权限 / 取不到前台包名时一律返回 true（降级为常开，绝不阻断识别）。
+    private static boolean isTargetAppForeground() {
+        if (sContext == null) return true;
+        if (!hasUsageStatsPermission()) return true;
+        final long now = System.currentTimeMillis();
+        final UsageStatsManager usm =
+                (UsageStatsManager) sContext.getSystemService(Context.USAGE_STATS_SERVICE);
+        if (usm == null) return true;
+        final List<UsageStats> stats =
+                usm.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, now - 2000, now);
+        if (stats == null || stats.isEmpty()) return true;
+        String top = null;
+        long last = 0;
+        for (final UsageStats s : stats) {
+            if (s.getLastTimeUsed() > last) {
+                last = s.getLastTimeUsed();
+                top = s.getPackageName();
+            }
+        }
+        if (top == null) return true;
+        // 暂停条件：前台是我们自己的 App（用户在设置页），或系统桌面启动器（没在打牌）。
+        if (top.equals(sContext.getPackageName())) return false;
+        if (isLauncher(top)) return false;
+        return true;
+    }
+
+    // 是否拥有「使用情况访问」权限（PACKAGE_USAGE_STATS）。低于 LOLLIPOP 无此概念，默认放行。
+    private static boolean hasUsageStatsPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return true;
+        final AppOpsManager aom =
+                (AppOpsManager) sContext.getSystemService(Context.APP_OPS_SERVICE);
+        if (aom == null) return true;
+        final int mode = aom.checkOpNoThrow(
+                AppOpsManager.OPSTR_GET_USAGE_STATS,
+                Process.myUid(), sContext.getPackageName());
+        return mode == AppOpsManager.MODE_ALLOWED;
+    }
+
+    // 给定包名是否为系统默认桌面启动器。用 resolveActivity 而非维护启动器名单，更稳健。
+    private static boolean isLauncher(String pkg) {
+        final Intent i = new Intent(Intent.ACTION_MAIN);
+        i.addCategory(Intent.CATEGORY_HOME);
+        final ResolveInfo ri = sContext.getPackageManager()
+                .resolveActivity(i, PackageManager.MATCH_DEFAULT_ONLY);
+        return ri != null && ri.activityInfo != null
+                && pkg.equals(ri.activityInfo.packageName);
     }
 
     public void stop() {
@@ -189,12 +304,14 @@ public class ImageProcessor {
             }
         }
 
-        // 把调试页开关（自动旋转/冷启动/严格门槛）推给引擎（仅在变化时）。
+        // 把调试页开关（自动旋转/冷启动/严格门槛/防封号/防平台检测）推给引擎（仅在变化时）。
         if (configDirty && engine != null) {
             try {
                 engine.callAttr("set_config", "auto_orient", cfgAutoOrient);
                 engine.callAttr("set_config", "bootstrap", cfgBootstrap);
                 engine.callAttr("set_config", "strict", cfgStrict);
+                engine.callAttr("set_config", "anti_ban", cfgAntiBan);
+                engine.callAttr("set_config", "anti_detect", cfgAntiDetect);
                 configDirty = false;
             } catch (Throwable t) {
                 TimedLog.e(TAG, "set_config 推送失败（不影响本帧）: " + t);
