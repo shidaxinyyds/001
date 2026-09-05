@@ -859,6 +859,10 @@ class Engine:
             isinstance(raw_min, int) and not isinstance(raw_min, bool)) else 0
         if min_ukeire < 0:
             min_ukeire = 0
+        # 危险牌预警开关（默认关）。来自 mahjong_advice.json 的 warn_deal_in /
+        # warn_pon_kong。这里读到的已是纯 bool（JSON 反序列化结果），无需再排 int。
+        warn_deal_in = bool(cfg.get("warn_deal_in", False))
+        warn_pon_kong = bool(cfg.get("warn_pon_kong", False))
 
         if not show_advice:
             return shanten, []
@@ -867,9 +871,9 @@ class Engine:
         if len(hand) not in hand_sizes(self.mode):
             return shanten, list(self._advice)
 
-        # 缓存键必须带上 min_ukeire：否则调高/调低"好牌机率"时会命中旧缓存，
-        # 界面建议列表纹丝不动 → 表现为开关"没生效"。
-        key = f"{hand}|{shanten}|{min_ukeire}|{hash(tuple(self.trainer.disc_counts))}"
+        # 缓存键必须带上 min_ukeire 与两个 warn 开关：否则调高/调低"好牌机率"
+        # 或切换危险牌预警时会命中旧缓存，界面建议列表纹丝不动 → 表现为开关"没生效"。
+        key = f"{hand}|{shanten}|{min_ukeire}|{warn_deal_in}|{warn_pon_kong}|{hash(tuple(self.trainer.disc_counts))}"
         if key == self._advice_key:
             return shanten, self._advice
 
@@ -886,6 +890,29 @@ class Engine:
                 ][:6]
         except Exception:
             traceback.print_exc()
+
+        # 危险牌预警：基于「当前牌河计数」给每张候选弃牌附上真实危险度。
+        # 注意：disc_counts 是**全桌牌河合在一起**的一维计数，没有按对手拆分，
+        # 也没有副露（meld）数据（引擎当前 meld 传的是 [0]*34），所以是粗略启发式：
+        #   防点炮：牌河里已有该牌 = 现物，任何人不可和此牌 → 点炮安全(safe)；
+        #           生张(牌河为 0) → 点炮高危(risky)。
+        #   防杠/碰：该牌在牌河出现越少，越可能被某对手握成对子可碰/杠；
+        #           ≥3 张基本不可能(safe)，0 张风险最高(risky)，1~2 张中等(mid)。
+        # 这两个字段只是「附加数据」，overlay 视自身渲染能力决定是否展示；
+        # 开关关闭时不附加，保持 advice 结构向后兼容。
+        if (warn_deal_in or warn_pon_kong) and disc_counts is not None:
+            for it in advice:
+                try:
+                    idx = mpsz_to_tile34_index(it["tile"])
+                    cnt = disc_counts[idx] if 0 <= idx < 34 else 0
+                except Exception:
+                    cnt = 0
+                if warn_deal_in:
+                    it["deal_in"] = "safe" if cnt > 0 else "risky"
+                if warn_pon_kong:
+                    it["pon_kong"] = (
+                        "safe" if cnt >= 3 else ("risky" if cnt == 0 else "mid")
+                    )
 
         self._advice_key = key
         self._advice = advice

@@ -27,6 +27,11 @@ class DebugConfig {
   static const bool defStrict = true;
   static const bool defShowAdvice = true;
   static const int defRate = 10;
+  // 危险牌预警（防点炮 / 防杠）：当前为**纯 UI 占位**，后端危险度计算尚未接入。
+  // 默认关闭，仅经 shared_preferences 保存开关状态，**不驱动任何引擎行为**。
+  // 接入后端前，绝不声称该功能已生效（避免假开关误导）。
+  static const bool defWarnDealIn = false;
+  static const bool defWarnPonKong = false;
 
   /// 好牌机率可选项（百分比）。
   static const List<int> rates = [10, 20, 30, 40, 50, 60, 70, 80, 90];
@@ -36,6 +41,8 @@ class DebugConfig {
   bool strict;
   bool showAdvice;
   int rate;
+  bool warnDealIn;
+  bool warnPonKong;
 
   DebugConfig({
     this.autoOrient = defAutoOrient,
@@ -43,6 +50,8 @@ class DebugConfig {
     this.strict = defStrict,
     this.showAdvice = defShowAdvice,
     this.rate = defRate,
+    this.warnDealIn = defWarnDealIn,
+    this.warnPonKong = defWarnPonKong,
   });
 
   /// 好牌机率 → 引擎「进张数下限」。
@@ -56,6 +65,8 @@ class DebugConfig {
     bool? strict,
     bool? showAdvice,
     int? rate,
+    bool? warnDealIn,
+    bool? warnPonKong,
   }) {
     return DebugConfig(
       autoOrient: autoOrient ?? this.autoOrient,
@@ -63,6 +74,8 @@ class DebugConfig {
       strict: strict ?? this.strict,
       showAdvice: showAdvice ?? this.showAdvice,
       rate: rate ?? this.rate,
+      warnDealIn: warnDealIn ?? this.warnDealIn,
+      warnPonKong: warnPonKong ?? this.warnPonKong,
     );
   }
 
@@ -72,6 +85,8 @@ class DebugConfig {
   static const String _kStrict = 'dbg_strict';
   static const String _kShowAdvice = 'dbg_show_advice';
   static const String _kRate = 'dbg_rate';
+  static const String _kWarnDealIn = 'dbg_warn_deal_in';
+  static const String _kWarnPonKong = 'dbg_warn_pon_kong';
 
   static Future<DebugConfig> load() async {
     try {
@@ -84,6 +99,8 @@ class DebugConfig {
         showAdvice: p.getBool(_kShowAdvice) ?? defShowAdvice,
         // 历史值可能已不在候选项里（版本变更），夹回合法档位再使用
         rate: rates.contains(rate) ? rate : defRate,
+        warnDealIn: p.getBool(_kWarnDealIn) ?? defWarnDealIn,
+        warnPonKong: p.getBool(_kWarnPonKong) ?? defWarnPonKong,
       );
     } catch (_) {
       return DebugConfig();
@@ -98,6 +115,8 @@ class DebugConfig {
       await p.setBool(_kStrict, strict);
       await p.setBool(_kShowAdvice, showAdvice);
       await p.setInt(_kRate, rate);
+      await p.setBool(_kWarnDealIn, warnDealIn);
+      await p.setBool(_kWarnPonKong, warnPonKong);
     } catch (_) {
       // 存不下就算了，不能因为本地存储失败影响识别主流程
     }
@@ -107,6 +126,10 @@ class DebugConfig {
   ///
   /// 注意：引擎未启动（没点"开始识别"）时，`setConfig` 仍能写进 Java 静态变量，
   /// 下次启动识别即生效；`setAdviceConfig` 写文件后 Python 每帧读，同样生效。
+  ///
+  /// warnDealIn / warnPonKong（危险牌预警）走 `setAdviceConfig` 文件通道：
+  /// 开启后引擎对每张候选弃牌附上基于「牌河」的真实危险度（防点炮 / 防杠），
+  /// 由悬浮窗决定如何展示。
   Future<bool> apply() async {
     bool ok = true;
 
@@ -131,6 +154,8 @@ class DebugConfig {
       final rc = await _ch.invokeMethod<int>('setAdviceConfig', {
         'showAdvice': showAdvice,
         'minUkeire': minUkeire,
+        'warnDealIn': warnDealIn,
+        'warnPonKong': warnPonKong,
       });
       if (rc != 0) ok = false;
     } catch (_) {

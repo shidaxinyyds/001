@@ -174,6 +174,26 @@ class _DebugPageState extends State<DebugPage> {
                 _rateRow(),
               ],
             ),
+            const SizedBox(height: 16),
+            _groupCard(
+              title: '危险牌预警',
+              children: [
+                _switchRow(
+                  title: '防点炮',
+                  desc: '开启后，悬浮窗对每张候选弃牌标注「现物安全 / 生张危险」。'
+                      '依据当前牌河判断：牌河里已出现的牌为现物，不可能被点和',
+                  value: _cfg.warnDealIn,
+                  onChanged: (v) => _update(_cfg.copyWith(warnDealIn: v)),
+                ),
+                _switchRow(
+                  title: '防杠',
+                  desc: '开启后，悬浮窗对每张候选弃牌标注被碰 / 杠的风险。'
+                      '依据该牌在牌河出现的频次估算：出现越少，越可能被对手握成对子',
+                  value: _cfg.warnPonKong,
+                  onChanged: (v) => _update(_cfg.copyWith(warnPonKong: v)),
+                ),
+              ],
+            ),
             const SizedBox(height: 24),
             _confirmButton(),
           ],

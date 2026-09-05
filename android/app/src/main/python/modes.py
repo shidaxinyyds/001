@@ -128,19 +128,30 @@ ADVICE_PATH = (
 # 默认：显示出牌建议，且不过滤进张数（0 表示不过滤）。
 DEFAULT_SHOW_ADVICE = True
 DEFAULT_MIN_UKEIRE = 0
+# 危险牌预警：默认关闭。开启后引擎对每张候选弃牌附上基于「牌河」的
+# 危险度（防点炮 / 防杠）。注意：当前牌河是**全桌合在一起**的一维计数，
+# 没有按对手拆分、也没有副露（meld）数据，所以这是**粗略**启发式，
+# 不是精确的对战读心。详情见 engine.build_advice 内的 _danger_* 注释。
+DEFAULT_WARN_DEAL_IN = False
+DEFAULT_WARN_PON_KONG = False
 
 
 def load_advice_config() -> Dict:
-    """读取出牌建议配置 {"show_advice": bool, "min_ukeire": int}。
+    """读取出牌建议配置。
+
+    字段：
+    - show_advice  (bool) ：False 时 build_advice 返回空列表（不出建议）。
+    - min_ukeire   (int)  ：>0 时只保留「进张数 >= 该阈值」的打法（调试页"好牌机率"）。
+    - warn_deal_in (bool) ：开启后在建议里附「防点炮」危险度（生张/现物）。
+    - warn_pon_kong(bool) ：开启后在建议里附「防杠/碰」危险度（基于牌河可见度的粗略信号）。
 
     与 load_mode 同策略：文件缺失/损坏/字段类型不对时**静默回退默认值**，
     识别链路绝不因配置文件坏掉而抛异常或崩溃。
-
-    - show_advice：False 时 build_advice 返回空列表（不出建议）。
-    - min_ukeire ：>0 时只保留「进张数 >= 该阈值」的打法（调试页"好牌机率"）。
     """
     show = DEFAULT_SHOW_ADVICE
     minu = DEFAULT_MIN_UKEIRE
+    wdi = DEFAULT_WARN_DEAL_IN
+    wpk = DEFAULT_WARN_PON_KONG
     try:
         with open(ADVICE_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -151,6 +162,17 @@ def load_advice_config() -> Dict:
         # bool 是 int 的子类，这里必须显式排除，避免把 True 当成 1。
         if isinstance(n, int) and not isinstance(n, bool):
             minu = n if n > 0 else DEFAULT_MIN_UKEIRE
+        d = data.get("warn_deal_in", wdi)
+        if isinstance(d, bool):
+            wdi = d
+        k = data.get("warn_pon_kong", wpk)
+        if isinstance(k, bool):
+            wpk = k
     except (OSError, ValueError, TypeError, AttributeError):
         pass
-    return {"show_advice": show, "min_ukeire": minu}
+    return {
+        "show_advice": show,
+        "min_ukeire": minu,
+        "warn_deal_in": wdi,
+        "warn_pon_kong": wpk,
+    }

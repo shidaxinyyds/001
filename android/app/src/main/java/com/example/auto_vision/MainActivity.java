@@ -127,13 +127,19 @@ public class MainActivity extends FlutterActivity {
         // 参数缺失/类型不对一律回退安全默认值，绝不把异常抛到 UI 线程。
         Object aMin = call.argument("minUkeire");
         Object aShow = call.argument("showAdvice");
+        Object aWdi = call.argument("warnDealIn");
+        Object aWpk = call.argument("warnPonKong");
         int minUkeire = (aMin instanceof Number) ? ((Number) aMin).intValue() : 0;
         if (minUkeire < 0) minUkeire = 0;
         boolean showAdvice = (aShow instanceof Boolean) ? (Boolean) aShow : true;
+        boolean warnDealIn = (aWdi instanceof Boolean) ? (Boolean) aWdi : false;
+        boolean warnPonKong = (aWpk instanceof Boolean) ? (Boolean) aWpk : false;
         final int finalMin = minUkeire;
         final boolean finalShow = showAdvice;
+        final boolean finalWdi = warnDealIn;
+        final boolean finalWpk = warnPonKong;
         toRun = () -> {
-          int rc = writeAdviceFile(finalMin, finalShow);
+          int rc = writeAdviceFile(finalMin, finalShow, finalWdi, finalWpk);
           result.success(rc);
         };
       }
@@ -396,14 +402,19 @@ public class MainActivity extends FlutterActivity {
    * 完全照 writeModeFile 同模式：同目录、同异常吞掉策略。
    * 文件名必须与 Python modes.ADVICE_PATH 一致，否则引擎读不到而静默用默认值。
    */
-  private int writeAdviceFile(int minUkeire, boolean showAdvice) {
+  private int writeAdviceFile(int minUkeire, boolean showAdvice,
+                              boolean warnDealIn, boolean warnPonKong) {
     try {
       File dir = getApplicationContext().getExternalFilesDir(null);
       if (dir == null) return -3;
       if (!dir.exists()) dir.mkdirs();
       File f = new File(dir, "mahjong_advice.json");
+      // 字段名必须与 Python modes.load_advice_config 严格一致：
+      // show_advice / min_ukeire / warn_deal_in / warn_pon_kong
       String body = "{\"show_advice\":" + (showAdvice ? "true" : "false")
-          + ",\"min_ukeire\":" + minUkeire + "}";
+          + ",\"min_ukeire\":" + minUkeire
+          + ",\"warn_deal_in\":" + (warnDealIn ? "true" : "false")
+          + ",\"warn_pon_kong\":" + (warnPonKong ? "true" : "false") + "}";
       try (FileOutputStream out = new FileOutputStream(f, false)) {
         out.write(body.getBytes("UTF-8"));
         out.flush();
