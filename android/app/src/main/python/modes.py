@@ -115,3 +115,42 @@ def save_mode(key: str) -> bool:
         return True
     except OSError:
         return False
+
+
+# ===== 出牌建议配置（调试页开关，与 mode 同目录 / 同机制）=====
+# Dart 调试页经 MethodChannel 让 Java 写本文件，Python 引擎每帧读取。
+# 与 MODE_PATH 保持同一个包名目录，否则会读不到而静默回退默认值。
+ADVICE_PATH = (
+    "/storage/emulated/0/Android/data/com.example.auto_vision"
+    "/files/mahjong_advice.json"
+)
+
+# 默认：显示出牌建议，且不过滤进张数（0 表示不过滤）。
+DEFAULT_SHOW_ADVICE = True
+DEFAULT_MIN_UKEIRE = 0
+
+
+def load_advice_config() -> Dict:
+    """读取出牌建议配置 {"show_advice": bool, "min_ukeire": int}。
+
+    与 load_mode 同策略：文件缺失/损坏/字段类型不对时**静默回退默认值**，
+    识别链路绝不因配置文件坏掉而抛异常或崩溃。
+
+    - show_advice：False 时 build_advice 返回空列表（不出建议）。
+    - min_ukeire ：>0 时只保留「进张数 >= 该阈值」的打法（调试页"好牌机率"）。
+    """
+    show = DEFAULT_SHOW_ADVICE
+    minu = DEFAULT_MIN_UKEIRE
+    try:
+        with open(ADVICE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        v = data.get("show_advice", show)
+        if isinstance(v, bool):
+            show = v
+        n = data.get("min_ukeire", minu)
+        # bool 是 int 的子类，这里必须显式排除，避免把 True 当成 1。
+        if isinstance(n, int) and not isinstance(n, bool):
+            minu = n if n > 0 else DEFAULT_MIN_UKEIRE
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return {"show_advice": show, "min_ukeire": minu}

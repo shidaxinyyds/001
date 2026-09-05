@@ -121,6 +121,23 @@ public class MainActivity extends FlutterActivity {
         return;
       }
 
+      if (call.method.equals("setAdviceConfig")) {
+        // 调试页：出牌建议配置。走「文件」通道（与 setMode 同机制）而非
+        // setConfig，因为 minUkeire 是整数，setConfig 只接受布尔。
+        // 参数缺失/类型不对一律回退安全默认值，绝不把异常抛到 UI 线程。
+        Object aMin = call.argument("minUkeire");
+        Object aShow = call.argument("showAdvice");
+        int minUkeire = (aMin instanceof Number) ? ((Number) aMin).intValue() : 0;
+        if (minUkeire < 0) minUkeire = 0;
+        boolean showAdvice = (aShow instanceof Boolean) ? (Boolean) aShow : true;
+        final int finalMin = minUkeire;
+        final boolean finalShow = showAdvice;
+        toRun = () -> {
+          int rc = writeAdviceFile(finalMin, finalShow);
+          result.success(rc);
+        };
+      }
+
       if (toRun == null) {
         result.notImplemented();
         return;
@@ -370,6 +387,31 @@ public class MainActivity extends FlutterActivity {
       return 0;
     } catch (Throwable t) {
       TimedLog.e(TAG, "writeModeFile failed: " + t);
+      return -4;
+    }
+  }
+
+  /**
+   * 写出牌建议配置（调试页开关），Python 引擎每帧读取。
+   * 完全照 writeModeFile 同模式：同目录、同异常吞掉策略。
+   * 文件名必须与 Python modes.ADVICE_PATH 一致，否则引擎读不到而静默用默认值。
+   */
+  private int writeAdviceFile(int minUkeire, boolean showAdvice) {
+    try {
+      File dir = getApplicationContext().getExternalFilesDir(null);
+      if (dir == null) return -3;
+      if (!dir.exists()) dir.mkdirs();
+      File f = new File(dir, "mahjong_advice.json");
+      String body = "{\"show_advice\":" + (showAdvice ? "true" : "false")
+          + ",\"min_ukeire\":" + minUkeire + "}";
+      try (FileOutputStream out = new FileOutputStream(f, false)) {
+        out.write(body.getBytes("UTF-8"));
+        out.flush();
+      }
+      TimedLog.i(TAG, "writeAdviceFile: " + body + " -> " + f.getAbsolutePath());
+      return 0;
+    } catch (Throwable t) {
+      TimedLog.e(TAG, "writeAdviceFile failed: " + t);
       return -4;
     }
   }

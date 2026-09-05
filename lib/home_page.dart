@@ -154,7 +154,7 @@ class _HomePageState extends State<HomePage> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
             content: Text(
-                '悬浮窗需要"显示在其他应用上层"权限。请到系统设置→应用→AutoVision→权限中开启，再点一次"开始识别"。'),
+                '悬浮窗需要"显示在其他应用上层"权限。请到系统设置→应用→Ace Mahjong→权限中开启，再点一次"开始识别"。'),
             duration: Duration(seconds: 6),
           ));
         }
@@ -314,12 +314,12 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) {
     final String mode = selectedMode ?? '';
     return Scaffold(
-      appBar: AppBar(title: const Text("AutoVision")),
+      appBar: AppBar(title: const Text("Ace Mahjong")),
       body: IndexedStack(
         index: _tab,
         children: [
           _buildHomeBody(mode),
-          DebugPage(onBack: () => setState(() => _tab = 0)),
+          const DebugPage(),
         ],
       ),
       bottomNavigationBar: BottomNavigationBar(

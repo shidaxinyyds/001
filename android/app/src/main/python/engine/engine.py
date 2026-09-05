@@ -25,7 +25,13 @@ from trainer.trainer import Trainer
 from trainer.objects.tile_collection import TileCollection
 from trainer.objects.tile import Tile
 from trainer.utils.convert import mpsz_to_tile34_index, tiles34_index_to_mpsz
-from modes import load_mode, hand_sizes, available_set, MODES
+from modes import (
+    load_mode,
+    load_advice_config,
+    hand_sizes,
+    available_set,
+    MODES,
+)
 
 # 一局中的合法手牌张数：13 = 待摸牌，14 = 刚摸到牌
 VALID_HAND_SIZES = (13, 14)
@@ -754,6 +760,13 @@ class Engine:
             "bootstrap": True,
             "strict": True,
         }
+        # 出牌建议配置（调试页开关，process() 每帧从 mahjong_advice.json reload）。
+        # 这里给一份安全默认：显示出牌建议、不过滤进张。即便文件永远不存在，
+        # 行为也与接入该配置前完全一致（不会变成"没建议"）。
+        self._advice_cfg: Dict[str, object] = {
+            "show_advice": True,
+            "min_ukeire": 0,
+        }
 
     def set_config(self, key: str, value) -> None:
         """调试页开关：实时修改识别策略。未知 key 静默忽略。"""
@@ -834,12 +847,29 @@ class Engine:
 
         shanten = self.trainer.get_shanten()
 
+        # ===== 调试页配置（process() 每帧从 mahjong_advice.json reload）=====
+        # show_advice=False：关闭出牌建议。必须放在 incomplete 分支**之前**，
+        #   否则手牌不完整时会从 self._advice 缓存里又吐出旧建议 → "关了还显示"。
+        # min_ukeire>0   ：只保留「进张数 >= 阈值」的打法（即调试页"好牌机率"）。
+        cfg = getattr(self, "_advice_cfg", None) or {}
+        show_advice = bool(cfg.get("show_advice", True))
+        raw_min = cfg.get("min_ukeire", 0)
+        # bool 是 int 的子类，必须显式排除，否则 True 会被当成阈值 1。
+        min_ukeire = raw_min if (
+            isinstance(raw_min, int) and not isinstance(raw_min, bool)) else 0
+        if min_ukeire < 0:
+            min_ukeire = 0
+
+        if not show_advice:
+            return shanten, []
+
         # 不完整手牌：复用缓存。返回一个浅拷贝防止上游改 self._advice。
         if len(hand) not in hand_sizes(self.mode):
             return shanten, list(self._advice)
 
-        # 缓存键含牌河可见计数（牌河只增不减，变化即重算）；用 hash 压缩长度。
-        key = f"{hand}|{shanten}|{hash(tuple(self.trainer.disc_counts))}"
+        # 缓存键必须带上 min_ukeire：否则调高/调低"好牌机率"时会命中旧缓存，
+        # 界面建议列表纹丝不动 → 表现为开关"没生效"。
+        key = f"{hand}|{shanten}|{min_ukeire}|{hash(tuple(self.trainer.disc_counts))}"
         if key == self._advice_key:
             return shanten, self._advice
 
@@ -847,9 +877,12 @@ class Engine:
         try:
             if len(hand) in hand_sizes(self.mode):
                 raw = self.trainer.calculate_discards()
+                items = sorted(raw.items(), key=lambda kv: -kv[1])
+                if min_ukeire > 0:
+                    items = [(t, u) for (t, u) in items if int(u) >= min_ukeire]
                 advice = [
                     {"tile": str(t), "ukeire": int(u)}
-                    for t, u in sorted(raw.items(), key=lambda kv: -kv[1])
+                    for (t, u) in items
                 ][:6]
         except Exception:
             traceback.print_exc()
@@ -1391,6 +1424,10 @@ class Engine:
             # ===== 玩法切换硬重置 =====
             # 模式变了 → 投票窗口 / 行锁 / 缓存全部失效，必须清空重建。
             self.mode = load_mode()
+            # 出牌建议配置每帧 reload（与 load_mode 同一时机，文件极小，开销可忽略）：
+            # "显示出牌建议" 与 "好牌机率(进张下限)" 由调试页经 Java 写入。
+            # 注意：改动 min_ukeire 会让 build_advice 的缓存键变化 → 自动重算。
+            self._advice_cfg = load_advice_config()
             if self.mode != self._prev_mode:
                 self._tile_voter.reset()
                 self._hand_stab.reset()
