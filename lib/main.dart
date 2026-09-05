@@ -1,7 +1,7 @@
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
-import 'package:auto_vision/home_page.dart';
+import 'package:auto_vision/license_gate.dart';
 import 'package:auto_vision/overlays/mahjong_overlay.dart';
 
 void main() {
@@ -111,7 +111,8 @@ class _MyAppState extends State<MyApp> {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: _appTheme,
-      home: HomePage(),
+      // 启动首屏改为卡密验证页；校验通过后由 LicenseGate 路由进入 HomePage。
+      home: const LicenseGate(),
     );
   }
 }
