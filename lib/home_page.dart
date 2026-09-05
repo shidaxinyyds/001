@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:auto_vision/activation.dart';
 import 'package:auto_vision/channel.dart';
 import 'package:auto_vision/debug_page.dart';
 import 'package:auto_vision/mode_store.dart';
@@ -24,6 +25,9 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   String? latestMessageFromOverlay;
 
+  // 首次激活信息（主页"激活成功"卡片展示用），由 initState 异步读取。
+  ActivationInfo? _activation;
+
   static const channel = MethodChannel(CHANNEL_NAME);
 
   bool isProcessing = false;
@@ -34,6 +38,11 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
+
+    // 读取首次激活信息（时间与系统），用于主页"激活成功"卡片。
+    getActivation().then((a) {
+      if (mounted) setState(() => _activation = a);
+    });
 
     // 拉一次当前玩法（来自 Java 写的共享文件，Python 引擎也读这个文件）
     GameMode.current().then((m) {
@@ -348,6 +357,50 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  /// 主页"激活成功"卡片：展示首次激活的时间与系统信息。
+  /// 仅当本地存在激活记录时显示（未激活走卡密页，不会到达主页）。
+  Widget _buildActivationCard() {
+    final a = _activation;
+    if (a == null) return const SizedBox.shrink();
+    final t = a.activatedAt;
+    final time =
+        '${t.year}-${_pad(t.month)}-${_pad(t.day)} ${_pad(t.hour)}:${_pad(t.minute)}:${_pad(t.second)}';
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: _kAccentBg,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: _kAccent.withOpacity(0.4)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.check_circle_outline, color: _kAccent, size: 28),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('激活成功',
+                    style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: _kAccent)),
+                const SizedBox(height: 4),
+                Text('激活时间：$time',
+                    style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                Text('激活系统：${a.systemInfo}',
+                    style: const TextStyle(fontSize: 12, color: Colors.black54)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _pad(int n) => n.toString().padLeft(2, '0');
+
   Widget _buildHomeBody(String mode) {
     final bool canStart = !isProcessing && _modeReady && mode.isNotEmpty;
     return SafeArea(
@@ -357,6 +410,7 @@ class _HomePageState extends State<HomePage> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             const SizedBox(height: 6),
+            _buildActivationCard(),
             const Text(
               '选择玩法',
               style: TextStyle(fontSize: 14, color: Colors.black54),

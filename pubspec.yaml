@@ -16,6 +16,12 @@ dependencies:
   permission_handler: ^11.0.1
   share_plus: ^7.2.1
   flutter_overlay_window: ^0.4.3
+  # 卡密持久化：首次激活后记住，之后直接进入主页。
+  shared_preferences: ^2.2.0
+  # 卡密页真实识别设备系统（Android/iOS 版本、型号）。
+  device_info_plus: ^9.1.0
+  # 卡密页真实识别网络连接类型（WiFi/移动/无）。
+  connectivity_plus: ^5.0.2
   # chaquopy:
   #   git:
   #     url: https://github.com/heyzec/chaquopy_flutter.git
