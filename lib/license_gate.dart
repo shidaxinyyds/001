@@ -165,7 +165,7 @@ class _LicenseGateState extends State<LicenseGate> {
                           color: _showError ? Colors.redAccent : Colors.white24),
                       borderRadius: BorderRadius.circular(10),
                     ),
-                    focusedBorder: const OutlineInputBorder(
+                    focusedBorder: OutlineInputBorder(
                       borderSide: BorderSide(color: _accent),
                       borderRadius: BorderRadius.circular(10),
                     ),
