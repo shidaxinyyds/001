@@ -106,12 +106,6 @@ class _HomePageState extends State<HomePage> {
 
   // 底部导航栏当前页（0=主页, 1=调试）
   int _tab = 0;
-  // 调试页：手动方向覆盖的当前角度（用于「旋转」按钮循环显示）
-  int _orientDeg = 0;
-  // 调试页开关的 UI 镜像（实际生效在引擎侧，经 setConfig 推送）
-  bool _cfgAutoOrient = true;
-  bool _cfgBootstrap = true;
-  bool _cfgStrict = true;
 
   Future<void> setProcessingState(bool start) async {
     try {
@@ -325,24 +319,7 @@ class _HomePageState extends State<HomePage> {
         index: _tab,
         children: [
           _buildHomeBody(mode),
-          DebugPage(
-            status: _recogStatus,
-            count: _recogCount,
-            shanten: _recogShanten,
-            hand: _recogHand,
-            topScore: _recogTopScore,
-            screen: _recogScreen,
-            message: _recogMessage,
-            isProcessing: isProcessing,
-            orientDeg: _orientDeg,
-            cfgAutoOrient: _cfgAutoOrient,
-            cfgBootstrap: _cfgBootstrap,
-            cfgStrict: _cfgStrict,
-            onToggle: _setConfig,
-            onRotate: _rotate,
-            onReprobe: _reprobe,
-            onStartStop: _toggleProcessing,
-          ),
+          DebugPage(onBack: () => setState(() => _tab = 0)),
         ],
       ),
       bottomNavigationBar: BottomNavigationBar(
@@ -359,6 +336,9 @@ class _HomePageState extends State<HomePage> {
 
   /// 主页"激活成功"卡片：展示首次激活的时间与系统信息。
   /// 仅当本地存在激活记录时显示（未激活走卡密页，不会到达主页）。
+  /// 主页"激活成功"卡片：展示首次激活的时间与系统信息。
+  /// 仅当本地存在激活记录时显示（未激活走卡密页，不会到达主页）。
+  /// 已放大：图标 48、标题 20、信息 14，并加圆角阴影，使其更醒目。
   Widget _buildActivationCard() {
     final a = _activation;
     if (a == null) return const SizedBox.shrink();
@@ -366,31 +346,44 @@ class _HomePageState extends State<HomePage> {
     final time =
         '${t.year}-${_pad(t.month)}-${_pad(t.day)} ${_pad(t.hour)}:${_pad(t.minute)}:${_pad(t.second)}';
     return Container(
-      margin: const EdgeInsets.only(bottom: 16),
-      padding: const EdgeInsets.all(14),
+      margin: const EdgeInsets.only(bottom: 20),
+      padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         color: _kAccentBg,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: _kAccent.withOpacity(0.4)),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: _kAccent.withOpacity(0.45), width: 1.5),
+        boxShadow: const [
+          BoxShadow(
+              color: Color(0x14000000), blurRadius: 8, offset: Offset(0, 2)),
+        ],
       ),
       child: Row(
         children: [
-          const Icon(Icons.check_circle_outline, color: _kAccent, size: 28),
-          const SizedBox(width: 12),
+          Container(
+            width: 48,
+            height: 48,
+            decoration: BoxDecoration(
+              color: _kAccent,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const Icon(Icons.check, color: Colors.white, size: 30),
+          ),
+          const SizedBox(width: 16),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text('激活成功',
                     style: TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w700,
+                        fontSize: 20,
+                        fontWeight: FontWeight.w800,
                         color: _kAccent)),
-                const SizedBox(height: 4),
+                const SizedBox(height: 8),
                 Text('激活时间：$time',
-                    style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                    style: const TextStyle(fontSize: 14, color: Colors.black54)),
+                const SizedBox(height: 4),
                 Text('激活系统：${a.systemInfo}',
-                    style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                    style: const TextStyle(fontSize: 14, color: Colors.black54)),
               ],
             ),
           ),
@@ -479,41 +472,6 @@ class _HomePageState extends State<HomePage> {
       await showOverlay();
       setProcessingState(true);
       setState(() => isProcessing = true);
-    }
-  }
-
-  // 调试页开关：实时修改引擎识别策略
-  void _setConfig(String key, bool value) {
-    setState(() {
-      if (key == 'auto_orient') _cfgAutoOrient = value;
-      else if (key == 'bootstrap') _cfgBootstrap = value;
-      else if (key == 'strict') _cfgStrict = value;
-    });
-    try {
-      channel.invokeMethod<dynamic>('setConfig', {'key': key, 'value': value});
-    } on Exception catch (e) {
-      print(e);
-    }
-  }
-
-  // 调试页「旋转」：循环 0→90→180→270→0，经主引擎 MethodChannel 推给 Java/引擎。
-  Future<void> _rotate() async {
-    final next = (_orientDeg + 90) % 360;
-    setState(() => _orientDeg = next);
-    try {
-      await channel.invokeMethod<dynamic>('setOrient', {'deg': next});
-    } on Exception catch (e) {
-      print(e);
-    }
-  }
-
-  // 调试页「重探方向」：解除手动覆盖并强制引擎重新探测方向。
-  Future<void> _reprobe() async {
-    setState(() => _orientDeg = 0);
-    try {
-      await channel.invokeMethod<dynamic>('setOrient', {'deg': -1});
-    } on Exception catch (e) {
-      print(e);
     }
   }
 
