@@ -56,10 +56,20 @@ public class ImageProcessor {
     private static boolean cfgAntiBan = false;
     private static boolean cfgAntiDetect = false;
     // 采集存帧（风格库自举）：开启后把引擎看到的原始帧（encoded JPEG）落盘到
-    // app 外部 files/frames/，供后续 harvest→cluster→标注重建模板库。默认关闭，
-    // 打开时清空旧帧目录并重置计数器，保证每轮是个干净集合。
-    private static boolean cfgDumpFrames = false;
-    private static long framesDumped = 0;
+    // app 外部 files/frames/，供后续 harvest→cluster→标注重建模板库。默认关闭。
+    // 清空旧帧走显式 clear_frames 信号（仅用户手动拨开开关时由调试页发送），
+    // 本开关自身绝不触发清空（见 setConfig 的 dump_frames 分支注释）。
+    // volatile：setConfig（主线程）写、采集线程读，保证开关变化对采集线程立即可见；
+    // 非 volatile 的 static boolean 在无数据竞争保护时可能长期读到旧值（开关"不生效"）。
+    private static volatile boolean cfgDumpFrames = false;
+    // volatile long：32 位 ARM 上 long 写非原子（可能读到高低位撕裂的值），必须 volatile。
+    // framesDumped 由采集线程（dumpFrame）递增、主线程（clearFramesDir）清零，两线程共享。
+    private static volatile long framesDumped = 0;
+    // 存帧互斥锁：dumpFrame（采集线程）与 clearFramesDir（主线程，开关打开瞬间）互斥，
+    // 避免"边删旧帧边写新帧"的竞态。静态锁，不持有任何 Activity 引用。
+    private static final Object sFramesLock = new Object();
+    // 「已达上限」只提示一次的标志（与 framesDumped 一样跨线程，volatile 保证可见）。
+    private static volatile boolean sLimitLogged = false;
     // 前台检测需要 Context，在 prepare() 里缓存（用 ApplicationContext，避免持有 Activity）。
     private static Context sContext = null;
     private static final Random sRng = new Random();
@@ -98,10 +108,16 @@ public class ImageProcessor {
             case "anti_ban":    cfgAntiBan = value; break;
             case "anti_detect": cfgAntiDetect = value; break;
             case "dump_frames":
-                if (value != cfgDumpFrames) {
-                    cfgDumpFrames = value;
-                    if (value) clearFramesDir();
-                }
+                // 只改开关，不清空目录！清空必须走显式的 clear_frames 信号——
+                // 否则 app 重启后调试页 initState 的 apply() 会把持久化的 true
+                // 重发一遍，被当成「用户刚打开」的上升沿，把已采集的帧全部清掉
+                // （用户打完几局收集的数据一次重启就没了，数据丢失级 bug）。
+                cfgDumpFrames = value;
+                break;
+            case "clear_frames":
+                // 仅由调试页开关的 onChanged（用户手动拨开）显式触发，
+                // 初始化同步/「确认配置」重发都不会走到这里。
+                if (value) clearFramesDir();
                 break;
             default: return;
         }
@@ -295,41 +311,51 @@ public class ImageProcessor {
     }
 
     private static void clearFramesDir() {
-        File dir = framesDir();
-        if (dir == null) return;
-        File[] old = dir.listFiles();
-        if (old != null) {
-            for (File f : old) {
-                try { f.delete(); } catch (Exception ignore) { }
+        synchronized (sFramesLock) {
+            File dir = framesDir();
+            if (dir == null) return;
+            File[] old = dir.listFiles();
+            if (old != null) {
+                for (File f : old) {
+                    try { f.delete(); } catch (Exception ignore) { }
+                }
             }
+            // 重新创建，确保目录存在。
+            //noinspection ResultOfMethodCallIgnored
+            dir.mkdirs();
+            framesDumped = 0;
+            sLimitLogged = false; // 新一轮采集重新允许上限提示
+            TimedLog.i(TAG, "帧采集目录已清空: " + dir.getAbsolutePath());
         }
-        // 重新创建，确保目录存在。
-        //noinspection ResultOfMethodCallIgnored
-        dir.mkdirs();
-        framesDumped = 0;
-        TimedLog.i(TAG, "帧采集目录已清空: " + dir.getAbsolutePath());
     }
 
     private static void dumpFrame(byte[] encoded) {
         if (sContext == null) return;
-        // 上限约 6000 帧（400ms 一帧 ≈ 40 分钟），防止无限增长撑爆存储。
-        if (framesDumped >= 6000) {
-            TimedLog.i(TAG, "帧采集已达上限，忽略后续帧");
-            return;
-        }
-        try {
-            File dir = framesDir();
-            if (dir == null) return;
-            if (!dir.exists()) {
-                //noinspection ResultOfMethodCallIgnored
-                dir.mkdirs();
+        synchronized (sFramesLock) {
+            // 上限约 6000 帧（400ms 一帧 ≈ 40 分钟），防止无限增长撑爆存储。
+            // 只提示一次，避免到达上限后每帧刷一条 log。
+            if (framesDumped >= 6000) {
+                if (!sLimitLogged) {
+                    sLimitLogged = true;
+                    TimedLog.i(TAG, "帧采集已达 6000 上限，忽略后续帧");
+                }
+                return;
             }
-            File f = new File(dir, String.format("frame_%05d.jpg", framesDumped++));
-            try (FileOutputStream fos = new FileOutputStream(f)) {
-                fos.write(encoded);
+            try {
+                File dir = framesDir();
+                if (dir == null) return;
+                if (!dir.exists()) {
+                    //noinspection ResultOfMethodCallIgnored
+                    dir.mkdirs();
+                }
+                File f = new File(dir, String.format(java.util.Locale.US,
+                        "frame_%05d.jpg", framesDumped++));
+                try (FileOutputStream fos = new FileOutputStream(f)) {
+                    fos.write(encoded);
+                }
+            } catch (Throwable t) {
+                TimedLog.e(TAG, "写帧失败: " + t);
             }
-        } catch (Throwable t) {
-            TimedLog.e(TAG, "写帧失败: " + t);
         }
     }
 

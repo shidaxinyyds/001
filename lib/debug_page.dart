@@ -44,10 +44,13 @@ class _DebugPageState extends State<DebugPage> {
   }
 
   /// 开关/档位变更：立即保存并下发（即时生效，符合直觉）。
-  Future<void> _update(DebugConfig next) async {
+  ///
+  /// [clearDumpedFrames]：仅采集存帧开关**拨开**时为 true——先显式清空旧帧，
+  /// 见 [DebugConfig.apply] 的说明（初始化同步绝不清空，防止重启丢已采帧）。
+  Future<void> _update(DebugConfig next, {bool clearDumpedFrames = false}) async {
     setState(() => _cfg = next);
     await next.save();
-    await next.apply();
+    await next.apply(clearDumpedFrames: clearDumpedFrames);
   }
 
   /// 「确认配置」：重发一次全部配置，并给出真实成败反馈。
@@ -181,10 +184,15 @@ class _DebugPageState extends State<DebugPage> {
                 _switchRow(
                   title: '采集存帧',
                   desc: '开启后把引擎看到的每一帧原始截图保存到手机，供重建该游戏'
-                      '风格的完整模板库。正常打两三局即可攒够数据；关闭前请勿手动'
-                      '清空，之后用 adb pull 拉取。仅调试用，不影响识别',
+                      '风格的完整模板库。正常打两三局即可攒够数据；注意：重新'
+                      '拨开开关会清空旧帧，攒帧期间请保持打开，之后用 adb pull '
+                      '拉取。仅调试用，不影响识别',
                   value: _cfg.dumpFrames,
-                  onChanged: (v) => _update(_cfg.copyWith(dumpFrames: v)),
+                  // 只有用户手动拨开的那一刻才显式清空旧帧（clear_frames），
+                  // 初始化同步/「确认配置」重发不会清空——防止重启 app 后
+                  // 已采集的帧被误删。
+                  onChanged: (v) => _update(_cfg.copyWith(dumpFrames: v),
+                      clearDumpedFrames: v),
                 ),
                 _switchRow(
                   title: '防封号',

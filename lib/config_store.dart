@@ -162,8 +162,25 @@ class DebugConfig {
   /// warnDealIn / warnPonKong（危险牌预警）走 `setAdviceConfig` 文件通道：
   /// 开启后引擎对每张候选弃牌附上基于「牌河」的真实危险度（防点炮 / 防杠），
   /// 由悬浮窗决定如何展示。
-  Future<bool> apply() async {
+  ///
+  /// [clearDumpedFrames]：仅当用户**手动拨开**采集存帧开关时传 true——先发一条
+  /// 显式 `clear_frames` 让 Java 清空旧帧目录。初始化同步 / 「确认配置」重发
+  /// 绝不能传 true：否则 app 重启后 apply() 重发 dump_frames=true 会被当成
+  /// 上升沿清空已采集的帧（已采集数据丢失）。
+  Future<bool> apply({bool clearDumpedFrames = false}) async {
     bool ok = true;
+
+    // 用户手动开启采集存帧：先显式清空旧帧，保证每轮是干净集合。
+    if (clearDumpedFrames) {
+      try {
+        await _ch.invokeMethod<dynamic>('setConfig', {
+          'key': 'clear_frames',
+          'value': true,
+        });
+      } catch (_) {
+        ok = false;
+      }
+    }
 
     // 三条布尔识别策略：走已有的 setConfig 通道
     for (final e in <String, bool>{
