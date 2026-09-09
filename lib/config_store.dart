@@ -40,6 +40,9 @@ class DebugConfig {
   // 不改动任何既有行为，用户主动打开才生效。
   static const bool defAntiBan = false;
   static const bool defAntiDetect = false;
+  // 采集存帧（风格库自举）：开启后把引擎看到的原始帧落盘到 app 外部 files/frames/，
+  // 供后续 harvest→cluster→标注重建该风格的完整模板库。默认关闭。
+  static const bool defDumpFrames = false;
 
   /// 好牌机率可选项（百分比）。
   static const List<int> rates = [10, 20, 30, 40, 50, 60, 70, 80, 90];
@@ -53,6 +56,7 @@ class DebugConfig {
   bool warnPonKong;
   bool antiBan;
   bool antiDetect;
+  bool dumpFrames;
 
   DebugConfig({
     this.autoOrient = defAutoOrient,
@@ -64,6 +68,7 @@ class DebugConfig {
     this.warnPonKong = defWarnPonKong,
     this.antiBan = defAntiBan,
     this.antiDetect = defAntiDetect,
+    this.dumpFrames = defDumpFrames,
   });
 
   /// 好牌机率 → 引擎「进张数下限」。
@@ -81,6 +86,7 @@ class DebugConfig {
     bool? warnPonKong,
     bool? antiBan,
     bool? antiDetect,
+    bool? dumpFrames,
   }) {
     return DebugConfig(
       autoOrient: autoOrient ?? this.autoOrient,
@@ -92,6 +98,7 @@ class DebugConfig {
       warnPonKong: warnPonKong ?? this.warnPonKong,
       antiBan: antiBan ?? this.antiBan,
       antiDetect: antiDetect ?? this.antiDetect,
+      dumpFrames: dumpFrames ?? this.dumpFrames,
     );
   }
 
@@ -105,6 +112,7 @@ class DebugConfig {
   static const String _kWarnPonKong = 'dbg_warn_pon_kong';
   static const String _kAntiBan = 'dbg_anti_ban';
   static const String _kAntiDetect = 'dbg_anti_detect';
+  static const String _kDumpFrames = 'dbg_dump_frames';
 
   static Future<DebugConfig> load() async {
     try {
@@ -121,6 +129,7 @@ class DebugConfig {
         warnPonKong: p.getBool(_kWarnPonKong) ?? defWarnPonKong,
         antiBan: p.getBool(_kAntiBan) ?? defAntiBan,
         antiDetect: p.getBool(_kAntiDetect) ?? defAntiDetect,
+        dumpFrames: p.getBool(_kDumpFrames) ?? defDumpFrames,
       );
     } catch (_) {
       return DebugConfig();
@@ -139,6 +148,7 @@ class DebugConfig {
       await p.setBool(_kWarnPonKong, warnPonKong);
       await p.setBool(_kAntiBan, antiBan);
       await p.setBool(_kAntiDetect, antiDetect);
+      await p.setBool(_kDumpFrames, dumpFrames);
     } catch (_) {
       // 存不下就算了，不能因为本地存储失败影响识别主流程
     }
@@ -163,6 +173,8 @@ class DebugConfig {
       // 防封号 / 防平台检测：行为在 Java 侧采集循环执行，这里只下发开关。
       'anti_ban': antiBan,
       'anti_detect': antiDetect,
+      // 采集存帧（风格库自举）：行为在 Java 侧把原始帧落盘到 files/frames/。
+      'dump_frames': dumpFrames,
     }.entries) {
       try {
         await _ch.invokeMethod<dynamic>('setConfig', {

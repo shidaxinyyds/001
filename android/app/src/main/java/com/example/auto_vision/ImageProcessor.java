@@ -13,6 +13,8 @@ import android.content.pm.ResolveInfo;
 import android.os.Build;
 import android.os.Process;
 
+import java.io.File;
+import java.io.FileOutputStream;
 import java.util.List;
 import java.util.Random;
 import java.util.Timer;
@@ -53,6 +55,11 @@ public class ImageProcessor {
     // 两者默认关闭，打开才改变采集行为；缺权限/缺 Context 时自动降级为常开。
     private static boolean cfgAntiBan = false;
     private static boolean cfgAntiDetect = false;
+    // 采集存帧（风格库自举）：开启后把引擎看到的原始帧（encoded JPEG）落盘到
+    // app 外部 files/frames/，供后续 harvest→cluster→标注重建模板库。默认关闭，
+    // 打开时清空旧帧目录并重置计数器，保证每轮是个干净集合。
+    private static boolean cfgDumpFrames = false;
+    private static long framesDumped = 0;
     // 前台检测需要 Context，在 prepare() 里缓存（用 ApplicationContext，避免持有 Activity）。
     private static Context sContext = null;
     private static final Random sRng = new Random();
@@ -90,6 +97,12 @@ public class ImageProcessor {
             case "strict":      cfgStrict = value; break;
             case "anti_ban":    cfgAntiBan = value; break;
             case "anti_detect": cfgAntiDetect = value; break;
+            case "dump_frames":
+                if (value != cfgDumpFrames) {
+                    cfgDumpFrames = value;
+                    if (value) clearFramesDir();
+                }
+                break;
             default: return;
         }
         configDirty = true;
@@ -270,6 +283,56 @@ public class ImageProcessor {
                 && pkg.equals(ri.activityInfo.packageName);
     }
 
+    // ===== 采集存帧（风格库自举）=====
+
+    // 帧存放目录：app 外部 files/frames/。用 getExternalFilesDir 无需额外存储权限，
+    // 用户可用 adb pull /sdcard/Android/data/com.example.auto_vision/files/frames/ 取回。
+    private static File framesDir() {
+        if (sContext == null) return null;
+        File dir = sContext.getExternalFilesDir(null);
+        if (dir == null) return null;
+        return new File(dir, "frames");
+    }
+
+    private static void clearFramesDir() {
+        File dir = framesDir();
+        if (dir == null) return;
+        File[] old = dir.listFiles();
+        if (old != null) {
+            for (File f : old) {
+                try { f.delete(); } catch (Exception ignore) { }
+            }
+        }
+        // 重新创建，确保目录存在。
+        //noinspection ResultOfMethodCallIgnored
+        dir.mkdirs();
+        framesDumped = 0;
+        TimedLog.i(TAG, "帧采集目录已清空: " + dir.getAbsolutePath());
+    }
+
+    private static void dumpFrame(byte[] encoded) {
+        if (sContext == null) return;
+        // 上限约 6000 帧（400ms 一帧 ≈ 40 分钟），防止无限增长撑爆存储。
+        if (framesDumped >= 6000) {
+            TimedLog.i(TAG, "帧采集已达上限，忽略后续帧");
+            return;
+        }
+        try {
+            File dir = framesDir();
+            if (dir == null) return;
+            if (!dir.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                dir.mkdirs();
+            }
+            File f = new File(dir, String.format("frame_%05d.jpg", framesDumped++));
+            try (FileOutputStream fos = new FileOutputStream(f)) {
+                fos.write(encoded);
+            }
+        } catch (Throwable t) {
+            TimedLog.e(TAG, "写帧失败: " + t);
+        }
+    }
+
     public void stop() {
         if (timer != null) {
             timer.cancel();
@@ -282,6 +345,12 @@ public class ImageProcessor {
         if (encoded == null || encoded.length == 0) {
             sendStatus(NetworkClient.statusJson("java_error", "帧编码失败（Bitmap为空）"));
             return;
+        }
+
+        // 采集存帧（风格库自举）：把引擎真正看到的原始帧 JPEG 落盘，供后续
+        // harvest→cluster→标注重建该风格模板库。仅当调试页开关打开时执行。
+        if (cfgDumpFrames) {
+            dumpFrame(encoded);
         }
 
         // 把用户刚拖动的识别区域推给引擎（仅在变化时），默认整屏不退化。
@@ -312,6 +381,7 @@ public class ImageProcessor {
                 engine.callAttr("set_config", "strict", cfgStrict);
                 engine.callAttr("set_config", "anti_ban", cfgAntiBan);
                 engine.callAttr("set_config", "anti_detect", cfgAntiDetect);
+                engine.callAttr("set_config", "dump_frames", cfgDumpFrames);
                 configDirty = false;
             } catch (Throwable t) {
                 TimedLog.e(TAG, "set_config 推送失败（不影响本帧）: " + t);

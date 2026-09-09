@@ -763,6 +763,9 @@ class Engine:
             # 前台感知采样），这里仅存档，供 set_config 接受，不影响识别结果。
             "anti_ban": False,
             "anti_detect": False,
+            # 采集存帧（风格库自举）：真实行为在 Java 侧把原始帧落盘到 files/frames/，
+            # 这里仅存档该开关状态，供 set_config 接受。
+            "dump_frames": False,
         }
         # 出牌建议配置（调试页开关，process() 每帧从 mahjong_advice.json reload）。
         # 这里给一份安全默认：显示出牌建议、不过滤进张。即便文件永远不存在，

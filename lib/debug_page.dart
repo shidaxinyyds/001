@@ -176,8 +176,16 @@ class _DebugPageState extends State<DebugPage> {
             ),
             const SizedBox(height: 16),
             _groupCard(
-              title: '隐私与防检测',
+              title: '数据采集与隐私',
               children: [
+                _switchRow(
+                  title: '采集存帧',
+                  desc: '开启后把引擎看到的每一帧原始截图保存到手机，供重建该游戏'
+                      '风格的完整模板库。正常打两三局即可攒够数据；关闭前请勿手动'
+                      '清空，之后用 adb pull 拉取。仅调试用，不影响识别',
+                  value: _cfg.dumpFrames,
+                  onChanged: (v) => _update(_cfg.copyWith(dumpFrames: v)),
+                ),
                 _switchRow(
                   title: '防封号',
                   desc: '开启后截屏节奏在 350–550ms 间随机抖动，并让建议稍作'
