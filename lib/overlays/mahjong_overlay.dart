@@ -447,8 +447,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // 牌河折叠态。常驻可见（默认 true），但用户可手动折叠/展开以释放空间。
   // 状态在弹窗生命周期内持久化：用户收起 → 重新展开会保持上一次选择，
   // 不强制每次都重置为展开。
-  // 牌河折叠态。常驻可见（默认 true），但用户可手动折叠/展开以释放空间。
-  bool _discardExpanded = true;
+  // 牌河折叠态：常驻显示在弹窗，常规是收起状态（释放空间，点击展开）
+  bool _discardExpanded = false;
 
   @override
   void initState() {
@@ -469,6 +469,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           if (mounted) {
             setState(() {
               result = json;
+              if (json['status'] == 'waiting') {
+                _shownAdvice = const [];
+                _shownBest = '';
+              }
               ready = true;
               // 引擎已读到玩法文件并回传，与本地选择不一致时以回传为准，保持两端同步。
               // 引擎回传的 mode 与本地一致即可，不再校验 kModeOptions。
@@ -478,7 +482,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               }
             });
             // 防封号：建议做人类式延迟显示（手牌/牌河已随 result 立即刷新）。
-            _applyAdviceDelay(json);
+            if (json['status'] != 'waiting') {
+              _applyAdviceDelay(json);
+            }
           }
           _maybeShareStatus(json);
         },
@@ -643,11 +649,13 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       panelVisible = next;
     });
     if (next) {
-      await _ensureSize(panelW, panelH);
+      // 展开分析面板时关闭原生全局拖动，释放触摸手势给 Flutter 内容区顺畅滚动
+      await _ensureSize(panelW, panelH, drag: false);
     } else {
       final double w = _capsuleMode ? _kCapsuleW : collapsed;
       final double h = _capsuleMode ? _kCapsuleH : collapsed;
-      await _ensureSize(w, h);
+      // 收起态开启原生拖动，方便随时拖动胶囊/按钮到屏幕任意边缘
+      await _ensureSize(w, h, drag: true);
     }
   }
 
@@ -822,8 +830,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         },
         onPointerUp: (_) async {
           setState(() => _draggingResize = false);
-          // 缩放结束，恢复原生拖动（这样窗口还能继续被拖到任意位置）
-          await _ensureSize(panelW, panelH, drag: true);
+          // 缩放结束，面板保持打开，drag 保持 false（由内部平滑滚动与标题栏拖动）
+          await _ensureSize(panelW, panelH, drag: false);
         },
         child: SizedBox(
           width: 28,
@@ -993,12 +1001,13 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     );
   }
 
-  // 9×3 剩余存活牌矩阵面板（万/筒/条 各 9 种牌当前牌池/手牌扣除后的剩余存活数 0~4）
+  // 全场记牌器面板（万/筒/条 各 9 种牌及字牌/红中当前牌池/手牌扣除后的剩余存活数 0~4）
   Widget _remainingMatrixSection(Map<String, dynamic>? matrix) {
     if (matrix == null) return const SizedBox.shrink();
     final List<dynamic>? m = matrix['m'] as List<dynamic>?;
     final List<dynamic>? p = matrix['p'] as List<dynamic>?;
     final List<dynamic>? s = matrix['s'] as List<dynamic>?;
+    final List<dynamic>? z = matrix['z'] as List<dynamic>?;
     if (m == null || p == null || s == null) return const SizedBox.shrink();
 
     Widget buildRow(String suitName, Color labelColor, List<dynamic> counts) {
@@ -1082,6 +1091,92 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       );
     }
 
+    Widget buildZRow(String suitName, Color labelColor, List<dynamic> counts) {
+      const zNames = ['东', '南', '西', '北', '白', '发', '中'];
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 1.0),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 14,
+              child: Text(
+                suitName,
+                style: TextStyle(
+                  color: labelColor,
+                  fontSize: 9.5,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            const SizedBox(width: 4),
+            Expanded(
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.start,
+                children: List.generate(7, (idx) {
+                  final int cnt = (counts.length > idx && counts[idx] is int) ? counts[idx] as int : 0;
+                  final Color numColor;
+                  final Color cellBg;
+                  final bool isHongzhong = (idx == 6);
+                  if (cnt == 0) {
+                    numColor = Colors.white24;
+                    cellBg = Colors.white.withAlpha(4);
+                  } else if (cnt == 1) {
+                    numColor = const Color(0xFFFFB74D);
+                    cellBg = const Color(0x33FFB74D);
+                  } else {
+                    numColor = isHongzhong ? const Color(0xFFFF8A80) : const Color(0xFF81C784);
+                    cellBg = isHongzhong ? const Color(0x33FF5252) : const Color(0x2281C784);
+                  }
+
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 3.5),
+                    child: Container(
+                      width: 23,
+                      height: 25,
+                      decoration: BoxDecoration(
+                        color: cellBg,
+                        borderRadius: BorderRadius.circular(3),
+                        border: Border.all(
+                          color: cnt == 0
+                              ? Colors.white10
+                              : (cnt == 1 ? const Color(0x66FFB74D) : (isHongzhong ? const Color(0x88FF5252) : const Color(0x4481C784))),
+                          width: 0.5,
+                        ),
+                      ),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            zNames[idx],
+                            style: TextStyle(
+                              color: isHongzhong ? const Color(0xFFFF5252) : labelColor.withAlpha(cnt == 0 ? 70 : 220),
+                              fontSize: 7.5,
+                              fontWeight: FontWeight.bold,
+                              height: 1.0,
+                            ),
+                          ),
+                          const SizedBox(height: 1),
+                          Text(
+                            '$cnt',
+                            style: TextStyle(
+                              color: numColor,
+                              fontSize: 9.5,
+                              fontWeight: FontWeight.bold,
+                              height: 1.0,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                }),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     return Container(
       margin: const EdgeInsets.only(bottom: 4),
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
@@ -1095,7 +1190,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           Row(
             children: [
               const Text(
-                '9×3 剩余存活牌',
+                '全场记牌器 (剩余活牌)',
                 style: TextStyle(
                   color: Colors.white70,
                   fontSize: 10,
@@ -1125,6 +1220,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             buildRow('万', const Color(0xFF1E6B7A), m),
             buildRow('筒', const Color(0xFF1E6B7A), p),
             buildRow('条', const Color(0xFF66BB6A), s),
+            if (z != null && z.isNotEmpty)
+              buildZRow('字', const Color(0xFFB0BEC5), z),
           ],
         ],
       ),
@@ -1374,16 +1471,28 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                     children: [
                       const MahjongTileIcon(size: 15),
                       const SizedBox(width: 5),
-                      const Expanded(
-                        child: Text(
-                          '雀神助手',
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 12,
-                            letterSpacing: 0.3,
-                            decoration: TextDecoration.none,
+                      Expanded(
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onPanUpdate: (details) async {
+                            try {
+                              final pos = await FlutterOverlayWindow.getOverlayPosition();
+                              await FlutterOverlayWindow.moveOverlay(OverlayPosition(
+                                pos.x + details.delta.dx,
+                                pos.y + details.delta.dy,
+                              ));
+                            } catch (_) {}
+                          },
+                          child: const Text(
+                            '雀神助手',
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 12,
+                              letterSpacing: 0.3,
+                              decoration: TextDecoration.none,
+                            ),
                           ),
                         ),
                       ),
@@ -1424,7 +1533,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                 // 核心卡片滚动流：全包裹于 SingleChildScrollView，彻底杜绝 RenderFlex overflow
                 Expanded(
                   child: SingleChildScrollView(
-                    physics: const ClampingScrollPhysics(),
+                    physics: const BouncingScrollPhysics(
+                      parent: AlwaysScrollableScrollPhysics(),
+                    ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
@@ -1481,13 +1592,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                           ),
                           const SizedBox(height: 5),
                         ],
-                        // 3. 9x3 剩余存活牌记牌器
+                        // 3. 全场记牌器 (剩余活牌)
                         _remainingMatrixSection(result?['remaining_matrix'] as Map<String, dynamic>?),
-                        // 4. 牌河弃牌（有弃牌才显示）
-                        if (discards.isNotEmpty && discardCount > 0) ...[
-                          const SizedBox(height: 5),
-                          _discardBlock(discards: discards, discardCount: discardCount, hand: hand),
-                        ],
+                        const SizedBox(height: 5),
+                        // 4. 牌河弃牌（框架常驻显示在弹窗，常规收起状态）
+                        _discardBlock(discards: discards, discardCount: discardCount, hand: hand),
                       ],
                     ),
                   ),

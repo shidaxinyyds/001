@@ -580,11 +580,8 @@ class _HandStabilizer:
             self.pending = False
             return self.stable_mpsz
 
-        # 需要多少帧共识：大跳变额外 +1 帧
+        # 需要多少帧共识：稳定手牌建立后固定 2 帧共识即采纳
         need = HAND_CONFIRM_FRAMES
-        if self.stable_mpsz:
-            if _hand_diff_count(self.stable_mpsz, key) > HAND_BIG_JUMP:
-                need += 1
         # 冷启动：还没有任何稳定手牌时，第一个合法牌型立即采纳。
         # 再等 2 帧共识只会让界面多空白 800ms —— 用户最不能忍的正是"识别不出来"。
         if not self.stable_mpsz:
@@ -616,11 +613,17 @@ def _reconcile_hand_tiles(row, stable_mpsz: str):
       - 逐张标签的牌型计数已经等于稳定手牌 → 原样保留（顺序最真实）。
       - 否则用稳定手牌的排序序列按位置回填。麻将手牌在游戏里本来就是
         排好序的，所以"第 i 个位置 = 排序后第 i 张"在绝大多数 UI 上成立。
+      - 防御：若当前行识别结果与稳定手牌差异巨大（>8 张牌不同），说明刚发生换三张或
+        重开局，二者处于异步切换期，绝不强制覆盖，保留当前识别以防乱套。
     """
     if not stable_mpsz or not row:
         return row
     cnt_row = Counter(d[1] for d in row if d[1] is not None)
-    if cnt_row == _mpsz_to_counter(stable_mpsz):
+    cnt_stable = _mpsz_to_counter(stable_mpsz)
+    if cnt_row == cnt_stable:
+        return row
+    diff = sum((cnt_row - cnt_stable).values()) + sum((cnt_stable - cnt_row).values())
+    if diff > 8:
         return row
     labels = [stable_mpsz[i:i + 2] for i in range(0, len(stable_mpsz), 2)]
     out = []
@@ -1786,6 +1789,21 @@ class Engine:
             raw_labels: List[str] = []
             if hand_row is not None:
                 raw_labels = [d[1] for d in hand_row if d[1] is not None]
+
+            # 新洗牌发牌 / 换三张判定：若当前帧原始手牌张数完整（>=13张），且与旧稳定手牌重合度很低（<= 5 张相同），
+            # 说明洗牌重新发牌或刚发生换三张！立即重置稳定器与牌池，绝不让旧牌反向覆盖新牌！
+            if self._hand_stab.stable_mpsz and len(raw_labels) in hsizes:
+                old_set = [self._hand_stab.stable_mpsz[i:i+2] for i in range(0, len(self._hand_stab.stable_mpsz), 2)]
+                raw_set = [l for l in raw_labels if l]
+                overlap = sum(min(old_set.count(t), raw_set.count(t)) for t in set(raw_set))
+                if overlap <= 5 and len(old_set) >= 13:
+                    self._monotonic_discards.clear()
+                    self._hand_stab.reset()
+                    self._tile_voter.reset()
+                    self._stable_hand_mpsz = ""
+                    self._stable_hand_count = 0
+                    self._last_hand_y = None
+
             hand_mpsz = self._hand_stab.observe(raw_labels, hsizes, avail)
 
             # 手牌行的逐张标签与稳定手牌对齐（避免"显示的牌"和"建议打的牌"对不上）
@@ -1795,8 +1813,15 @@ class Engine:
                 hand_row = voted_rows[hand_idx]
 
             discard_labels = []
+            ih, _ = image.shape[:2]
             for _i, row in enumerate(voted_rows):
                 if _i == hand_idx:
+                    continue
+                # 牌河物理位置先验：牌河只能位于牌桌中央区域（0.20 <= yc <= 0.72）
+                # 画面顶部（yc < 0.20）为对家牌墙/手牌/顶栏，画面底部（yc > 0.72）为自家手牌区
+                ys = [d[0][1] for d in row]
+                yc = sum(ys) / len(ys) if ys else 0
+                if yc < 0.20 * ih or yc > 0.72 * ih:
                     continue
                 for (rect, label, conf) in row:
                     if label is not None:
@@ -1817,18 +1842,6 @@ class Engine:
             # 当牌桌上没有任何弃牌（新局/换牌/定缺/刚起手发牌阶段），牌池累加器严格保持为空，绝不残留旧弃牌
             if len(discard_labels) == 0:
                 self._monotonic_discards.clear()
-
-            # 新洗牌发牌判定：若新手牌张数完整（>=13张），且与旧稳定手牌重合度极低（<= 3 张相同），说明洗牌重新发牌了
-            if self._stable_hand_mpsz and len(hand_mpsz) >= 26:
-                old_set = [self._stable_hand_mpsz[i:i+2] for i in range(0, len(self._stable_hand_mpsz), 2)]
-                new_set = [hand_mpsz[i:i+2] for i in range(0, len(hand_mpsz), 2)]
-                overlap = sum(min(old_set.count(t), new_set.count(t)) for t in set(new_set))
-                if overlap <= 3 and len(old_set) >= 13:
-                    self._monotonic_discards.clear()
-                    self._stable_hand_mpsz = ""
-                    self._stable_hand_count = 0
-                    self._tile_voter.reset()
-                    self._last_hand_y = None
 
             # ---- 摸牌独立判定 (基于物理间距 Physical Gap) ----
             is_drawing = False
@@ -2004,20 +2017,13 @@ class Engine:
                     dead = sum(1 for i in avail_list if hand_counts[i] + fc[i] >= 4)
             self._discard_history.append(disc_mpsz)
 
-            # ---- 9x3 剩余牌矩阵面板 ----
-            if self.mode == "sc":
-                remaining_matrix = {
-                    "m": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(0, 9)],
-                    "p": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(9, 18)],
-                    "s": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(18, 27)],
-                }
-            else:
-                remaining_matrix = {
-                    "m": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(0, 9)],
-                    "p": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(9, 18)],
-                    "s": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(18, 27)],
-                    "z": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(27, 34)],
-                }
+            # ---- 全场记牌矩阵面板（含万/筒/条，以及字牌/红中）----
+            remaining_matrix = {
+                "m": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(0, 9)],
+                "p": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(9, 18)],
+                "s": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(18, 27)],
+                "z": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(27, 34)],
+            }
 
             # ===== 方向自愈：连续 3 帧整帧 0 牌 → 解锁重探方向 =====
             # 用户中途旋转手机/切后台再回来，VirtualDisplay 朝向可能变了，
