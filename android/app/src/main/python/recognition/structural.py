@@ -1025,15 +1025,15 @@ class StructuralDetector(Detector):
         lo, hi = int(0.30 * fh), int(0.80 * fh)
         i = lo
         while i < hi:
-            if row[i] < 0.08:
+            if row[i] < 0.10:
                 j = i
-                while j < hi and row[j] < 0.08:
+                while j < hi and row[j] < 0.10:
                     j += 1
                 run = j - i
-                if run >= max(3, int(0.05 * fh)):
+                if run >= max(2, int(0.04 * fh)):
                     upper = float(row[:i].sum())
                     lower = float(row[j:].sum())
-                    if upper >= 0.15 * total and lower >= 0.30 * total:
+                    if upper >= 0.12 * total and lower >= 0.25 * total:
                         if self._stage_is_glyph(m, j, fh, fw, 0.35) and \
                                 self._stage_is_glyph(m, 0, i, fw, 0.22):
                             return True
@@ -1168,6 +1168,12 @@ class StructuralDetector(Detector):
                 red_cnt = int((((h_f < 10) | (h_f > 170)) & (s_f > 60) & (v_f > 60)).sum())
                 s_label = "9s" if red_cnt > 20 else "6s"
             if sk in ("m", "z"):
+                if sk == "m" and s_margin < 0.025:
+                    # 万牌模板因下半部"萬"字完全一致，不同数字间边际极小（如 6m 与 7m/9m 边际仅 0.008）
+                    # 此时交叉比对 _try_man 上部独立数字识别
+                    try_n, try_sc = self._try_man(face, m)
+                    if try_n is not None and try_sc > 0.50 and try_n != s_label:
+                        return try_n, float(min(0.98, 0.55 + 0.5 * try_sc))
                 return s_label, float(min(0.98, 0.55 + 0.5 * s_score))
             # 筒/条风格命中与几何数量冲突时，仅当几何排列分极高(>=0.85)且几何
             # 中心来自独立顶层 blob（geo_indep==数量，排除粘连伪计数）才以客观
@@ -1535,7 +1541,12 @@ class StructuralDetector(Detector):
         for y in order:
             if smooth[y] < 0.15 * max_e:
                 break
-            y1, y2 = max(0, int(y) - pad), min(gh, int(y) + pad)
+            if y > int(0.65 * gh):
+                # 底部手牌行：向上扩展容纳换三张/摸牌凸起牌，向下扩展至底边防止截断"萬"字底部
+                y1 = max(0, int(y - tile_h * 1.30))
+                y2 = min(gh, int(y + tile_h * 1.35))
+            else:
+                y1, y2 = max(0, int(y) - pad), min(gh, int(y) + pad)
             if y2 - y1 < 10:
                 continue
             if any(not (y2 < b[0] or y1 > b[1]) for b in bands):
@@ -2158,30 +2169,40 @@ class StructuralDetector(Detector):
 
     @staticmethod
     def _group_rows(dets):
-        """把检测到的牌按 y（行）分组，每组内按 x 排序。"""
+        """把检测到的牌按 y（行）聚类分组，每组内按 x 排序。
+
+        采用中心距容差聚类（0.55*h 且最小 18px），避免整数除法在边界处
+        将同一手牌中的凸起牌（换三张）与平底牌割裂为两行的 Bug。
+        """
         if not dets:
             return []
-        rows: Dict[int, list] = {}
-        for d in dets:
-            rh = d[0][3]
-            key = d[0][1] // max(8, rh)
-            rows.setdefault(key, []).append(d)
+        sorted_dets = sorted(dets, key=lambda d: d[0][1] + d[0][3] / 2.0)
+        rows = []
+        for d in sorted_dets:
+            yc = d[0][1] + d[0][3] / 2.0
+            placed = False
+            for r in rows:
+                r_yc = sum(x[0][1] + x[0][3] / 2.0 for x in r) / len(r)
+                r_h = sum(x[0][3] for x in r) / len(r)
+                if abs(yc - r_yc) <= max(18.0, 0.55 * r_h):
+                    r.append(d)
+                    placed = True
+                    break
+            if not placed:
+                rows.append([d])
         out = []
-        for g in rows.values():
+        for g in rows:
             g.sort(key=lambda d: d[0][0])
             out.append(g)
-        out.sort(key=lambda g: g[0][0][1])
+        out.sort(key=lambda g: sum(d[0][1] for d in g) / len(g))
         return out
 
-    def _tile_to_face_rect(self, tile, y1e, inv):
+    def _tile_to_face_rect(self, tile, y1e, inv, orig_img=None, y2e=None):
         """把 work 坐标的 tile 换算成原图坐标的「牌面矩形」(x, y, w, h)。
 
-        分类必须在全分辨率上跑：_classify_face 内的相对阈值
-        (0.42*fw, 0.24*fh, largest_frac 等) 是按全分辨率牌面 (~168x140)
-        调出来的，套到 60x70 的 work 分辨率牌面会全部不达标（9m/3m 都跪）。
-        所以带检测（Sobel + 行列能量）走 work 求快，分类单独回原图求准。
-
-        太小的矩形（<20px）返回 None —— 不可能是牌。
+        对于画面下半部手牌带（y1e 对应原图在屏幕下半部）：
+        换三张凸起牌与底部平牌高低不一。利用单牌列内有效像素（非绿布、亮像素）
+        与标准麻将牌高宽比（1.38）自适应锚定单牌准确的垂直范围。
         """
         tx1, ty1, tx2, ty2 = tile
         ix_w = int((tx2 - tx1) * FACE_INSET)
@@ -2194,6 +2215,41 @@ class StructuralDetector(Detector):
         fh_f = max(1, int(round((fy2w - fy1w) * inv)))
         if fw_f < 20 or fh_f < 20:
             return None
+
+        # 底部手牌垂直自适应优化
+        if orig_img is not None and y2e is not None and y1e * inv > 0.58 * orig_img.shape[0]:
+            try:
+                ih, iw = orig_img.shape[:2]
+                y_band_top = max(0, int(round(y1e * inv)))
+                y_band_bot = min(ih, int(round(y2e * inv)))
+                col_x1 = max(0, int(round(tx1 * inv)))
+                col_x2 = min(iw, int(round(tx2 * inv)))
+                tw_raw = col_x2 - col_x1
+                th_band = y_band_bot - y_band_top
+                if tw_raw >= 20 and th_band >= 30:
+                    target_th = int(tw_raw * 1.38)
+                    col_patch = orig_img[y_band_top:y_band_bot, col_x1:col_x2]
+                    hsv = cv2.cvtColor(col_patch, cv2.COLOR_BGR2HSV)
+                    gray = cv2.cvtColor(col_patch, cv2.COLOR_BGR2GRAY)
+                    felt = (hsv[:, :, 0] >= 30) & (hsv[:, :, 0] <= 100) & (hsv[:, :, 1] >= 40)
+                    row_tile = (~felt & (gray > 130)).mean(axis=1)
+                    active = np.where(row_tile > 0.35)[0]
+                    if len(active) > 0:
+                        y_bot = y_band_top + int(active[-1])
+                        y_top = y_band_top + int(active[0])
+                        actual_h = y_bot - y_top
+                        if actual_h > target_th * 1.05:
+                            y_top = max(y_band_top, y_bot - target_th)
+                        elif actual_h < target_th * 0.85:
+                            y_top = max(y_band_top, y_bot - target_th)
+                        new_h = y_bot - y_top
+                        return (col_x1 + max(2, int(0.06 * tw_raw)),
+                                y_top + max(2, int(0.05 * new_h)),
+                                max(1, int(tw_raw * (1.0 - 2 * FACE_INSET))),
+                                max(1, int(new_h * (1.0 - 2 * FACE_INSET))))
+            except Exception:
+                pass
+
         return (fx1, fy1, fw_f, fh_f)
 
     @staticmethod
@@ -2368,7 +2424,7 @@ class StructuralDetector(Detector):
                 continue
             rects = []
             for t in tiles:
-                r = self._tile_to_face_rect(t, y1e, inv)
+                r = self._tile_to_face_rect(t, y1e, inv, orig_img=img, y2e=y2e)
                 if r is not None:
                     rects.append(r)
             if len(rects) < 3:

@@ -582,12 +582,17 @@ class _HandStabilizer:
 
         # 需要多少帧共识：稳定手牌建立后固定 2 帧共识即采纳
         need = HAND_CONFIRM_FRAMES
-        # 冷启动：还没有任何稳定手牌时，第一个合法牌型立即采纳。
-        # 再等 2 帧共识只会让界面多空白 800ms —— 用户最不能忍的正是"识别不出来"。
+        # 冷启动：还没有任何稳定手牌时，需要至少 2 帧共识且张数 >= 7，防止大厅/非对局单帧噪点锁死假手牌
         if not self.stable_mpsz:
-            self.stable_mpsz = key
-            self.pending = False
-            return self.stable_mpsz
+            if n < 7:
+                return ""
+            if self._streak >= 2:
+                self.stable_mpsz = key
+                self.pending = False
+                return self.stable_mpsz
+            else:
+                self.pending = True
+                return ""
 
         # 众数兜底：窗口内出现次数够多，说明识别器已经稳定在（可能不完美的）
         # 这个牌型上，再等下去也不会更好，直接采纳。
@@ -887,6 +892,8 @@ class Engine:
             "show_advice": True,
             "min_ukeire": 0,
         }
+        # 牌桌场景防抖计数：连续 N 帧非牌桌才判定离开对局，防止游戏弹窗遮罩瞬时误触发 waiting
+        self._non_table_frames: int = 0
 
     @staticmethod
     def _is_mahjong_table(image: np.ndarray) -> bool:
@@ -918,6 +925,7 @@ class Engine:
         self._last_hand_y = None
         self._orient = 0
         self._orient_zerocount = 0
+        self._non_table_frames = 0
         self.trainer = None
 
     def set_config(self, key: str, value) -> None:
@@ -1310,7 +1318,7 @@ class Engine:
                 yc = sum(ys) / len(ys)
                 scored.append((s, row, yc))
         if not scored:
-            return min(rows, key=lambda g: min(abs(len(g) - 13), abs(len(g) - 14)))
+            return None
         scored.sort(key=lambda x: (-x[0][0], -x[0][1], -x[0][2]))
         chosen = scored[0][1]
         self._last_hand_y = sum(d[0][1] for d in chosen) / len(chosen)
@@ -1574,39 +1582,45 @@ class Engine:
                 # 重置方向锁，下一帧重新探测
                 self._orient = None
 
-            # ===== 牌桌场景校验（过滤大厅/菜单/结算）=====
+            # ===== 牌桌场景校验（过滤大厅/菜单/结算，加入防抖）=====
             if not self._is_mahjong_table(image):
-                self._reset_game_state()
-                return EngineResult(
-                    image=np.zeros((1, 1, 3), dtype=np.uint8),
-                    result=json.dumps({
-                        "mode": self.mode,
-                        "mode_name": MODES.get(self.mode, {}).get("name", self.mode),
-                        "dingque": None,
-                        "dingque_suit": None,
-                        "hand": "",
-                        "count": 0,
-                        "status": "waiting",
-                        "shanten": None,
-                        "advice": [],
-                        "best": "",
-                        "commentary": None,
-                        "discards": "",
-                        "discard_count": 0,
-                        "remaining": 108 if self.mode == "sc" else 136,
-                        "dead": 0,
-                        "remaining_matrix": {},
-                        "is_drawing": False,
-                        "drawing_tile": None,
-                        "tiles": [],
-                        "top_score": 0.0,
-                        "screen": [int(image.shape[1]), int(image.shape[0])],
-                        "elapsed": 0.001,
-                        "frame_skipped": False,
-                        "message": "等待牌局开始",
-                    }, ensure_ascii=False),
-                    stage=None,
-                )
+                self._non_table_frames += 1
+                if self._non_table_frames >= 6:
+                    self._reset_game_state()
+                    return EngineResult(
+                        image=np.zeros((1, 1, 3), dtype=np.uint8),
+                        result=json.dumps({
+                            "mode": self.mode,
+                            "mode_name": MODES.get(self.mode, {}).get("name", self.mode),
+                            "dingque": None,
+                            "dingque_suit": None,
+                            "hand": "",
+                            "count": 0,
+                            "status": "waiting",
+                            "shanten": None,
+                            "advice": [],
+                            "best": "",
+                            "commentary": None,
+                            "discards": "",
+                            "discard_count": 0,
+                            "remaining": 108 if self.mode == "sc" else 136,
+                            "dead": 0,
+                            "remaining_matrix": {},
+                            "is_drawing": False,
+                            "drawing_tile": None,
+                            "tiles": [],
+                            "top_score": 0.0,
+                            "screen": [int(image.shape[1]), int(image.shape[0])],
+                            "elapsed": 0.001,
+                            "frame_skipped": False,
+                            "message": "等待牌局开始",
+                        }, ensure_ascii=False),
+                        stage=None,
+                    )
+                # 连续非桌布帧数不足 6 帧（局中半透明遮罩/弹窗如"取消托管"等）：保留当前对局状态与手牌，跳过重绘
+                return self._build_skip_result(image, t0, "popup_or_dialog")
+            else:
+                self._non_table_frames = 0
 
             # 全图（方向归一后）留作预览与定缺用
             full_for_preview = image
@@ -1838,10 +1852,6 @@ class Engine:
                 self._stable_hand_mpsz = ""
                 self._stable_hand_count = 0
                 self._last_hand_y = None
-
-            # 当牌桌上没有任何弃牌（新局/换牌/定缺/刚起手发牌阶段），牌池累加器严格保持为空，绝不残留旧弃牌
-            if len(discard_labels) == 0:
-                self._monotonic_discards.clear()
 
             # ---- 摸牌独立判定 (基于物理间距 Physical Gap) ----
             is_drawing = False

@@ -422,7 +422,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   static const double collapsed = 56;
   // 胶囊微缩模式：收起态下在屏幕边缘显示小巧横条，展示听牌/最优打法
   bool _capsuleMode = true;
-  static const double _kCapsuleW = 200;
+  static const double _kCapsuleW = 210;
   static const double _kCapsuleH = 38;
   // 9x3 剩余牌矩阵面板折叠态：默认折叠，弹窗小巧简约不眼花
   bool _matrixExpanded = false;
@@ -443,6 +443,31 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // 缩放中：此期间关闭原生拖动，避免"拖把手时整窗跟着跑"
   bool _draggingResize = false;
   bool _resizeInFlight = false;
+
+  // ── 标题栏拖拽控制（解决反向与抖动跳屏）──
+  double _overlayBaseX = 0.0;
+  double _overlayBaseY = 0.0;
+  bool _isDraggingTitle = false;
+  bool _moveInFlight = false;
+  OverlayPosition? _pendingMove;
+
+  void _sendMoveOverlay(double x, double y) {
+    if (_moveInFlight) {
+      _pendingMove = OverlayPosition(x, y);
+      return;
+    }
+    _moveInFlight = true;
+    FlutterOverlayWindow.moveOverlay(OverlayPosition(x, y))
+        .catchError((_) => false)
+        .whenComplete(() {
+      _moveInFlight = false;
+      final next = _pendingMove;
+      if (next != null) {
+        _pendingMove = null;
+        _sendMoveOverlay(next.x, next.y);
+      }
+    });
+  }
 
   // 牌河折叠态。常驻可见（默认 true），但用户可手动折叠/展开以释放空间。
   // 状态在弹窗生命周期内持久化：用户收起 → 重新展开会保持上一次选择，
@@ -935,63 +960,53 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             else
               const MahjongTileIcon(size: 17),
             const SizedBox(width: 5),
-            if (result?['status'] == 'waiting') ...[
+            const Text(
+              '就绪',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.2,
+                decoration: TextDecoration.none,
+              ),
+            ),
+            const SizedBox(width: 5),
+            if (tileStr.isNotEmpty) ...[
               const Text(
-                '等待对局',
+                '打',
                 style: TextStyle(
                   color: Colors.white70,
                   fontSize: 10.5,
                   decoration: TextDecoration.none,
                 ),
               ),
-            ] else ...[
-              const Text(
-                '就绪',
-                style: TextStyle(
-                  color: Colors.white70,
-                  fontSize: 10.5,
-                  fontWeight: FontWeight.w500,
-                  decoration: TextDecoration.none,
-                ),
-              ),
-              const SizedBox(width: 5),
-              if (tileStr.isNotEmpty) ...[
-                const Text(
-                  '打',
-                  style: TextStyle(
-                    color: Colors.white70,
+              const SizedBox(width: 2),
+              TileChip(tile: tileStr, size: 19),
+              const SizedBox(width: 3),
+              Flexible(
+                child: Text(
+                  ukeire > 0 ? '进$ukeire张' : (reason ?? '最优'),
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Color(0xFF69F0AE),
                     fontSize: 10.5,
+                    fontWeight: FontWeight.bold,
                     decoration: TextDecoration.none,
                   ),
                 ),
-                const SizedBox(width: 2),
-                TileChip(tile: tileStr, size: 19),
-                const SizedBox(width: 3),
-                Flexible(
-                  child: Text(
-                    ukeire > 0 ? '进$ukeire张' : (reason ?? '最优'),
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Color(0xFF69F0AE),
-                      fontSize: 10.5,
-                      fontWeight: FontWeight.bold,
-                      decoration: TextDecoration.none,
-                    ),
+              ),
+            ] else ...[
+              Flexible(
+                child: Text(
+                  result?['status'] == 'waiting' ? '等待对局…' : '实时分析…',
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white38,
+                    fontSize: 9.5,
+                    decoration: TextDecoration.none,
                   ),
                 ),
-              ] else ...[
-                const Flexible(
-                  child: Text(
-                    '分析中…',
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: Colors.white38,
-                      fontSize: 9.5,
-                      decoration: TextDecoration.none,
-                    ),
-                  ),
-                ),
-              ],
+              ),
             ],
             const SizedBox(width: 3),
             const Icon(Icons.arrow_drop_down, color: Colors.white38, size: 16),
@@ -1474,25 +1489,49 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                       Expanded(
                         child: GestureDetector(
                           behavior: HitTestBehavior.opaque,
-                          onPanUpdate: (details) async {
+                          onPanStart: (details) async {
+                            _isDraggingTitle = true;
                             try {
                               final pos = await FlutterOverlayWindow.getOverlayPosition();
-                              await FlutterOverlayWindow.moveOverlay(OverlayPosition(
-                                pos.x + details.delta.dx,
-                                pos.y + details.delta.dy,
-                              ));
+                              _overlayBaseX = pos.x;
+                              _overlayBaseY = pos.y;
                             } catch (_) {}
                           },
-                          child: const Text(
-                            '雀神助手',
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 12,
-                              letterSpacing: 0.3,
-                              decoration: TextDecoration.none,
-                            ),
+                          onPanUpdate: (details) {
+                            if (!_isDraggingTitle) return;
+                            // 注意：showOverlay 采用了 topRight 对齐。
+                            // 在 Android WindowManager (Gravity.RIGHT) 下，params.x 代表距屏幕右边缘的距离。
+                            // 手指往左拖动 (dx < 0)，距右边缘变大，因此 params.x 需增加（即 -= dx）。
+                            // 手指往右拖动 (dx > 0)，距右边缘变小，因此 params.x 需减小（即 -= dx）。
+                            _overlayBaseX -= details.delta.dx;
+                            _overlayBaseY += details.delta.dy;
+
+                            final mediaQuery = MediaQuery.of(context);
+                            final screenW = mediaQuery.size.width;
+                            final screenH = mediaQuery.size.height;
+                            final maxX = max(0.0, screenW - panelW);
+                            final maxY = max(0.0, screenH - panelH);
+                            final targetX = _overlayBaseX.clamp(0.0, maxX);
+                            final targetY = _overlayBaseY.clamp(0.0, maxY);
+
+                            _sendMoveOverlay(targetX, targetY);
+                          },
+                          onPanEnd: (_) => _isDraggingTitle = false,
+                          onPanCancel: () => _isDraggingTitle = false,
+                          child: const Row(
+                            children: [
+                              Text(
+                                '雀神助手',
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 12,
+                                  letterSpacing: 0.3,
+                                  decoration: TextDecoration.none,
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                       ),
