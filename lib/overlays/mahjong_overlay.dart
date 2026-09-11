@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'package:auto_vision/config_store.dart';
 import 'package:auto_vision/overlays/tile_labels.dart';
@@ -321,12 +320,13 @@ class AdviceCard extends StatelessWidget {
           const SizedBox(width: 4),
           TileChip(tile: tile, size: 22),
           const SizedBox(width: 6),
-          RichText(
-            text: TextSpan(
+          Text.rich(
+            TextSpan(
+              style: const TextStyle(decoration: TextDecoration.none),
               children: [
-                TextSpan(
+                const TextSpan(
                   text: '进张 ',
-                  style: const TextStyle(color: Colors.white70, fontSize: 11),
+                  style: TextStyle(color: Colors.white70, fontSize: 11, decoration: TextDecoration.none),
                 ),
                 TextSpan(
                   text: '$ukeire',
@@ -334,11 +334,12 @@ class AdviceCard extends StatelessWidget {
                     color: best ? Colors.lightGreenAccent : Colors.lightBlueAccent,
                     fontSize: 14,
                     fontWeight: FontWeight.bold,
+                    decoration: TextDecoration.none,
                   ),
                 ),
-                TextSpan(
+                const TextSpan(
                   text: ' 张',
-                  style: const TextStyle(color: Colors.white70, fontSize: 11),
+                  style: TextStyle(color: Colors.white70, fontSize: 11, decoration: TextDecoration.none),
                 ),
               ],
             ),
@@ -419,22 +420,22 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   Timer? _adviceTimer;
 
   static const double collapsed = 56;
-  // 胶囊微缩模式：收起态下在屏幕边缘显示小巧横条，展示听牌/最优打法与定缺
+  // 胶囊微缩模式：收起态下在屏幕边缘显示小巧横条，展示听牌/最优打法
   bool _capsuleMode = true;
-  static const double _kCapsuleW = 208;
-  static const double _kCapsuleH = 46;
-  // 9x3 剩余牌矩阵面板折叠态
-  bool _matrixExpanded = true;
-  // 默认小巧面板：宽度 210dp，高度 240dp，避免遮挡底部 14 张手牌与牌桌中央
-  double panelW = 210;
-  double panelH = 240;
+  static const double _kCapsuleW = 180;
+  static const double _kCapsuleH = 38;
+  // 9x3 剩余牌矩阵面板折叠态：默认折叠，弹窗小巧简约不眼花
+  bool _matrixExpanded = false;
+  // 默认小巧面板：宽度 220dp，高度 210dp
+  double panelW = 220;
+  double panelH = 210;
 
   // ── 紧凑布局尺寸常量 ──
   static const double _kTitleBarH = 28; // 顶部栏高度
 
-  static const double minPanelW = 160;
+  static const double minPanelW = 190;
   static const double maxPanelW = 380;
-  static const double minPanelH = 100;
+  static const double minPanelH = 120;
   static const double maxPanelH = 550;
 
   double _minPanelH() => minPanelH;
@@ -648,41 +649,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     }
   }
 
-  // 切换胶囊模式与圆形悬浮球模式
-  Future<void> _toggleCapsuleMode() async {
-    if (!mounted) return;
-    final next = !_capsuleMode;
-    setState(() {
-      _capsuleMode = next;
-    });
-    if (!panelVisible) {
-      final double w = next ? _kCapsuleW : collapsed;
-      final double h = next ? _kCapsuleH : collapsed;
-      await _ensureSize(w, h);
-    }
-  }
 
-  // 循环切换定缺花色（万 -> 筒 -> 条 -> 自动感知）
-  Future<void> _cycleDingque() async {
-    final dynamic rawSuit = result?['dingque_suit'];
-    final int current = (rawSuit is int) ? rawSuit : -1;
-    final int next;
-    if (current == -1) {
-      next = 0; // 万
-    } else if (current == 0) {
-      next = 1; // 筒
-    } else if (current == 1) {
-      next = 2; // 条
-    } else {
-      next = -1; // 自动感知
-    }
-    try {
-      await const MethodChannel('com.example.realtime_mahjong_trainer/channel')
-          .invokeMethod('setDingque', {'suit': next});
-    } catch (e) {
-      print('定缺切换失败: $e');
-    }
-  }
 
 
 
@@ -874,7 +841,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final shanten = result?['shanten'];
     return GestureDetector(
       onTap: _togglePanel,
-      onLongPress: _toggleCapsuleMode,
       child: Container(
         width: size,
         height: size,
@@ -919,55 +885,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     );
   }
 
-  // 定缺状态徽章（支持点击交互快速循环切换：万 -> 筒 -> 条 -> 自动）
-  Widget _dingqueBadge() {
-    final dingque = result?['dingque'];
-    final dynamic rawSuit = result?['dingque_suit'];
-    final int suitIdx = (rawSuit is int) ? rawSuit : -1;
-    final String label = dingque != null ? '缺$dingque' : '定缺';
-    final Color badgeBg;
-    if (suitIdx == 0) {
-      badgeBg = const Color(0xFFC62828); // 万-深红
-    } else if (suitIdx == 1) {
-      badgeBg = const Color(0xFFEF6C00); // 筒-深橙
-    } else if (suitIdx == 2) {
-      badgeBg = const Color(0xFF2E7D32); // 条-深绿
-    } else {
-      badgeBg = const Color(0xFF455A64); // 自动-蓝灰
-    }
-
-    return GestureDetector(
-      onTap: _cycleDingque,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-        decoration: BoxDecoration(
-          color: badgeBg,
-          borderRadius: BorderRadius.circular(4),
-          border: Border.all(color: Colors.white70, width: 0.8),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              label,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 9.5,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(width: 2),
-            const Icon(Icons.sync, color: Colors.white70, size: 9),
-          ],
-        ),
-      ),
-    );
-  }
-
-  // 收起态：胶囊微缩模式（横向微缩条，不遮挡牌局，实时展示听牌/最优打法/定缺）
+  // 收起态：胶囊微缩模式（横向微缩条，不遮挡牌局，实时展示听牌/最优打法）
   Widget _miniCapsule() {
     final shanten = result?['shanten'];
-    final dingque = result?['dingque'];
     final adviceList = _shownAdvice.isNotEmpty ? _shownAdvice : (result?['advice'] as List<dynamic>? ?? const []);
     final topAdvice = adviceList.isNotEmpty ? adviceList[0] as Map<dynamic, dynamic>? : null;
     final String bestTile = _shownBest.isNotEmpty ? _shownBest : (result?['best'] ?? '');
@@ -977,17 +897,17 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
     return GestureDetector(
       onTap: _togglePanel,
-      onLongPress: _toggleCapsuleMode,
+      behavior: HitTestBehavior.opaque,
       child: Container(
         height: _kCapsuleH,
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
         decoration: BoxDecoration(
-          color: const Color(0xF21B2620), // 墨绿半透明底色
-          borderRadius: BorderRadius.circular(23),
-          border: Border.all(color: const Color(0xFF80CBC4), width: 1.2),
+          color: const Color(0xEE1E232A), // 深色微透磨砂底，不突兀
+          borderRadius: BorderRadius.circular(19),
+          border: Border.all(color: Colors.white.withAlpha(45), width: 1.0),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withAlpha(140),
+              color: Colors.black.withAlpha(160),
               blurRadius: 8,
               offset: const Offset(0, 2),
             ),
@@ -997,61 +917,47 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            // 向听数徽章
             if (shanten != null && shanten is int)
-              _ShantenBadge(shanten: shanten, size: 36)
+              _ShantenBadge(shanten: shanten, size: 28)
             else
-              const MahjongTileIcon(size: 20),
+              const MahjongTileIcon(size: 17),
             const SizedBox(width: 5),
-            if (dingque != null && dingque.toString().isNotEmpty) ...[
-              GestureDetector(
-                onTap: _cycleDingque,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF004D40),
-                    borderRadius: BorderRadius.circular(4),
-                    border: Border.all(color: const Color(0xFF80CBC4), width: 0.6),
-                  ),
-                  child: Text(
-                    '缺$dingque',
-                    style: const TextStyle(
-                      color: Color(0xFFE0F2F1),
-                      fontSize: 9,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 4),
-            ],
             if (tileStr.isNotEmpty) ...[
               const Text(
                 '打',
-                style: TextStyle(color: Colors.white70, fontSize: 10.5),
+                style: TextStyle(
+                  color: Colors.white70,
+                  fontSize: 10.5,
+                  decoration: TextDecoration.none,
+                ),
               ),
-              const SizedBox(width: 2),
-              TileChip(tile: tileStr, size: 19),
               const SizedBox(width: 3),
+              TileChip(tile: tileStr, size: 19),
+              const SizedBox(width: 4),
               Flexible(
                 child: Text(
                   ukeire > 0 ? '进$ukeire张' : (reason ?? '最优'),
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
-                    color: Colors.lightGreenAccent,
+                    color: Color(0xFF69F0AE),
                     fontSize: 10.5,
                     fontWeight: FontWeight.bold,
+                    decoration: TextDecoration.none,
                   ),
                 ),
               ),
             ] else ...[
               const Text(
-                '分析中…',
-                style: TextStyle(color: Colors.white70, fontSize: 10.5),
+                '雀神就绪',
+                style: TextStyle(
+                  color: Colors.white70,
+                  fontSize: 10.5,
+                  decoration: TextDecoration.none,
+                ),
               ),
             ],
-            const SizedBox(width: 2),
-            const Icon(Icons.chevron_right, color: Colors.white54, size: 14),
+            const SizedBox(width: 3),
+            const Icon(Icons.arrow_drop_down, color: Colors.white38, size: 16),
           ],
         ),
       ),
@@ -1199,73 +1105,38 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // ---------- 内容区小部件 ----------
 
   Widget _handSection(String hand, int count) {
-    final grouped = _groupHand(hand);
-    // 顺序固定：万 → 筒 → 条 → 字。空组不渲染。
-    final order = ['m', 'p', 's', 'z'];
-    final tilesAll = grouped.values.fold<int>(0, (s, l) => s + l.length);
-    if (tilesAll == 0) {
+    if (hand.isEmpty || count == 0) {
       return const SizedBox.shrink();
     }
-    // 张数不全（≥5 张但 <13/14）时显示一条浅色小字，告诉用户这是「正在识别」，
-    // 而不是 bug。原实现在 count!=13/14 时整段不显示，造成「啥也没有」的观感。
     final bool partial = count > 0 && count < 13;
     return Container(
-      padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (partial)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 4),
+            const Padding(
+              padding: EdgeInsets.only(bottom: 3),
               child: Text(
-                '已识别 $count 张（识别中…稳定后会追加）',
+                '手牌识别中…稳定后自动补齐',
                 style: TextStyle(
-                  color: Colors.white.withAlpha(110),
+                  color: Colors.white60,
                   fontSize: 9,
-                  fontStyle: FontStyle.italic,
+                  decoration: TextDecoration.none,
                 ),
               ),
             ),
-          for (final k in order)
-            if (grouped[k]!.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 4),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    SizedBox(
-                      width: 14,
-                      child: Text(
-                        k == 'z' ? '字' : (k == 'm' ? '万' : (k == 'p' ? '筒' : '条')),
-                        style: TextStyle(
-                          color: k == 'z'
-                              ? const Color(0xFFB0BEC5)
-                              : (k == 'm'
-                                  ? const Color(0xFF1E6B7A)
-                                  : (k == 'p'
-                                      ? const Color(0xFF1E6B7A)
-                                      : const Color(0xFF66BB6A))),
-                          fontSize: 10,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                     Expanded(
-                       child: HandChipRow(
-                         hand: grouped[k]!.join(),
-                         chipSize: 20,
-                         drawingTile: result?['is_drawing'] == true
-                             ? (result?['drawing_tile'] as String?)
-                             : null,
-                       ),
-                     ),
-                   ],
-                 ),
-               ),
-         ],
-       ),
-     );
-   }
+          HandChipRow(
+            hand: hand,
+            chipSize: 20,
+            drawingTile: result?['is_drawing'] == true
+                ? (result?['drawing_tile'] as String?)
+                : null,
+          ),
+        ],
+      ),
+    );
+  }
 
   Widget _adviceSection(List<dynamic> advice, String best, int count) {
     if (advice.isEmpty) {
@@ -1317,27 +1188,54 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('建议打', style: TextStyle(color: Colors.white70, fontSize: 11)),
-              const SizedBox(width: 4),
-              TileChip(tile: topTile, size: 21),
-              const SizedBox(width: 6),
-              if (isDingque) ...[
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF00695C),
-                    borderRadius: BorderRadius.circular(3),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    '建议打',
+                    style: TextStyle(
+                      color: Colors.white70,
+                      fontSize: 11,
+                      decoration: TextDecoration.none,
+                    ),
                   ),
-                  child: const Text('定缺', style: TextStyle(color: Colors.white, fontSize: 8.5, fontWeight: FontWeight.bold)),
-                ),
-                const SizedBox(width: 4),
-              ],
-              const Spacer(),
+                  const SizedBox(width: 4),
+                  TileChip(tile: topTile, size: 21),
+                  if (isDingque) ...[
+                    const SizedBox(width: 5),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF00695C),
+                        borderRadius: BorderRadius.circular(3),
+                      ),
+                      child: const Text(
+                        '定缺',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 8.5,
+                          fontWeight: FontWeight.bold,
+                          decoration: TextDecoration.none,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
               if (topUkeire > 0)
-                Text(
-                  '进张 $topUkeire 张',
-                  style: const TextStyle(color: Colors.lightGreenAccent, fontSize: 11, fontWeight: FontWeight.bold),
+                Flexible(
+                  child: Text(
+                    '进张 $topUkeire 张',
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.lightGreenAccent,
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      decoration: TextDecoration.none,
+                    ),
+                  ),
                 ),
             ],
           ),
@@ -1345,7 +1243,12 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             const SizedBox(height: 3),
             Text(
               topReason,
-              style: const TextStyle(color: Color(0xFF80CBC4), fontSize: 9.5, height: 1.15),
+              style: const TextStyle(
+                color: Color(0xFF80CBC4),
+                fontSize: 9.5,
+                height: 1.15,
+                decoration: TextDecoration.none,
+              ),
             ),
           ],
           if (sorted.length > 1) ...[
@@ -1358,11 +1261,25 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                   Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Text('次选:', style: TextStyle(color: Colors.white.withAlpha(140), fontSize: 9)),
+                      Text(
+                        '次选:',
+                        style: TextStyle(
+                          color: Colors.white.withAlpha(140),
+                          fontSize: 9,
+                          decoration: TextDecoration.none,
+                        ),
+                      ),
                       const SizedBox(width: 2),
                       TileChip(tile: (sorted[i]['tile'] ?? '') as String, size: 16),
                       const SizedBox(width: 2),
-                      Text('${sorted[i]['ukeire'] ?? 0}张', style: TextStyle(color: Colors.white.withAlpha(160), fontSize: 9)),
+                      Text(
+                        '${sorted[i]['ukeire'] ?? 0}张',
+                        style: TextStyle(
+                          color: Colors.white.withAlpha(160),
+                          fontSize: 9,
+                          decoration: TextDecoration.none,
+                        ),
+                      ),
                     ],
                   ),
               ],
@@ -1375,21 +1292,21 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
   @override
   Widget build(BuildContext context) {
+    final Widget current;
     if (!panelVisible) {
-      return SizedBox.expand(
+      current = SizedBox.expand(
         child: _capsuleMode ? _miniCapsule() : _floatingButton(),
       );
-    }
+    } else {
+      final String hand = (result?['hand'] ?? '') as String;
+      final int count = (result?['count'] ?? 0) as int;
+      final List<dynamic> advice = _shownAdvice;
+      final String best = _shownBest;
+      final String discards = (result?['discards'] ?? '') as String;
+      final int discardCount = (result?['discard_count'] ?? 0) as int;
 
-    final String hand = (result?['hand'] ?? '') as String;
-    final int count = (result?['count'] ?? 0) as int;
-    final List<dynamic> advice = _shownAdvice;
-    final String best = _shownBest;
-    final String discards = (result?['discards'] ?? '') as String;
-    final int discardCount = (result?['discard_count'] ?? 0) as int;
-
-    return SizedBox.expand(
-      child: Stack(
+      current = SizedBox.expand(
+        child: Stack(
         children: [
           Container(
             decoration: BoxDecoration(
@@ -1412,13 +1329,13 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // 顶部控制栏
+                // 顶部控制栏：精简干净，杜绝溢出，无多余干扰
                 SizedBox(
                   height: _kTitleBarH,
                   child: Row(
                     children: [
                       const MahjongTileIcon(size: 15),
-                      const SizedBox(width: 4),
+                      const SizedBox(width: 5),
                       const Expanded(
                         child: Text(
                           '雀神助手',
@@ -1426,39 +1343,40 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                           style: TextStyle(
                             color: Colors.white,
                             fontWeight: FontWeight.bold,
-                            fontSize: 12.5,
+                            fontSize: 12,
                             letterSpacing: 0.3,
+                            decoration: TextDecoration.none,
                           ),
                         ),
                       ),
                       _statusBanner(),
-                      const SizedBox(width: 4),
-                      _dingqueBadge(),
-                      const SizedBox(width: 4),
-                      GestureDetector(
-                        onTap: () {
-                          _toggleCapsuleMode();
-                          _togglePanel();
-                        },
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withAlpha(20),
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: const Text('胶囊', style: TextStyle(color: Colors.white70, fontSize: 9.5)),
-                        ),
-                      ),
-                      const SizedBox(width: 4),
+                      const SizedBox(width: 6),
                       GestureDetector(
                         onTap: _togglePanel,
+                        behavior: HitTestBehavior.opaque,
                         child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
                           decoration: BoxDecoration(
-                            color: Colors.white.withAlpha(28),
+                            color: Colors.white.withAlpha(25),
                             borderRadius: BorderRadius.circular(4),
+                            border: Border.all(color: Colors.white12, width: 0.6),
                           ),
-                          child: const Text('收起', style: TextStyle(color: Colors.white, fontSize: 10)),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.unfold_less_rounded, color: Colors.white70, size: 11),
+                              SizedBox(width: 2),
+                              Text(
+                                '收起',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w500,
+                                  decoration: TextDecoration.none,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ],
@@ -1543,8 +1461,20 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         ],
       ),
     );
-  }
+    }
 
+    return Material(
+      type: MaterialType.transparency,
+      child: DefaultTextStyle(
+        style: const TextStyle(
+          decoration: TextDecoration.none,
+          color: Colors.white,
+          fontFamily: 'sans-serif',
+        ),
+        child: current,
+      ),
+    );
+  }
 }
 
 class _ShantenBadge extends StatelessWidget {

@@ -780,12 +780,7 @@ def detect_river_discards(image: np.ndarray, detector) -> List[str]:
                 if face.std() < 12.0:
                     continue
                 best_l, best_c = None, 0.0
-                if sbw > sbh * 1.15:
-                    rots = [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE]
-                elif sbh > sbw * 1.15:
-                    rots = [None, cv2.ROTATE_180]
-                else:
-                    rots = [None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_180, cv2.ROTATE_90_COUNTERCLOCKWISE]
+                rots = [None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_180, cv2.ROTATE_90_COUNTERCLOCKWISE]
 
                 for rot in rots:
                     cur = face if rot is None else cv2.rotate(face, rot)
@@ -796,7 +791,7 @@ def detect_river_discards(image: np.ndarray, detector) -> List[str]:
                         best_l = lbl
                     if best_c >= 0.88:
                         break
-                if best_l and best_c >= 0.70:
+                if best_l and best_c >= 0.60:
                     discards.append(best_l)
         return discards
     except Exception:

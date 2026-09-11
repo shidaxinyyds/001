@@ -1024,9 +1024,9 @@ class StructuralDetector(Detector):
         lo, hi = int(0.30 * fh), int(0.80 * fh)
         i = lo
         while i < hi:
-            if row[i] < 0.03:
+            if row[i] < 0.08:
                 j = i
-                while j < hi and row[j] < 0.03:
+                while j < hi and row[j] < 0.08:
                     j += 1
                 run = j - i
                 if run >= max(3, int(0.05 * fh)):
