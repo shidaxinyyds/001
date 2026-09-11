@@ -56,13 +56,13 @@ class NeuralTileClassifier:
         try:
             # Resize to target input 36x48 (W=36, H=48)
             resized = cv2.resize(face_bgr, (36, 48), interpolation=cv2.INTER_AREA)
-            # Normalize to 0..1 range
+            # Normalize to 0..1 range with RGB conversion (swapRB=True)
             blob = cv2.dnn.blobFromImage(
                 resized,
                 scalefactor=1.0 / 255.0,
                 size=(36, 48),
                 mean=(0, 0, 0),
-                swapRB=False,
+                swapRB=True,
                 crop=False
             )
             self.net.setInput(blob)

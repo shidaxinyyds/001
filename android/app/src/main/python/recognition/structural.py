@@ -425,6 +425,11 @@ class StructuralDetector(Detector):
                 if _n72.any():
                     self._glyphs.hons.setdefault(_HONOR_GLYPH[_lab], []).append(_n72)
         self._mask_cache: Dict[Tuple[str, int, int], np.ndarray] = {}
+        try:
+            from .neural_classifier import get_neural_classifier
+            self._neural = get_neural_classifier()
+        except Exception as e:
+            self._neural = None
         # 诊断信息（与 TemplateDetector 字段名保持一致）
         self.last_top_score: float = 0.0
         # 牌级分类缓存：真机连续帧里同一张牌被反复分类（13ms/张，13 张 = 173ms/帧，
@@ -1065,6 +1070,26 @@ class StructuralDetector(Detector):
                                  max(1, int(round(h * sc)))),
                           interpolation=interp)
 
+    def _verify_neural_suit(self, face: np.ndarray, label: str) -> bool:
+        """轻量级花色与关键颜色守卫，确保神经网络预测与像素事实不冲突。"""
+        if face is None or face.size == 0:
+            return False
+        fh, fw = face.shape[:2]
+        hsv = cv2.cvtColor(face, cv2.COLOR_BGR2HSV)
+        h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+        
+        # 7z (中) 必须包含红色墨迹
+        if label == "7z":
+            red_cnt = int((((h < 10) | (h > 170)) & (s > 40) & (v > 40)).sum())
+            return red_cnt >= 12
+            
+        # 6z (发) 必须包含绿色墨迹
+        if label == "6z":
+            green_cnt = int(((h >= 35) & (h <= 85) & (s > 40) & (v > 40)).sum())
+            return green_cnt >= 12
+
+        return True
+
     def _classify_face(self, face: np.ndarray) -> Tuple[Optional[str], float]:
         """单张牌面 -> (标签, 置信度)。
 
@@ -1100,6 +1125,13 @@ class StructuralDetector(Detector):
 
         if ink_frac < INK_MIN_FRAC:
             return "5z", 0.9  # 白板：几乎无墨
+
+        # ---- 0.5) 神经网络高精分类（ONNX 34类模型优先）----
+        if self._neural is not None and self._neural.is_available:
+            n_label, n_conf = self._neural.classify(face)
+            if n_label is not None and n_conf >= 0.55:
+                if self._verify_neural_suit(face, n_label):
+                    return n_label, float(min(0.99, max(0.85, n_conf)))
 
         # ---- 1) 几何筒/条候选（客观计数，用于与风格模板交叉仲裁）----
         pin_centers = self._pin_centers(m, fw, fh)
@@ -1167,7 +1199,16 @@ class StructuralDetector(Detector):
                 # 6s vs 9s 色相守卫：9s 中间一列是红条，6s 全绿（无红）
                 red_cnt = int((((h_f < 10) | (h_f > 170)) & (s_f > 60) & (v_f > 60)).sum())
                 s_label = "9s" if red_cnt > 20 else "6s"
-            if sk in ("m", "z"):
+            elif s_label == "7z":
+                red_cnt_7z = int((((h_f < 10) | (h_f > 170)) & (s_f > 40) & (v_f > 40)).sum())
+                if red_cnt_7z < 12:
+                    s_label = None
+            elif s_label == "6z":
+                green_cnt_6z = int(((h_f >= 35) & (h_f <= 85) & (s_f > 40) & (v_f > 40)).sum())
+                if green_cnt_6z < 12:
+                    s_label = None
+
+            if s_label is not None and sk in ("m", "z"):
                 if sk == "m" and s_margin < 0.025:
                     # 万牌模板因下半部"萬"字完全一致，不同数字间边际极小（如 6m 与 7m/9m 边际仅 0.008）
                     # 此时交叉比对 _try_man 上部独立数字识别

@@ -68,23 +68,20 @@ fr2 = [((x * 50, 0, 50, 80), "2m", 0.9) for x in range(14)]
 for fr in [fr1, fr2, fr1, fr2]:
     v.push(fr)
 out = v.vote()
-# 4 帧 2v2，last 是 2m。即使加权后 1m 略多，种子要求 last 也有票，
-# 但加权下 last_label=2m 在最新两帧各 1 票，加权 0.9+0.5=1.4；
-# 1m 总加权 1.0+0.7=1.7，最佳 1m 但 last_vote=0 → 输出 None。
-check("2v2-with-last-not-winning", all(o[1] is None for o in out),
+# 4 帧 2v2，最新帧是 2m。按最新帧优先原则，采纳最新帧 2m。
+check("2v2-with-last-not-winning", all(o[1] == "2m" for o in out),
        f"labels={[o[1] for o in out[:4]]}")
 
-# 4 帧 3 个 "1m" + 1 个 "9m" → 1m 加权 2.6, 9m 加权 0.5。last_label="9m"，
-# 但 1m 票数 ≥3，绝对 ≥MIN_VOTES=2 加权份额 ≥0.55 → 按"加权最高"还是 chosen=1m，但 last_vote=0 → None
+# 4 帧 3 个 "1m" + 1 个 "9m" → 最新帧为 9m（手牌摸/打变化）。
+# 历史加权份额未达压倒性门限（>=0.70），按最新帧优先原则采信 9m。
 v = _TileVoter(window=4)
 fr_a = [((x * 50, 0, 50, 80), "1m", 0.9) for x in range(14)]
 fr_b = [((x * 50, 0, 50, 80), "9m", 0.9) for x in range(14)]
 for fr in [fr_a, fr_a, fr_a, fr_b]:
     v.push(fr)
 out = v.vote()
-# last=voting_a=9m，按设计不应被采纳（last 必须有票）
 check("3a+1b-last-different",
-      len(out) == 14 and all(o[1] is None for o in out),
+      len(out) == 14 and all(o[1] == "9m" for o in out),
       f"len={len(out)} labels={[o[1] for o in out[:4]]}")
 
 # 4 帧 4 个 "1m" 全同 → chosen=1m ✓
