@@ -740,60 +740,77 @@ def detect_dingque(screen_img: np.ndarray) -> Tuple[Optional[int], Optional[str]
         return None, None
 
 
-def detect_river_discards(image: np.ndarray, detector) -> List[str]:
-    """中心公共牌河多角度检测：提取牌桌中央各家弃牌。"""
-    if image is None or detector is None:
+def detect_river_discards(image: np.ndarray, detector, mode: str = "4p") -> List[str]:
+    """高精度牌桌弃牌检测：严格排除中央骰子盒、倒计时、房间名及头像，
+    仅提取牌桌中央四方牌河内真实打出的麻将牌。"""
+    if image is None or detector is None or image.size == 0:
         return []
     try:
         ih, iw = image.shape[:2]
-        ry1, ry2 = int(ih * 0.14), int(ih * 0.72)
-        rx1, rx2 = int(iw * 0.18), int(iw * 0.82)
+        ry1, ry2 = int(ih * 0.20), int(ih * 0.72)
+        rx1, rx2 = int(iw * 0.20), int(iw * 0.80)
         if rx2 <= rx1 or ry2 <= ry1:
             return []
         river_crop = image[ry1:ry2, rx1:rx2]
         hsv = cv2.cvtColor(river_crop, cv2.COLOR_BGR2HSV)
-        mask = ((hsv[:, :, 1] < 85) & (hsv[:, :, 2] > 140)).astype(np.uint8) * 255
 
-        # 排除中心骰子区域（避免将倒计时/风位盘误认为牌面）
-        dcx = int(iw * 0.5) - rx1
-        dcy = int(ih * 0.38) - ry1
-        dx1, dx2 = max(0, dcx - 70), min(river_crop.shape[1], dcx + 70)
-        dy1, dy2 = max(0, dcy - 50), min(river_crop.shape[0], dcy + 50)
-        mask[dy1:dy2, dx1:dx2] = 0
+        # 实体麻将白/象牙色牌面：低饱和度 (S < 55) 且 高明度 (V > 175)
+        white_mask = ((hsv[:, :, 1] < 55) & (hsv[:, :, 2] > 175)).astype(np.uint8) * 255
 
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # 严格排除盲区（按相对原图归一化坐标）：
+        # 1. 牌桌居中顶部区域（玩法标题，如"排位·红中血流"）
+        # 2. 牌桌中央盲区（骰子盒、风向标、倒计时数字 07/67）
+        # 3. 牌桌居中底部区域（底分文本）
+        def mask_rect(x1_norm, y1_norm, x2_norm, y2_norm):
+            bx1 = max(0, int(iw * x1_norm) - rx1)
+            bx2 = min(river_crop.shape[1], int(iw * x2_norm) - rx1)
+            by1 = max(0, int(ih * y1_norm) - ry1)
+            by2 = min(river_crop.shape[0], int(ih * y2_norm) - ry1)
+            white_mask[by1:by2, bx1:bx2] = 0
+
+        mask_rect(0.42, 0.20, 0.58, 0.36)   # 居中顶部玩法标题
+        mask_rect(0.435, 0.365, 0.535, 0.540) # 居中正方形骰子盒/倒计时
+        mask_rect(0.44, 0.58, 0.56, 0.70)   # 居中底部底分等文本
+
+        # 形态学闭运算填平牌面缝隙
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        closed = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel)
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
         discards = []
-
         for cnt in contours:
             bx, by, bw, bh = cv2.boundingRect(cnt)
-            if bw < 14 or bh < 14 or bw > int(iw * 0.35) or bh > int(ih * 0.30):
+            area = bw * bh
+            # 过滤过小噪声（文字笔画）与过大UI（面板）
+            if area < 800 or area > 18000:
                 continue
-            if bw * bh < 280:
+            # 矩形度校验：真实麻将牌轮廓面积占比高 (solidity >= 0.65)，文字通常 < 0.45
+            solidity = cv2.contourArea(cnt) / float(area)
+            if solidity < 0.65:
                 continue
             aspect = bw / float(bh)
+            # 真实单张或连排麻将牌的长宽比
+            if not ((0.52 <= aspect <= 0.96) or (1.08 <= aspect <= 1.85)):
+                continue
+
             sub_boxes = []
             if aspect > 1.35:
-                num_t = max(2, min(6, int(round(bw / 28.0))))
+                # 横排相邻打出的牌
+                num_t = max(2, min(4, int(round(bw / float(bh * 0.75)))))
                 step = bw / float(num_t)
                 for i in range(num_t):
                     sub_boxes.append((int(bx + i * step), by, int(step), bh))
-            elif aspect < 0.72:
-                num_t = max(2, min(6, int(round(bh / 34.0))))
-                step = bh / float(num_t)
-                for i in range(num_t):
-                    sub_boxes.append((bx, int(by + i * step), bw, int(step)))
             else:
                 sub_boxes.append((bx, by, bw, bh))
 
             for (sx, sy, sbw, sbh) in sub_boxes:
-                if sbw < 12 or sbh < 12:
+                if sbw < 16 or sbh < 16:
                     continue
                 gx, gy = rx1 + sx, ry1 + sy
                 face = image[gy:gy+sbh, gx:gx+sbw]
-                if face.size == 0 or face.std() < 10.0:
+                if face.size == 0 or face.std() < 12.0:
                     continue
+
                 best_l, best_c = None, 0.0
                 rots = [None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_180, cv2.ROTATE_90_COUNTERCLOCKWISE]
 
@@ -802,12 +819,23 @@ def detect_river_discards(image: np.ndarray, detector) -> List[str]:
                     fh, fw = cur.shape[:2]
                     lbl, conf = detector._classify_face_retry(cur, (0, 0, fw, fh), allow_retry=False)
                     if conf > best_c:
+                        # 颜色约束：筒子 (p) 牌面圆圈为蓝/红，绝对不可能为纯绿墨迹
+                        if lbl and lbl.endswith('p') and not lbl.startswith('8'):
+                            chsv = cv2.cvtColor(cur, cv2.COLOR_BGR2HSV)
+                            green_ink = (chsv[:, :, 0] >= 35) & (chsv[:, :, 0] <= 85) & (chsv[:, :, 1] >= 60)
+                            if float(np.mean(green_ink)) > 0.06:
+                                continue
                         best_c = conf
                         best_l = lbl
                     if best_c >= 0.88:
                         break
-                if best_l and best_c >= 0.75:
-                    discards.append(best_l)
+
+                if best_l and best_c >= 0.76:
+                    if mode == "sc":
+                        if best_l.endswith(('m', 'p', 's')) or best_l == '7z':
+                            discards.append(best_l)
+                    else:
+                        discards.append(best_l)
         return discards
     except Exception:
         return []
@@ -902,8 +930,7 @@ class Engine:
         # 牌桌场景防抖计数：连续 N 帧非牌桌才判定离开对局，防止游戏弹窗遮罩瞬时误触发 waiting
         self._non_table_frames: int = 0
 
-    @staticmethod
-    def _is_mahjong_table(image: np.ndarray) -> bool:
+    def _is_mahjong_table(self, image: np.ndarray) -> bool:
         """检测当前画面是否为真实的麻将牌桌对局场景（排除大厅/主菜单/结算界面）。
 
         真实麻将牌桌中央有大面积的绿色桌布（HSV H:32~95, S>28），
@@ -911,14 +938,25 @@ class Engine:
         """
         if image is None or image.size == 0:
             return False
+        # 如果已经存在稳定的手牌，且没有彻底换场景，直接判定为对局中
+        if len(self._stable_hand_mpsz) >= 8:
+            return True
         h, w = image.shape[:2]
         center = image[int(h * 0.25):int(h * 0.75), int(w * 0.25):int(w * 0.75)]
         if center.size == 0:
             return False
         small = cv2.resize(center, (100, 100), interpolation=cv2.INTER_NEAREST)
         hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
-        green_mask = (hsv[:, :, 0] >= 32) & (hsv[:, :, 0] <= 95) & (hsv[:, :, 1] >= 28)
-        return float(np.mean(green_mask)) >= 0.25
+        # 支持常见麻将桌布颜色：
+        # 1. 经典绿呢桌布: H in [32, 95]
+        # 2. 雀魂/腾讯深青/湖蓝/深蓝桌布: H in [95, 130]
+        # 3. 仿木纹/咖啡色桌布: H in [10, 30]
+        table_mask = (
+            ((hsv[:, :, 0] >= 32) & (hsv[:, :, 0] <= 95) & (hsv[:, :, 1] >= 22)) |
+            ((hsv[:, :, 0] >= 95) & (hsv[:, :, 0] <= 130) & (hsv[:, :, 1] >= 22)) |
+            ((hsv[:, :, 0] >= 10) & (hsv[:, :, 0] <= 30) & (hsv[:, :, 1] >= 20))
+        )
+        return float(np.mean(table_mask)) >= 0.20
 
     def _reset_game_state(self):
         """重置整局游戏的动态状态（新开局/返回大厅/结算时调用）。"""
@@ -1658,6 +1696,7 @@ class Engine:
 
 
     def process(self, image: CVImage) -> Optional[EngineResult]:
+        t0 = time.time()
         try:
             # ===== 崩溃兜底（C 层 SIGSEGV 不可被 Python try/except 捕获）=====
             # 在进入任何 cv2 操作前，用纯 numpy 校验图像结构性合法。
@@ -1955,14 +1994,15 @@ class Engine:
                         except Exception:
                             pass
 
-            # 融合牌桌中央区域四方牌河的多角度弃牌检测（提取各家打出的牌）
-            try:
-                central_discards = detect_river_discards(image, self._detector)
-                for cd in central_discards:
-                    if cd and mpsz_to_tile34_index(cd) in avail:
-                        discard_labels.append(cd)
-            except Exception:
-                pass
+            # 融合牌桌中央区域四方牌河的多角度弃牌检测（仅在已识别出有效手牌时提取，杜绝非对局/大厅/未开局误报）
+            if hand_row and (len(hand_row) >= 4 or len(hand_mpsz) >= 4):
+                try:
+                    central_discards = detect_river_discards(image, self._detector, mode=self.mode)
+                    for cd in central_discards:
+                        if cd and mpsz_to_tile34_index(cd) in avail:
+                            discard_labels.append(cd)
+                except Exception:
+                    pass
 
             # 新局判定：若当前牌桌上弃牌数突降至 <= 2 张，而历史牌池已累积 >= 5 张，说明上一局已结束并开始了全新对局
             if len(discard_labels) <= 2 and sum(self._monotonic_discards.values()) >= 5:
