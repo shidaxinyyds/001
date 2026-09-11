@@ -660,6 +660,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     required int discardCount,
     required String hand,
   }) {
+    if (discards.isEmpty || discardCount == 0) {
+      return const SizedBox.shrink();
+    }
     return Container(
       margin: const EdgeInsets.only(bottom: 2),
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
@@ -947,9 +950,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                 ),
               ),
             ] else ...[
-              const Text(
-                '雀神就绪',
-                style: TextStyle(
+              Text(
+                (result?['status'] == 'waiting') ? '等待对局' : '雀神就绪',
+                style: const TextStyle(
                   color: Colors.white70,
                   fontSize: 10.5,
                   decoration: TextDecoration.none,
@@ -1140,6 +1143,15 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
   Widget _adviceSection(List<dynamic> advice, String best, int count) {
     if (advice.isEmpty) {
+      final status = result?['status'] as String? ?? '';
+      final String hint;
+      if (status == 'waiting') {
+        hint = '等待牌局开始（进入游戏后自动识别）';
+      } else if (count > 0) {
+        hint = '手牌识别中，正在推演建议…';
+      } else {
+        hint = '等待手牌入镜（请勿遮挡底部手牌）';
+      }
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
         decoration: BoxDecoration(
@@ -1153,7 +1165,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             const SizedBox(width: 5),
             Expanded(
               child: Text(
-                count > 0 ? '手牌识别中，正在推演建议…' : '等待手牌入镜（请勿遮挡底部手牌）',
+                hint,
                 style: const TextStyle(color: Colors.white60, fontSize: 9.5),
               ),
             ),
@@ -1446,7 +1458,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                         // 3. 9x3 剩余存活牌记牌器
                         _remainingMatrixSection(result?['remaining_matrix'] as Map<String, dynamic>?),
                         // 4. 牌河弃牌（有弃牌才显示）
-                        if (discards.isNotEmpty || discardCount > 0) ...[
+                        if (discards.isNotEmpty && discardCount > 0) ...[
                           const SizedBox(height: 5),
                           _discardBlock(discards: discards, discardCount: discardCount, hand: hand),
                         ],

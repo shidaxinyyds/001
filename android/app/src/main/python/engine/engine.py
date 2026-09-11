@@ -885,6 +885,38 @@ class Engine:
             "min_ukeire": 0,
         }
 
+    @staticmethod
+    def _is_mahjong_table(image: np.ndarray) -> bool:
+        """检测当前画面是否为真实的麻将牌桌对局场景（排除大厅/主菜单/结算界面）。
+
+        真实麻将牌桌中央有大面积的绿色桌布（HSV H:32~95, S>28），
+        而在大厅/主菜单/选场界面中为蓝天/UI背景，绿色占比极低（<0.20）。
+        """
+        if image is None or image.size == 0:
+            return False
+        h, w = image.shape[:2]
+        center = image[int(h * 0.25):int(h * 0.75), int(w * 0.25):int(w * 0.75)]
+        if center.size == 0:
+            return False
+        small = cv2.resize(center, (100, 100), interpolation=cv2.INTER_NEAREST)
+        hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+        green_mask = (hsv[:, :, 0] >= 32) & (hsv[:, :, 0] <= 95) & (hsv[:, :, 1] >= 28)
+        return float(np.mean(green_mask)) >= 0.25
+
+    def _reset_game_state(self):
+        """重置整局游戏的动态状态（新开局/返回大厅/结算时调用）。"""
+        self._monotonic_discards.clear()
+        self._discard_history.clear()
+        self._tile_voter.reset()
+        self._stable_hand_mpsz = ""
+        self._stable_hand_count = 0
+        self._partial_mpsz = ""
+        self._partial_ttl = 0
+        self._last_hand_y = None
+        self._orient = 0
+        self._orient_zerocount = 0
+        self.trainer = None
+
     def set_config(self, key: str, value) -> None:
         """调试页开关：实时修改识别策略。未知 key 静默忽略。"""
         if key in self._cfg:
@@ -1213,16 +1245,16 @@ class Engine:
         return "".join(out)
 
     @staticmethod
-    def _hand_row_score(row):
+    def _hand_row_score(row, img_h=None):
         """返回 (avg_h, y_center, len_score) 三元组，越大越像"手牌行"。
 
         评判维度：
           - 平均牌高更大（手牌是连续拍摄、单张牌大）
           - y 坐标更靠下（屏幕坐标系原点在左上角，y 越大越靠下）
           - 行长度接近 13/14（手牌行专属；牌河一般 0~12 张）
-        长度 <8 直接返回 None（不太可能是手牌行）。
+        物理位置先验约束：玩家手牌必在画面最底部（yc >= 0.68 * img_h）。
         """
-        if len(row) < 8:
+        if len(row) < 7:
             return None
         hs = [d[0][3] for d in row if d[0][3] > 0]
         if not hs:
@@ -1230,11 +1262,13 @@ class Engine:
         avg_h = sum(hs) / len(hs)
         ys = [d[0][1] for d in row]
         yc = sum(ys) / len(ys)
+        if img_h is not None and img_h > 0 and yc < 0.68 * img_h:
+            return None
         # len_score: 13 张 = 1.0，14 张 = 0.99（都算高分），其它线性衰减
         best13 = 1.0 - min(abs(len(row) - 13), abs(len(row) - 14)) / 13.0
         return (avg_h, yc, best13)
 
-    def _pick_hand_row(self, rows):
+    def _pick_hand_row(self, rows, img_h=None):
         """从所有牌行里挑出「自己手牌行」。
 
         通用启发（原有）：手牌行是玩家面前最近的一排，牌最大、靠下、张数接近 13/14。
@@ -1249,7 +1283,7 @@ class Engine:
             band = HAND_LOCK_BAND
             candidates = []
             for row in rows:
-                s = self._hand_row_score(row)
+                s = self._hand_row_score(row, img_h)
                 if s is None:
                     continue
                 ys = [d[0][1] for d in row]
@@ -1267,7 +1301,7 @@ class Engine:
         # 2) 兜底：所有行里选最佳
         scored = []
         for row in rows:
-            s = self._hand_row_score(row)
+            s = self._hand_row_score(row, img_h)
             if s is not None:
                 ys = [d[0][1] for d in row]
                 yc = sum(ys) / len(ys)
@@ -1438,6 +1472,14 @@ class Engine:
             self._orient = self._orient_override
             self._orient_zerocount = 0
             return self._rotate_to(image, self._orient_override)
+
+        ih, iw = image.shape[:2]
+        if iw >= ih:
+            # Android MediaProjection 在横屏游戏中捕获的画面天然为正向 0°，绝无 180° 倒置可能
+            self._orient = 0
+            self._orient_zerocount = 0
+            return image
+
         if self._orient is None:
             # 调试页关掉「自动方向探测」：直接用 0°（或手动覆盖），不做任何方向探测，
             # 避免误旋转，也省下 4 方向探测的开销/崩溃风险。
@@ -1528,6 +1570,40 @@ class Engine:
                 print(f"[engine] 方向归一异常，回退到原图: {e}")
                 # 重置方向锁，下一帧重新探测
                 self._orient = None
+
+            # ===== 牌桌场景校验（过滤大厅/菜单/结算）=====
+            if not self._is_mahjong_table(image):
+                self._reset_game_state()
+                return EngineResult(
+                    image=np.zeros((1, 1, 3), dtype=np.uint8),
+                    result=json.dumps({
+                        "mode": self.mode,
+                        "mode_name": MODES.get(self.mode, {}).get("name", self.mode),
+                        "dingque": None,
+                        "dingque_suit": None,
+                        "hand": "",
+                        "count": 0,
+                        "status": "waiting",
+                        "shanten": None,
+                        "advice": [],
+                        "best": "",
+                        "commentary": None,
+                        "discards": "",
+                        "discard_count": 0,
+                        "remaining": 108 if self.mode == "sc" else 136,
+                        "dead": 0,
+                        "remaining_matrix": {},
+                        "is_drawing": False,
+                        "drawing_tile": None,
+                        "tiles": [],
+                        "top_score": 0.0,
+                        "screen": [int(image.shape[1]), int(image.shape[0])],
+                        "elapsed": 0.001,
+                        "frame_skipped": False,
+                        "message": "等待牌局开始",
+                    }, ensure_ascii=False),
+                    stage=None,
+                )
 
             # 全图（方向归一后）留作预览与定缺用
             full_for_preview = image
@@ -1696,7 +1772,7 @@ class Engine:
             # 区分手牌行与牌河行（用下标而非对象身份：下面会把手牌行整体
             # 替换成"与稳定手牌对齐"后的新列表，身份比较会失效，进而把
             # 整副手牌误当成牌河算进 discards —— 一个会让剩余牌数归零的坑）。
-            hand_row = self._pick_hand_row(voted_rows)
+            hand_row = self._pick_hand_row(voted_rows, image.shape[0])
             hand_idx = None
             for _i, _row in enumerate(voted_rows):
                 if _row is hand_row:
@@ -1724,12 +1800,40 @@ class Engine:
                     continue
                 for (rect, label, conf) in row:
                     if label is not None:
-                        discard_labels.append(label)
+                        try:
+                            if mpsz_to_tile34_index(label) in avail:
+                                discard_labels.append(label)
+                        except Exception:
+                            pass
 
-            # 叠加中心公共牌河多角度弃牌检测
+            # 叠加中心公共牌河多角度弃牌检测（严格按当前玩法可用集过滤，防止杂乱字牌污染）
             for lab in detect_river_discards(image, detector):
                 if lab:
-                    discard_labels.append(lab)
+                    try:
+                        if mpsz_to_tile34_index(lab) in avail:
+                            discard_labels.append(lab)
+                    except Exception:
+                        pass
+
+            # 新局判定：若当前牌桌上弃牌数突降至 <= 2 张，而历史牌池已累积 >= 5 张，说明上一局已结束并开始了全新对局
+            if len(discard_labels) <= 2 and sum(self._monotonic_discards.values()) >= 5:
+                self._monotonic_discards.clear()
+                self._tile_voter.reset()
+                self._stable_hand_mpsz = ""
+                self._stable_hand_count = 0
+                self._last_hand_y = None
+
+            # 新洗牌发牌判定：若新手牌张数完整（>=13张），且与旧稳定手牌重合度极低（<= 3 张相同），说明洗牌重新发牌了
+            if self._stable_hand_mpsz and len(hand_mpsz) >= 26:
+                old_set = [self._stable_hand_mpsz[i:i+2] for i in range(0, len(self._stable_hand_mpsz), 2)]
+                new_set = [hand_mpsz[i:i+2] for i in range(0, len(hand_mpsz), 2)]
+                overlap = sum(min(old_set.count(t), new_set.count(t)) for t in set(new_set))
+                if overlap <= 3 and len(old_set) >= 13:
+                    self._monotonic_discards.clear()
+                    self._stable_hand_mpsz = ""
+                    self._stable_hand_count = 0
+                    self._tile_voter.reset()
+                    self._last_hand_y = None
 
             # ---- 摸牌独立判定 (基于物理间距 Physical Gap) ----
             is_drawing = False
