@@ -56,7 +56,8 @@ android {
         versionName flutterVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         ndk {
-            abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"
+            // 兼顾主流 64 位与 32 位 Android 真机架构
+            abiFilters "arm64-v8a", "armeabi-v7a"
         }
     }
 
@@ -78,22 +79,10 @@ dependencies {}
 chaquopy {
     defaultConfig {
         pip {
-            // mahjong 已内置并 vendoring 到 android/app/src/main/python/mahjong，
-            // 不依赖 PyPI/镜像版本，避免云端构建因版本漂移或镜像不可用而失败。
-            // The latest version available on https://chaquo.com/pypi-13.1/
+            // 核心视觉与矩阵运算依赖：OpenCV 4.5.1（移除 pillow 与 tflite 冗余）
             install("opencv-python~=4.5.1")
-
-            install("pillow")
-
-            // TFLite 推理（Chaquopy 镜像提供 2.5.0 的 cp38 Android ABI wheels），
-            // 用于替换手写几何分类器——34 类小 CNN 在设备端单张推理 <5ms。
-            install("tflite-runtime~=2.5.0")
         }
-        // Portable: chaquopy auto-detects python3; the previous Nix path only works inside a nix-shell.
         buildPython("python3")
     }
-    // tflite_assets/ 目录在 src/main/python/ 下，Chaquopy 默认就会扫描
-    // src/main/python/ 所有文件并打包进 assets/chaquopy/app.imy，所以模型随 APK
-    // 自动发布，无需额外 sourceSets 配置（之前手写的 sourceSets 块编译失败）。
 }
 

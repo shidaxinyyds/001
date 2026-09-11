@@ -122,7 +122,7 @@ MIN_STYLE_SCORE = 0.74
 # 仍 >=0.08（错标签模板形状差异大）；未注册风格的跨牌误配分数低且边际小。
 # 绝对分 + 边际双门限：注册风格召回 80/80，合成 17 风格泄漏仅 2 例（黑体/雅黑
 # 的 2z 误配 1p，由 1p 结构守卫拦下）。
-STYLE_MARGIN_LO = 0.58
+STYLE_MARGIN_LO = 0.48
 # GAP 由数据标定（localtest/diag_margin_sweep.py，14 个扰动场景 x 13 张手牌
 # = 143 样本，其中 92 条走 margin 通道）：
 #   真对样本(90 条) margin ∈ [0.0742, 0.2514]
@@ -132,7 +132,7 @@ STYLE_MARGIN_LO = 0.58
 # >=0.10），恰好骑在 0.08 上，任何重采样抖动都会把 9s 掀翻 —— 掉出风格通道
 # 后几何数不准 9 根条（粘成 3 列，arr=0.15），最终经 _try_honor 错成 1z(東)。
 # 1.5x 缩放下实测复现。取 0.056（空隙中点）后：真对 90/90 放行、真错 0/2 放行。
-STYLE_MARGIN_GAP = 0.056
+STYLE_MARGIN_GAP = 0.025
 NUMERAL_REGION = 0.58        # 万牌数字区（占牌高）
 # 萬字块起始（占牌高）。设 0.60 而非 0.55，给数字"三"的最下横杠留出 0.05 余量，
 # 避免 0.55~0.58 区间的数字笔画被圈进 bottom 把 bbox 拉大、密度拉低、萬检测失败。
@@ -380,7 +380,8 @@ class _StyleBank:
                 binm = ((img > 100).astype(np.uint8)) * 255
                 if not binm.any():
                     continue
-                self.tpls.append((name[:-4], _GlyphBank._norm(binm, self.SIZE)))
+                label = name[:-4].split('_')[0]
+                self.tpls.append((label, _GlyphBank._norm(binm, self.SIZE)))
 
     def match(self, m: np.ndarray) -> Tuple[Optional[str], float, float]:
         """返回 (最佳标签, 相似度 0~1, 与次高不同标签的边际)。
@@ -393,15 +394,16 @@ class _StyleBank:
         q = _GlyphBank._norm(m, self.SIZE)
         if not q.any():
             return None, 0.0, 0.0
-        best_l, best, second = None, 0.0, 0.0
+        scores: Dict[str, float] = {}
         for label, t in self.tpls:
             s = _GlyphBank._match_tolerant(q, t)
-            if s > best:
-                if label != best_l:
-                    second = best
-                best_l, best = label, s
-            elif label != best_l and s > second:
-                second = s
+            if s > scores.get(label, 0.0):
+                scores[label] = s
+        if not scores:
+            return None, 0.0, 0.0
+        sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        best_l, best = sorted_scores[0]
+        second = sorted_scores[1][1] if len(sorted_scores) > 1 else 0.0
         return best_l, best, best - second
 
 
@@ -493,8 +495,36 @@ class StructuralDetector(Detector):
         _, bs = cv2.threshold(s, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         colorful = (bs > 0).astype(np.uint8)
         m = cv2.bitwise_or(dark, colorful) * 255
+        # 过滤黄色 UI 标识（如"听"、"赖"等角标）：角标通常位于边缘四个角落，
+        # 仅在角标区域清除黄色，避免整张被选中的高亮手牌被完全擦除
+        fh_m, fw_m = m.shape[:2]
+        is_yellow = (hsv[:, :, 0] >= 14) & (hsv[:, :, 0] <= 42) & (hsv[:, :, 1] >= 70) & (hsv[:, :, 2] >= 100)
+        corner_mask = np.zeros_like(m, dtype=bool)
+        corner_mask[:int(0.35 * fh_m), :int(0.35 * fw_m)] = True
+        corner_mask[:int(0.35 * fh_m), int(0.65 * fw_m):] = True
+        corner_mask[int(0.70 * fh_m):, :int(0.35 * fw_m)] = True
+        corner_mask[int(0.70 * fh_m):, int(0.65 * fw_m):] = True
+        m[is_yellow & corner_mask] = 0
         m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
         return m
+
+    @staticmethod
+    def _clean_tile_ink(m: np.ndarray) -> np.ndarray:
+        """滤除切牌边界引入的外边缘条纹、外边框与噪点。"""
+        h, w = m.shape[:2]
+        cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        clean = np.zeros_like(m)
+        for c in cnts:
+            x, y, cw, ch = cv2.boundingRect(c)
+            # 滤除包围整张牌的外框轮廓
+            if cw > 0.85 * w and ch > 0.85 * h:
+                continue
+            if (y <= 2 and ch < 0.28 * h) or (y + ch >= h - 2 and ch < 0.28 * h):
+                continue
+            if (x <= 1 and cw < 0.15 * w) or (x + cw >= w - 1 and cw < 0.15 * w):
+                continue
+            cv2.drawContours(clean, [c], -1, 255, -1)
+        return clean if clean.any() else m
 
     @staticmethod
     def _apply_clahe(gray: np.ndarray) -> np.ndarray:
@@ -1062,7 +1092,7 @@ class StructuralDetector(Detector):
         # 原生尺度（[150,190]）直接跳过 —— 基准图零开销、零风险。
         face = self._canon_scale(face)
         fh, fw = face.shape[:2]
-        m = self._ink_mask(face)
+        m = self._clean_tile_ink(self._ink_mask(face))
         total = int((m > 0).sum())
         face_area = fw * fh
         ink_frac = total / float(face_area)
@@ -1075,7 +1105,7 @@ class StructuralDetector(Detector):
         pin_n = len(pin_centers)
         pin_arr = 0.0
         pin_pass = False
-        if 1 <= pin_n <= 9 and self._pin_peak_sanity(m, fw, fh, pin_centers):
+        if 2 <= pin_n <= 9 and self._pin_peak_sanity(m, fw, fh, pin_centers):
             _, pin_arr = self._arrangement_score(pin_centers, PIN_PATTERNS)
             pin_pass = pin_arr >= MIN_ARR_SCORE
         sou_centers = self._stick_centers(m, fw, fh)
@@ -1114,18 +1144,35 @@ class StructuralDetector(Detector):
                          and 0.70 <= asp <= 1.40)
             if not ok_1p:
                 s_label = None
+        fh_c, fw_c = face.shape[:2]
+        inner_face = face[int(0.2*fh_c):int(0.8*fh_c), int(0.2*fw_c):int(0.8*fw_c)]
+        hsv_face = cv2.cvtColor(face, cv2.COLOR_BGR2HSV)
+        hsv_inner = cv2.cvtColor(inner_face, cv2.COLOR_BGR2HSV)
+        h_f, s_f, v_f = hsv_face[:, :, 0], hsv_face[:, :, 1], hsv_face[:, :, 2]
+        h_in, s_in, v_in = hsv_inner[:, :, 0], hsv_inner[:, :, 1], hsv_inner[:, :, 2]
+        red_cnt_5p = int((((h_in < 10) | (h_in > 170)) & (s_in > 60) & (v_in > 60)).sum())
+        green_cnt_5p = int(((h_in >= 35) & (h_in <= 85) & (s_in > 60) & (v_in > 60)).sum())
+        is_color_5p = red_cnt_5p > 15 and green_cnt_5p > 15
+
         if s_label is not None and (
                 s_score >= MIN_STYLE_SCORE
                 or (s_score >= STYLE_MARGIN_LO
-                    and s_margin >= STYLE_MARGIN_GAP)):
+                    and s_margin >= STYLE_MARGIN_GAP)
+                or (is_color_5p and s_score >= 0.42)):
+            if s_label == "4m" and is_color_5p:
+                s_label = "5p"
             sk = s_label[-1]
+            if s_label in ("6s", "9s"):
+                # 6s vs 9s 色相守卫：9s 中间一列是红条，6s 全绿（无红）
+                red_cnt = int((((h_f < 10) | (h_f > 170)) & (s_f > 60) & (v_f > 60)).sum())
+                s_label = "9s" if red_cnt > 20 else "6s"
             if sk in ("m", "z"):
                 return s_label, float(min(0.98, 0.55 + 0.5 * s_score))
             # 筒/条风格命中与几何数量冲突时，仅当几何排列分极高(>=0.85)且几何
             # 中心来自独立顶层 blob（geo_indep==数量，排除粘连伪计数）才以客观
             # 几何纠正风格错配（如 6s 风格误配 9s）；几何不可信（如 8s 粘连伪 4）
             # 则保留正确风格。
-            if (geo_label is not None and int(s_label[0]) != int(geo_label[0])
+            if (geo_label is not None and geo_label != "1p" and int(s_label[0]) != int(geo_label[0])
                     and geo_arr >= 0.85 and geo_indep == int(geo_label[0])):
                 return geo_label, float(0.50 + 0.45 * geo_arr)
             return s_label, float(min(0.98, 0.55 + 0.5 * s_score))
@@ -1517,7 +1564,7 @@ class StructuralDetector(Detector):
         0..1。0=纯暗缝/空白，1=整列亮。
         """
         hi = float(np.percentile(gray_band, 88))
-        sig = (gray_band >= hi * 0.72).mean(axis=0).astype(np.float32)
+        sig = (gray_band >= hi * 0.58).mean(axis=0).astype(np.float32)
         # 轻微平滑：去掉笔画造成的细碎抖动，但保留牌缝/牌边框这种"宽信号"
         k = np.ones(3, np.float32) / 3.0
         sig = np.convolve(sig, k, mode="same")
@@ -1916,20 +1963,41 @@ class StructuralDetector(Detector):
         if sig.max() < 0.05:
             return []
 
-        # ---- 1. 找 active 区间 [x0, x1] ----
-        active = np.where(sig > max(0.06, 0.25 * sig.max()))[0]
-        if len(active) < 30:
-            return []
-        x0, x1 = int(active[0]), int(active[-1])
+        # ---- 1. 找 active 区间 [x0, x1]（剔除屏幕左右边缘 UI 伪信号）----
+        th = max(0.06, 0.22 * sig.max())
+        is_active = (sig > th).astype(np.uint8)
+        k_size = max(15, int(0.018 * sw))
+        closed = cv2.morphologyEx(is_active[:, None], cv2.MORPH_CLOSE, np.ones((k_size, 1), np.uint8)).ravel()
+        runs = []
+        in_run, start = False, 0
+        for i, v in enumerate(closed):
+            if v and not in_run:
+                start, in_run = i, True
+            elif not v and in_run:
+                runs.append((start, i - 1))
+                in_run = False
+        if in_run:
+            runs.append((start, len(closed) - 1))
+
+        valid_runs = [r for r in runs if (r[1] - r[0]) >= max(30, int(0.04 * sw))]
+        if not valid_runs:
+            active = np.where(sig > th)[0]
+            if len(active) < 30:
+                return []
+            x0, x1 = int(active[0]), int(active[-1])
+        else:
+            best_run = max(valid_runs, key=lambda r: r[1] - r[0])
+            x0, x1 = best_run
         span0 = x1 - x0
         if span0 < 30:
             return []
 
-        # ---- 2. FFT 自相关求周期 ----
+        max_p_bound = (min(span0 / 3.0, float(tile_h_hint) * 0.95)
+                       if tile_h_hint > 0 else min(span0 / 3.0, 280.0))
         period, strength = self._autocorr_period(
             sig[x0:x1 + 1],
             min_p=max(20.0, span0 / 17.0),
-            max_p=min(span0 / 3.0, 280.0),
+            max_p=max_p_bound,
         )
         if period is None or period <= 0:
             period = span0 / 13.0
@@ -1954,6 +2022,11 @@ class StructuralDetector(Detector):
         for k in range(n):
             x1b = max(0, int(round(xmin + k * tile_w)) - pad)
             x2b = min(sw, int(round(xmin + (k + 1) * tile_w)) + pad)
+            # 摸牌态（14/11/8/5/2张）：最后一张牌（摸牌）与手牌间常有空隙，贴着 active 右端
+            if n in (14, 11, 8, 5, 2) and k == n - 1:
+                if x1 - (xmin + k * tile_w) > 0.25 * tile_w:
+                    x2b = min(sw, int(x1) + pad)
+                    x1b = max(0, int(x1 - tile_w) - pad)
             if x2b - x1b < 8:
                 continue
             out.append((x1b, int(y1), x2b, int(y2)))
@@ -2288,7 +2361,7 @@ class StructuralDetector(Detector):
             band_gray = work[y1:y2, :].astype(np.float32)
             med = float(np.median(band_gray))
             unif = float(((band_gray >= med - 12) & (band_gray <= med + 12)).mean())
-            if unif > 0.18:
+            if y1 < int(0.70 * wh) and unif > 0.18:
                 continue
             tiles = self._segment_tiles(band, y2 - y1)
             if len(tiles) < 3:

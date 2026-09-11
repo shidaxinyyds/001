@@ -92,6 +92,18 @@ public class ImageProcessor {
         orientDirty = true;
     }
 
+    private static int dingqueOverride = -1;
+    private static boolean dingqueDirty = false;
+
+    public static void setDingque(int suit) {
+        if (suit >= 0 && suit <= 2) {
+            dingqueOverride = suit;
+        } else {
+            dingqueOverride = -1;
+        }
+        dingqueDirty = true;
+    }
+
     // 调试页开关：经 MainActivity 的 setConfig 通道写入，下一帧处理前推给 Python 引擎。
     // 用独立布尔而非 Map，避免额外的 import 与 Chaquopy 类型转换摩擦。
     private static boolean cfgAutoOrient = true;
@@ -202,14 +214,22 @@ public class ImageProcessor {
         }, delayMs);
     }
 
-    // 下一帧采集间隔。
-    // 防封号开启：350–550ms 随机抖动（拟人节奏，避免固定节奏的 bot 特征）；
-    // 否则固定 400ms，行为与原先完全一致。
+    // 两级自适应帧调度 (Frame Governor)：静止态降频巡检，活跃态快速跟帧
+    private volatile int consecutiveSkips = 0;
+
+    // 下一帧采集间隔：
+    // 静止态（连续跳帧 >= 2）：800~1000ms 巡检，极大降低 CPU 与发热；
+    // 活跃态（有摸牌/出牌动作）：350~450ms 高频跟帧；
+    // 防封号开启：在此基础上叠加随机拟人抖动。
     private long captureDelayMs() {
-        if (cfgAntiBan) {
-            return 350 + sRng.nextInt(201); // [350, 550]
+        boolean isIdle = (consecutiveSkips >= 2);
+        if (isIdle) {
+            return 800 + (cfgAntiBan ? sRng.nextInt(200) : 0);
         }
-        return 400;
+        if (cfgAntiBan) {
+            return 350 + sRng.nextInt(151); // [350, 500]
+        }
+        return 380;
     }
 
     // 单帧采集 + 识别（原函数体从 TimerTask.run 抽出，便于自调度复用）。
@@ -399,6 +419,16 @@ public class ImageProcessor {
             }
         }
 
+        // 把悬浮窗设置的定缺覆盖推给引擎（仅在变化时）。
+        if (dingqueDirty && engine != null) {
+            try {
+                engine.callAttr("set_dingque_override", dingqueOverride);
+                dingqueDirty = false;
+            } catch (Throwable t) {
+                TimedLog.e(TAG, "set_dingque_override 推送失败: " + t);
+            }
+        }
+
         // 把调试页开关（自动旋转/冷启动/严格门槛/防封号/防平台检测）推给引擎（仅在变化时）。
         if (configDirty && engine != null) {
             try {
@@ -435,6 +465,22 @@ public class ImageProcessor {
         }
 
         byte[] bytes = engineResult.callAttr("to_bytes").toJava(byte[].class);
+
+        // 提取是否跳帧状态，动态更新巡检降频周期
+        try {
+            PyObject resObj = engineResult.get("result");
+            if (resObj != null) {
+                String resStr = resObj.toString();
+                if (resStr.contains("\"frame_skipped\": true")) {
+                    consecutiveSkips++;
+                } else {
+                    consecutiveSkips = 0;
+                }
+            }
+        } catch (Throwable ignore) {
+            consecutiveSkips = 0;
+        }
+
         if (client.send(bytes)) {
             framesProcessed++;
         } else {

@@ -1,10 +1,9 @@
 import numpy as np
 from typing import Tuple, Any, Iterable
-from PIL import Image
 
 Rect = Tuple[int, int, int, int]
 Rects = Iterable[Rect]
-PILImage = Image.Image
+PILImage = Any
 
 
 try:

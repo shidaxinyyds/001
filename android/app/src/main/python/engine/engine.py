@@ -43,7 +43,7 @@ VALID_HAND_SIZES = (13, 14)
 PREVIEW_MAX_WIDTH = 480
 
 # 输入图最长边上限。超过此值先降采样，避免 OpenCV 在超大图上触发 OOM/SIGSEGV。
-MAX_INPUT_LONG_EDGE = 2400
+MAX_INPUT_LONG_EDGE = 3200
 
 # ROI 裁剪后最小高度（像素）。低于此值放弃裁剪，整屏识别，防止窄条导致 FFT/切牌崩溃。
 MIN_ROI_HEIGHT = 80
@@ -463,7 +463,7 @@ def _counter_to_mpsz(cnt: Counter) -> str:
 # 中间 85~165 是巨大空档，门槛取 120 落在正中，极稳。
 # 另配"整行自适应"：若整行牌面都很暗（暗色主题美术），说明这条判据
 # 不适用，整帧跳过亮度过滤，绝不至于把真牌全砍光。
-MIN_FACE_BRIGHTNESS = 120.0
+MIN_FACE_BRIGHTNESS = 80.0
 
 
 def _face_brightness(image: CVImage, rect) -> float:
@@ -691,6 +691,47 @@ def _is_valid_image(img) -> bool:
 MAX_ORIENT_REPROBES = 2
 
 
+def detect_dingque(screen_img: np.ndarray) -> Tuple[Optional[int], Optional[str]]:
+    """检测四川麻将定缺徽章（头像右上角）。
+
+    返回 (suit_idx, suit_name)：
+      suit_idx: 0=万, 1=筒, 2=条
+      suit_name: '万', '筒', '条'
+    未检测到返回 (None, None)。
+    """
+    try:
+        h, w = screen_img.shape[:2]
+        # 定缺徽章位于左下角头像右上侧 (x in 8.0%~12.8%, y in 58.0%~68.0%)
+        sx = int(w * 0.080)
+        ex = int(w * 0.128)
+        sy = int(h * 0.580)
+        ey = int(h * 0.680)
+        badge_crop = screen_img[sy:ey, sx:ex]
+        if badge_crop.size == 0 or badge_crop.shape[0] < 10 or badge_crop.shape[1] < 10:
+            return None, None
+        hsv = cv2.cvtColor(badge_crop, cv2.COLOR_BGR2HSV)
+
+        green_mask = (hsv[:, :, 0] >= 35) & (hsv[:, :, 0] <= 85) & (hsv[:, :, 1] > 80) & (hsv[:, :, 2] > 80)
+        red_mask1 = (hsv[:, :, 0] >= 0) & (hsv[:, :, 0] <= 10) & (hsv[:, :, 1] > 80) & (hsv[:, :, 2] > 80)
+        red_mask2 = (hsv[:, :, 0] >= 170) & (hsv[:, :, 0] <= 180) & (hsv[:, :, 1] > 80) & (hsv[:, :, 2] > 80)
+        red_mask = red_mask1 | red_mask2
+        yellow_mask = (hsv[:, :, 0] >= 14) & (hsv[:, :, 0] <= 35) & (hsv[:, :, 1] > 80) & (hsv[:, :, 2] > 80)
+
+        g_cnt = int(np.sum(green_mask))
+        r_cnt = int(np.sum(red_mask))
+        y_cnt = int(np.sum(yellow_mask))
+
+        if g_cnt > r_cnt and g_cnt > y_cnt and g_cnt > 15:
+            return 2, '条'
+        elif r_cnt > g_cnt and r_cnt > y_cnt and r_cnt > 15:
+            return 0, '万'
+        elif y_cnt > g_cnt and y_cnt > r_cnt and y_cnt > 15:
+            return 1, '筒'
+        return None, None
+    except Exception:
+        return None, None
+
+
 class Engine:
     def __init__(self):
         self.trainer: Optional[Trainer] = None
@@ -725,9 +766,9 @@ class Engine:
         # 启动帧计数：首 WARMUP_FRAMES 帧走保守策略（参见 WARMUP_FRAMES 注释），
         # 避免 _MotionGuard 历史为空导致动画过渡帧漏过。
         self._warmup_left: int = WARMUP_FRAMES
-        # 牌河稳定性历史：保留最近 DISCARD_HISTORY_FRAMES 帧的 disc_mpsz 长度。
-        # 用于"当前帧 discards 显著少于历史最小值"时回退到历史最大稳定值。
+        # 牌河稳定性历史与牌池单调累加器（单局牌池只增不减、108张物理守恒）
         self._discard_history: deque = deque(maxlen=DISCARD_HISTORY_FRAMES)
+        self._monotonic_discards: Counter = Counter()
         # ===== 方向自检（旋转鲁棒性）=====
         # 真机截屏：竖屏手机 + 横屏麻将游戏时，MediaProjection 的 VirtualDisplay
         # 被强制成横屏缓冲，横屏游戏在里面被系统旋转 90° 塞入。结果所有牌都"横过来"，
@@ -800,7 +841,7 @@ class Engine:
 
         if self.trainer is None:
             print(f"Initial hand: {hand}")
-            self.trainer = Trainer(hand)
+            self.trainer = Trainer(hand, mode=self.mode)
             return None
 
         prev_hand = self.trainer.hand
@@ -814,7 +855,7 @@ class Engine:
             return None
         if delta > 1:
             print(f"Large change detected, reloading hand: {diff}")
-            self.trainer = Trainer(hand)
+            self.trainer = Trainer(hand, mode=self.mode)
             return None
 
         tile, change = list(diff.items())[0]
@@ -829,7 +870,7 @@ class Engine:
 
         # 张数变化不符合"摸牌/打牌"，多半是中途识别跳变，整手重建
         print(f"Unexpected transition {len(prev_hand)} -> {len(hand)}, reloading hand")
-        self.trainer = Trainer(hand)
+        self.trainer = Trainer(hand, mode=self.mode)
         return None
 
     def build_advice(self, hand: TileCollection, disc_counts=None):
@@ -888,13 +929,34 @@ class Engine:
         try:
             if len(hand) in hand_sizes(self.mode):
                 raw = self.trainer.calculate_discards()
-                items = sorted(raw.items(), key=lambda kv: -kv[1])
-                if min_ukeire > 0:
-                    items = [(t, u) for (t, u) in items if int(u) >= min_ukeire]
-                advice = [
-                    {"tile": str(t), "ukeire": int(u)}
-                    for (t, u) in items
-                ][:6]
+
+                if self.mode == "sc" and getattr(self.trainer, "sichuan_results", None):
+                    advice = []
+                    for sr in self.trainer.sichuan_results:
+                        u = sr.get("ukeire", 0)
+                        if min_ukeire > 0 and u < min_ukeire:
+                            continue
+                        advice.append({
+                            "tile": sr.get("tile"),
+                            "ukeire": int(u),
+                            "shanten": sr.get("shanten", 0),
+                            "ev": sr.get("ev", 0.0),
+                            "reason": sr.get("reason", ""),
+                            "ting_tiles": sr.get("ting_tiles", []),
+                            "is_dingque": sr.get("is_dingque", False),
+                        })
+                        if len(advice) >= 6:
+                            break
+                else:
+                    items = sorted(raw.items(), key=lambda kv: -kv[1])
+                    if min_ukeire > 0:
+                        items = [(t, u) for (t, u) in items if int(u) >= min_ukeire]
+
+                    advice = []
+                    for (t, u) in items[:6]:
+                        t_str = str(t)
+                        entry = {"tile": t_str, "ukeire": int(u)}
+                        advice.append(entry)
         except Exception:
             traceback.print_exc()
 
@@ -969,6 +1031,14 @@ class Engine:
         except Exception:
             pass
         self._cached_rows = None
+
+    def set_dingque_override(self, suit) -> None:
+        """手动指定定缺花色（0=万, 1=筒, 2=条，其它=解除覆盖自动感知）。"""
+        try:
+            s = int(suit) if suit is not None else -1
+            self._dingque_override = s if 0 <= s <= 2 else None
+        except Exception:
+            self._dingque_override = None
 
     def process_bytes(self, image_data) -> Optional[EngineResult]:
         try:
@@ -1196,12 +1266,19 @@ class Engine:
         det = self.get_detector()
         if det is None:
             return 0, image
-        variants = [
-            (0, image),
-            (90, cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)),
-            (180, cv2.rotate(image, cv2.ROTATE_180)),
-            (270, cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)),
-        ]
+        is_landscape = (image.shape[1] > image.shape[0])
+        if is_landscape:
+            variants = [
+                (0, image),
+                (180, cv2.rotate(image, cv2.ROTATE_180)),
+            ]
+        else:
+            variants = [
+                (0, image),
+                (90, cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)),
+                (180, cv2.rotate(image, cv2.ROTATE_180)),
+                (270, cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)),
+            ]
 
         # ---------- 阶段 A：几何筛选 ----------
         geo = []
@@ -1319,12 +1396,19 @@ class Engine:
                     # 仍能正确分类（conf 0.79），n=9 也能过 n>=8 ——
                     # 但万/索牌倒置后被判成字牌，行长从 13 掉到 9。
                     # 用手牌行长度判据即可区分（原图 13 >= 11，旋转 180 只有 9）。
-                    has_hand_row = any(len(r) >= 11 for r in rows)
+                    hsizes = hand_sizes(self.mode)
+                    has_hand_row = any(len(r) in hsizes or len(r) >= 7 for r in rows)
                     # 位置判据（必需）：手牌行必须在画面下半部。
                     # 只靠 len>=11 + avg_conf 会把 180° 倒置图误判成正确朝向 ——
                     # 倒置时手牌行仍能切出 11 张（万牌被丢弃，13->11）且
                     # avg_conf 因存活者偏差反而更高（0.882 > 0.860）。
                     at_bottom = self._longest_row_at_bottom(rows, image.shape[0])
+                    is_landscape = (image.shape[1] > image.shape[0])
+                    if is_landscape and at_bottom and (has_hand_row or n >= 4):
+                        self._orient = 0
+                        self._orient_zerocount = 0
+                        self._cached_rows = rows
+                        return image
                     if has_hand_row and avg_conf >= 0.50 and at_bottom:
                         self._orient = 0
                         self._orient_zerocount = 0
@@ -1351,29 +1435,8 @@ class Engine:
                 return _error_result("decode_error",
                                      "图像数据非法（空/坏尺寸/坏 dtype），已安全跳过")
 
-            # ===== 方向归一（旋转鲁棒性）=====
-            # 必须在帧差/检测之前做，保证后续所有几何都基于规范朝向。
-            # 方向探测涉及 cv2.rotate 和多次完整检测，是最容易触发原生崩溃
-            # 的环节之一。先包一层 try/except：即使方向探测崩了，也回退
-            # 到原图继续识别，至少不会闪退。
-            try:
-                image = self._apply_orientation(image)
-            except Exception as e:
-                traceback.print_exc()
-                print(f"[engine] 方向归一异常，回退到原图: {e}")
-                # 重置方向锁，下一帧重新探测
-                self._orient = None
-
-            # 全图（方向归一后）留作预览用：无论用户是否框选 ROI，发给
-            # 悬浮窗的预览都画的是整屏，这样"识别框"的比例才是相对整屏的，
-            # 拖动对准才直观。
-            full_for_preview = image
-
             # ===== 超大图降采样（防爆内存原生崩溃）=====
-            # 真机某些机型/分辨率下 imdecode 出来的图可能极大（≥4000px 边），
-            # 后续 FFT 自相关 / 多帧投票 / 预览会在 C 层吃下远超常量的内存，
-            # 触发 OOM 或 SIGSEGV 闪退。这里把最长边压到 MAX_INPUT_LONG_EDGE
-            # 以内再继续。注意预览图用同一张降采样后的全图，清晰度已足够。
+            # 必须在方向探测/切牌之前做，保证后续所有几何坐标与缓存完全一致。
             try:
                 ih, iw = image.shape[:2]
                 long_edge = max(ih, iw)
@@ -1384,9 +1447,21 @@ class Engine:
                     image = cv2.resize(
                         image, (new_w, new_h),
                         interpolation=cv2.INTER_AREA)
-                    full_for_preview = image
             except Exception:
                 pass
+
+            # ===== 方向归一（旋转鲁棒性）=====
+            # 必须在帧差/检测之前做，保证后续所有几何都基于规范朝向。
+            try:
+                image = self._apply_orientation(image)
+            except Exception as e:
+                traceback.print_exc()
+                print(f"[engine] 方向归一异常，回退到原图: {e}")
+                # 重置方向锁，下一帧重新探测
+                self._orient = None
+
+            # 全图（方向归一后）留作预览与定缺用
+            full_for_preview = image
 
             # ===== 用户 ROI 裁剪 =====
             # 只识别 [top,bottom] 纵向比例带内的画面。默认 None = 整屏。
@@ -1538,55 +1613,6 @@ class Engine:
                     fr.append((r, lab, c))
                 filtered.append(fr)
 
-            # ===== TFLite 二次确认（可选、可热更、未来 hook）=====
-            # 在 structural.py 几何判定后、投票前，对每张已通过 _apply_conf 的牌
-            # 再用 TFLite 模型"看一眼"。**TFLite 任何故障都静默 fallback**：
-            #   - 模型未部署（is_available()=False）→ 整段跳过，behavior 退化为纯 structural
-            #   - predict 异常/超时/None → 该牌保留 structural 标签
-            #   - tflite conf < HIGH_CONF → 不覆盖，保留 structural
-            # 仅当 tflite conf ≥ HIGH_CONF（极高置信度）才覆盖 structural 的标签，
-            # 防止低 acc 模型污染识别。
-            # 当前 v3 模型（272 张/34 类）acc ≈14%、top-1 conf ≤0.09，远低于门槛，
-            # **本轮对线上识别 0 贡献**——但代码完整，未来 fine-tune 提升 acc 后自动启用。
-            try:
-                from recognition import tflite_classifier  # noqa: E402
-                HIGH_CONF = 0.70
-                if tflite_classifier.is_available():
-                    crops: list = []
-                    crop_locs: list = []  # (row_idx, det_idx)
-                    for ri, row in enumerate(filtered):
-                        for di, (r, l, c) in enumerate(row):
-                            if l is None:
-                                continue
-                            x, y, w, h = r
-                            if h <= 0 or w <= 0:
-                                continue
-                            crop = image[y:y + h, x:x + w]
-                            if crop.size == 0:
-                                continue
-                            crops.append(crop)
-                            crop_locs.append((ri, di))
-                    if crops:
-                        preds = tflite_classifier.predict_batch(crops)
-                        n_overridden = 0
-                        for (ri, di), p in zip(crop_locs, preds):
-                            if p is None:
-                                continue
-                            if p["confidence"] < HIGH_CONF:
-                                continue
-                            r, l_orig, c_orig = filtered[ri][di]
-                            if p["tile"] != l_orig:
-                                # 用 tflite 高置信覆盖；同时提升 conf，避免被
-                                # 后续 _apply_conf 二次过滤掉
-                                filtered[ri][di] = (r, p["tile"],
-                                                     max(c_orig, p["confidence"]))
-                                n_overridden += 1
-                        if n_overridden:
-                            print(f"[engine] tflite 高置信覆盖 {n_overridden} 张")
-            except Exception as e:  # noqa: BLE001
-                # 任何导入/调用异常 → 静默降级，不影响主流程
-                pass
-
             # 多帧投票：把所有牌（含牌河）按位置投入投票窗口，挡掉单帧抖动
             # （尤其筒/索被误判成白板的刷屏）。跨行 y 差距大不会串。
             flat = [(r, l, c) for row in filtered for (r, l, c) in row]
@@ -1630,15 +1656,64 @@ class Engine:
                 for (rect, label, conf) in row:
                     if label is not None:
                         discard_labels.append(label)
-            disc_mpsz = self._labels_to_mpsz(discard_labels, avail)
-            disc_counts = [0] * 34
+
+            # ---- 摸牌独立判定 (基于物理间距 Physical Gap) ----
+            is_drawing = False
+            drawing_tile = None
+            if hand_row and len(hand_row) >= 2:
+                sorted_hand = sorted(hand_row, key=lambda d: d[0][0])
+                n_tiles = len(sorted_hand)
+                if n_tiles in (14, 11, 8, 5, 2):
+                    gaps = [
+                        sorted_hand[i + 1][0][0] - (sorted_hand[i][0][0] + sorted_hand[i][0][2])
+                        for i in range(n_tiles - 1)
+                    ]
+                    last_gap = gaps[-1]
+                    avg_w = sum(d[0][2] for d in sorted_hand) / n_tiles
+                    normal_gaps = gaps[:-1]
+                    avg_normal_gap = sum(normal_gaps) / len(normal_gaps) if normal_gaps else 0.0
+                    if last_gap > max(8, avg_w * 0.25) or (len(gaps) > 1 and last_gap - avg_normal_gap > avg_w * 0.2):
+                        is_drawing = True
+                        drawing_tile = sorted_hand[-1][1]
+
+            # 牌池单调累加器：同局内牌池只增不减，防止由于动画/飞牌/气泡遮挡导致牌池牌数掉落
             for lab in discard_labels:
+                if lab:
+                    cnt = discard_labels.count(lab)
+                    if cnt > self._monotonic_discards[lab]:
+                        self._monotonic_discards[lab] = cnt
+
+            # 计算手牌各牌计数
+            hand_counts = [0] * 34
+            if hand_mpsz:
+                for i in range(0, len(hand_mpsz), 2):
+                    try:
+                        hand_counts[mpsz_to_tile34_index(hand_mpsz[i:i + 2])] += 1
+                    except Exception:
+                        pass
+
+            # 108 张牌物理守恒校验：hand_counts[idx] + disc_counts[idx] <= 4
+            disc_counts = [0] * 34
+            for lab, cnt in self._monotonic_discards.items():
                 try:
-                    disc_counts[mpsz_to_tile34_index(lab)] += 1
+                    idx = mpsz_to_tile34_index(lab)
+                    max_allowed = max(0, 4 - hand_counts[idx])
+                    disc_counts[idx] = min(cnt, max_allowed)
                 except Exception:
                     pass
+            disc_mpsz = self._labels_to_mpsz([lab for lab, cnt in self._monotonic_discards.items() for _ in range(cnt)], avail)
 
             hand = TileCollection.from_mpsz(hand_mpsz) if hand_mpsz else None
+
+            # 定缺检测（四川麻将模式：支持手动覆盖与视觉自动感知双通道）
+            dingque_suit, dingque_name = None, None
+            if self.mode == "sc":
+                override = getattr(self, "_dingque_override", None)
+                if override is not None and 0 <= override <= 2:
+                    dingque_suit = override
+                    dingque_name = ['万', '筒', '条'][dingque_suit]
+                else:
+                    dingque_suit, dingque_name = detect_dingque(full_for_preview)
 
             status = "no_tiles"
             commentary: Optional[str] = None
@@ -1656,6 +1731,8 @@ class Engine:
                 # 脏 hand，于是闪出一副错牌，下一帧又闪回来。
                 status = "ok"
                 commentary = self.update_trainer(hand)
+                if self.mode == "sc" and dingque_suit is not None and self.trainer is not None:
+                    self.trainer.set_dingque(dingque_suit)
                 shanten, advice = self.build_advice(hand, disc_counts)
                 self._stable_hand_mpsz = hand_mpsz
                 self._stable_hand_count = tile_count
@@ -1694,24 +1771,21 @@ class Engine:
                     tile_count = len(self._partial_mpsz) // 2
                     hand_mpsz = self._partial_mpsz
 
-            # 标记"最优"那张牌（最高 ukeire），UI 上加"最优"角标
+            # 标记"最优"那张牌（最高 EV 或最高 ukeire），UI 上加"最优"角标
             if advice:
-                top_ukeire = max((a.get('ukeire') or 0) for a in advice)
-                for a in advice:
-                    if (a.get('ukeire') or 0) == top_ukeire:
-                        best = str(a.get('tile') or "")
-                        break
+                if self.mode == "sc":
+                    best = str(advice[0].get("tile") or "")
+                else:
+                    top_ukeire = max((a.get('ukeire') or 0) for a in advice)
+                    for a in advice:
+                        if (a.get('ukeire') or 0) == top_ukeire:
+                            best = str(a.get('tile') or "")
+                            break
 
             # ---- 剩余牌 / 绝张统计（基于当前玩法的可见域）----
             # 可见域 = 自己手牌 + 牌河所有打出的牌（副露未知，按 0 计）。
             # 墙内剩余 = 该玩法总牌数 - 可见；绝张 = 某型 4 张已全部可见，
             # 这种牌既不可能摸到、也不该被推荐打出（进张已为 0）。
-            hand_counts = [0] * 34
-            for i in range(0, len(hand_mpsz), 2):
-                try:
-                    hand_counts[mpsz_to_tile34_index(hand_mpsz[i:i + 2])] += 1
-                except Exception:
-                    pass
             avail_list = sorted(avail)
             known = sum(hand_counts[i] for i in avail_list) + sum(disc_counts[i] for i in avail_list)
             wall_total = len(avail_list) * 4
@@ -1756,6 +1830,21 @@ class Engine:
                     remaining = max(0, wall_total - known)
                     dead = sum(1 for i in avail_list if hand_counts[i] + fc[i] >= 4)
             self._discard_history.append(disc_mpsz)
+
+            # ---- 9x3 剩余牌矩阵面板 ----
+            if self.mode == "sc":
+                remaining_matrix = {
+                    "m": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(0, 9)],
+                    "p": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(9, 18)],
+                    "s": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(18, 27)],
+                }
+            else:
+                remaining_matrix = {
+                    "m": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(0, 9)],
+                    "p": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(9, 18)],
+                    "s": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(18, 27)],
+                    "z": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(27, 34)],
+                }
 
             # ===== 方向自愈：连续 3 帧整帧 0 牌 → 解锁重探方向 =====
             # 用户中途旋转手机/切后台再回来，VirtualDisplay 朝向可能变了，
@@ -1824,6 +1913,8 @@ class Engine:
             result = {
                 "mode": self.mode,
                 "mode_name": MODES.get(self.mode, {}).get("name", self.mode),
+                "dingque": dingque_name,
+                "dingque_suit": dingque_suit,
                 "diag": {
                     "raw": sum(len(r) for r in rows),
                     "rows": row_stats,
@@ -1842,6 +1933,9 @@ class Engine:
                 "discard_count": len(discarded_labels_out),
                 "remaining": remaining,
                 "dead": dead,
+                "remaining_matrix": remaining_matrix,
+                "is_drawing": is_drawing,
+                "drawing_tile": drawing_tile,
                 "tiles": all_tiles,
                 # 最近一帧的最高模板匹配分（无论是否过阈）。
                 "top_score": round(float(getattr(detector, "last_top_score", 0.0)), 3),

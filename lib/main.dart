@@ -1,9 +1,7 @@
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
-import 'package:auto_vision/activation.dart';
 import 'package:auto_vision/home_page.dart';
-import 'package:auto_vision/license_gate.dart';
 import 'package:auto_vision/overlays/mahjong_overlay.dart';
 
 void main() {
@@ -95,58 +93,21 @@ void overlayMain() {
     MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: _appTheme,
-      home: MahjongOverlay(),
+      home: const MahjongOverlay(),
     ),
   );
 }
 
-class MyApp extends StatefulWidget {
+class MyApp extends StatelessWidget {
   const MyApp({Key? key}) : super(key: key);
 
   @override
-  State<MyApp> createState() => _MyAppState();
-}
-
-class _MyAppState extends State<MyApp> {
-  // 启动时读取本地激活状态：已激活则直接进入主页，未激活才显示卡密页。
-  bool? _activated;
-
-  @override
-  void initState() {
-    super.initState();
-    isActivated().then((v) {
-      if (mounted) setState(() => _activated = v);
-    });
-  }
-
-  @override
   Widget build(BuildContext context) {
-    late final Widget home;
-    if (_activated == null) {
-      // 读取激活状态期间显示一个极简 loading，避免首帧白屏/闪烁。
-      home = const _Splash();
-    } else {
-      home = _activated! ? const HomePage() : const LicenseGate();
-    }
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: _appTheme,
-      home: home,
+      home: const HomePage(),
     );
   }
 }
 
-/// 启动占位页：仅在读取本地激活状态的极短时间内显示。
-class _Splash extends StatelessWidget {
-  const _Splash();
-
-  @override
-  Widget build(BuildContext context) {
-    return const Scaffold(
-      backgroundColor: Color(0xFF0E1116),
-      body: Center(
-        child: CircularProgressIndicator(color: Color(0xFF00695C)),
-      ),
-    );
-  }
-}

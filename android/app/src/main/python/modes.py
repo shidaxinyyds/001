@@ -26,7 +26,7 @@ from typing import Dict, List, Set
 # Java / Chaquopy-Python 与 Dart 都能读写，无需任何额外权限。
 MODE_PATH = "/storage/emulated/0/Android/data/com.example.auto_vision/files/mahjong_mode.json"
 
-DEFAULT_MODE = "4p"
+DEFAULT_MODE = "sc"
 
 # 34 型索引约定（与 trainer/utils/convert.py 相同）：
 #   0-8   1m..9m
@@ -47,6 +47,13 @@ _SANMA_REMOVED = [1, 7, 10, 16, 19, 25, 31]
 _TWOP_REMOVED = list(range(9, 27))
 
 MODES: Dict[str, Dict] = {
+    "sc": {
+        "name": "川麻血战",
+        "players": 4,
+        "available": list(range(27)) + [33],  # 0-26 万筒条各9张共27种，+ 33(7z 红中/赖子)
+        "hand_sizes": (14, 13, 11, 10, 8, 7, 5, 4, 2, 1),
+        "wall": 108,
+    },
     "4p": {
         "name": "四麻",
         "players": 4,

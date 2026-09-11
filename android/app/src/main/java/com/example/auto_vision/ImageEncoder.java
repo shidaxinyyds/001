@@ -20,7 +20,14 @@ public class ImageEncoder {
 
   public static byte[] encodeImageToByteArray(Image image) {
     Bitmap bitmap = imageToBitmap(image);
-    return bitmapToByteArray(bitmap);
+    if (bitmap == null) {
+      return null;
+    }
+    try {
+      return bitmapToByteArray(bitmap);
+    } finally {
+      bitmap.recycle();
+    }
   }
 
   private static Bitmap imageToBitmap(Image image) {
@@ -37,14 +44,22 @@ public class ImageEncoder {
     int pixelStride = planes[0].getPixelStride();
     int rowStride = planes[0].getRowStride();
     int rowPadding = rowStride - pixelStride * width;
-    Bitmap bitmap = Bitmap.createBitmap(
+
+    if (rowPadding == 0) {
+      Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+      bitmap.copyPixelsFromBuffer(buffer);
+      return bitmap;
+    }
+
+    Bitmap rawBitmap = Bitmap.createBitmap(
       width + rowPadding / pixelStride,
       height,
       Bitmap.Config.ARGB_8888
     );
-    bitmap.copyPixelsFromBuffer(buffer);
-    bitmap = Bitmap.createBitmap(bitmap, 0, 0, width, height);
-    return bitmap;
+    rawBitmap.copyPixelsFromBuffer(buffer);
+    Bitmap cropped = Bitmap.createBitmap(rawBitmap, 0, 0, width, height);
+    rawBitmap.recycle();
+    return cropped;
   }
 
   private static byte[] bitmapToByteArray(Bitmap bitmap) {

@@ -110,6 +110,14 @@ public class MainActivity extends FlutterActivity {
         return;
       }
 
+      if (call.method.equals("setDingque")) {
+        Object aSuit = call.argument("suit");
+        int suit = (aSuit instanceof Number) ? ((Number) aSuit).intValue() : -1;
+        ImageProcessor.setDingque(suit);
+        result.success(0);
+        return;
+      }
+
       if (call.method.equals("setConfig")) {
         // 调试页开关：实时修改识别策略（自动旋转/冷启动/严格门槛）。
         Object aKey = call.argument("key");
@@ -362,23 +370,23 @@ public class MainActivity extends FlutterActivity {
       byte[] buf = new byte[(int) f.length()];
       try (java.io.FileInputStream in = new java.io.FileInputStream(f)) {
         int n = in.read(buf);
-        if (n <= 0) return "4p";
+        if (n <= 0) return "sc";
       }
       String s = new String(buf, 0, buf.length, "UTF-8").trim();
       java.util.regex.Matcher mc = java.util.regex.Pattern
-          .compile("\"mode\"\\s*:\\s*\"([234]p)\"").matcher(s);
-      return mc.find() ? mc.group(1) : "4p";
+          .compile("\"mode\"\\s*:\\s*\"(sc|[234]p)\"").matcher(s);
+      return mc.find() ? mc.group(1) : "sc";
     } catch (Throwable t) {
       TimedLog.e(TAG, "readModeFile failed: " + t);
-      return "4p";
+      return "sc";
     }
   }
 
-  // 把玩法写入共享文件，供 Python 引擎每帧读取。mode 仅接受 "2p"/"3p"/"4p"。
+  // 把玩法写入共享文件，供 Python 引擎每帧读取。mode 接受 "sc"/"2p"/"3p"/"4p"。
   private int writeModeFile(String mode) {
     if (mode == null) return -1;
     String m = mode.trim().toLowerCase();
-    if (!Pattern.matches("[234]p", m)) return -2;
+    if (!Pattern.matches("(sc|[234]p)", m)) return -2;
     try {
       File dir = getApplicationContext().getExternalFilesDir(null);
       if (dir == null) return -3;

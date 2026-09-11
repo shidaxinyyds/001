@@ -12,12 +12,14 @@ import 'channel.dart';
 ///   不一致引发的"两边值对不上"的隐患。
 class GameMode {
   static const MethodChannel _ch = MethodChannel(CHANNEL_NAME);
-  static const String defaultMode = '4p';
-  static const List<String> allowed = ['2p', '3p', '4p'];
+  static const String defaultMode = 'sc';
+  static const List<String> allowed = ['sc', '4p', '3p', '2p'];
 
   /// 友好名（主页显示用）。
   static String label(String mode) {
     switch (mode) {
+      case 'sc':
+        return '川麻血战';
       case '2p':
         return '二人';
       case '3p':

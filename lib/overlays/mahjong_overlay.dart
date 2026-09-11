@@ -1,10 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'package:auto_vision/config_store.dart';
 import 'package:auto_vision/overlays/tile_labels.dart';
@@ -36,6 +36,7 @@ class TileChip extends StatelessWidget {
   // 且别人也几乎不可能拿它和牌 —— App 自动算出来的、肉眼看不出来的高价值信号。
   // 配色：灰底 + 青绿描边 + 「绝」白底青字标，绝对不用红/橙/琥珀。
   final bool dead;
+  final bool isDrawing;
 
   const TileChip({
     super.key,
@@ -43,6 +44,7 @@ class TileChip extends StatelessWidget {
     this.size = 26,
     this.dim = false,
     this.dead = false,
+    this.isDrawing = false,
   });
 
   @override
@@ -63,15 +65,16 @@ class TileChip extends StatelessWidget {
       // 条：草绿色
       charColor = const Color(0xFF2E7D32);
     } else {
-      // 字牌：所有字牌统一深灰（"中" 也用深灰，不再红字 —— 红字会被误认为错误状态）。
-      // 麻将牌"中"本身是红字，但此处遵循"界面任何状态下都不显示红色字符"的约束。
+      // 字牌：所有字牌统一深灰
       charColor = const Color(0xFF202124);
     }
 
     // 绝张的牌面底色换成中性灰，并加一道青绿描边把它从普通牌里顶出来 —— 一眼可见。
     final Color tileBg = dead ? const Color(0xFFBDBDBD) : const Color(0xFFF7F3E8);
-    final Color tileBorder = dead ? const Color(0xFF00695C) : const Color(0xFFB7A98F);
-    final double tileBorderW = dead ? 1.0 : 0.6;
+    final Color tileBorder = isDrawing
+        ? const Color(0xFFFFD54F)
+        : (dead ? const Color(0xFF00695C) : const Color(0xFFB7A98F));
+    final double tileBorderW = (dead || isDrawing) ? 1.2 : 0.6;
 
     return Opacity(
       opacity: dim ? 0.45 : 1.0,
@@ -85,8 +88,8 @@ class TileChip extends StatelessWidget {
           border: Border.all(color: tileBorder, width: tileBorderW),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withAlpha(40),
-              blurRadius: 1,
+              color: isDrawing ? const Color(0x66FFD54F) : Colors.black.withAlpha(40),
+              blurRadius: isDrawing ? 3 : 1,
               offset: const Offset(0, 0.5),
             ),
           ],
@@ -107,6 +110,28 @@ class TileChip extends StatelessWidget {
                 ),
               ),
             ),
+            if (isDrawing)
+              Positioned(
+                left: -4,
+                top: -4,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 2.5, vertical: 0.5),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF2E7D32),
+                    borderRadius: BorderRadius.circular(3),
+                    border: Border.all(color: const Color(0xFFFFD54F), width: 0.8),
+                  ),
+                  child: const Text(
+                    '摸',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 7,
+                      fontWeight: FontWeight.bold,
+                      height: 1.0,
+                    ),
+                  ),
+                ),
+              ),
             if (dead)
               Positioned(
                 right: -4,
@@ -142,11 +167,13 @@ class HandChipRow extends StatelessWidget {
   final String hand; // mpsz 形式
   final double chipSize;
   final Set<String>? deadTiles;
+  final String? drawingTile;
   const HandChipRow({
     super.key,
     required this.hand,
     this.chipSize = 24,
     this.deadTiles,
+    this.drawingTile,
   });
 
   @override
@@ -163,6 +190,7 @@ class HandChipRow extends StatelessWidget {
                 tile: t,
                 size: chipSize,
                 dead: deadTiles?.contains(t) ?? false,
+                isDrawing: drawingTile != null && t == drawingTile,
               ))
           .toList(),
     );
@@ -250,9 +278,11 @@ class AdviceCard extends StatelessWidget {
   final bool best;
   // 危险牌预警（防点炮 / 防杠）：仅当调试页对应开关开启、且引擎算出该字段时非空。
   // 值：deal_in ∈ {"safe","risky"}；pon_kong ∈ {"safe","mid","risky"}。
-  // 来自引擎 build_advice，悬浮窗视自身渲染能力决定是否展示。
   final String? dealIn;
   final String? ponKong;
+  final String? reason;
+  final bool isDingque;
+
   const AdviceCard({
     super.key,
     required this.tile,
@@ -260,6 +290,8 @@ class AdviceCard extends StatelessWidget {
     this.best = false,
     this.dealIn,
     this.ponKong,
+    this.reason,
+    this.isDingque = false,
   });
 
   @override
@@ -300,8 +332,6 @@ class AdviceCard extends StatelessWidget {
                 TextSpan(
                   text: '$ukeire',
                   style: TextStyle(
-                    // 用浅蓝替代琥珀 —— 不再出现任何琥珀/橙黄色（与琥珀相邻的
-                    // 色域容易被误认成红色，且琥珀与"错误/警告"语义过近）。
                     color: best ? Colors.lightGreenAccent : Colors.lightBlueAccent,
                     fontSize: 14,
                     fontWeight: FontWeight.bold,
@@ -323,6 +353,24 @@ class AdviceCard extends StatelessWidget {
                 if (dealIn != null) _dangerTag('防点炮', dealIn!),
                 if (ponKong != null) _dangerTag('防杠', ponKong!),
               ],
+            ),
+          ],
+          if (isDingque) ...[
+            const SizedBox(width: 6),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+              decoration: BoxDecoration(
+                color: const Color(0xFF00695C),
+                borderRadius: BorderRadius.circular(3),
+              ),
+              child: const Text(
+                '定缺',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 9,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
             ),
           ],
           if (best) ...[
@@ -372,6 +420,12 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   Timer? _adviceTimer;
 
   static const double collapsed = 56;
+  // 胶囊微缩模式：收起态下在屏幕边缘显示小巧横条，展示听牌/最优打法与定缺
+  bool _capsuleMode = true;
+  static const double _kCapsuleW = 208;
+  static const double _kCapsuleH = 46;
+  // 9x3 剩余牌矩阵面板折叠态
+  bool _matrixExpanded = true;
   double panelW = 296;
   // 默认高度含预览区（~150）+ 三段；加大到 540 让首屏即可看清识别框与建议。
   double panelH = 540;
@@ -551,7 +605,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     // 因此这里由悬浮窗自身按 dp 重新设定一次尺寸。
     // 注意：resizeOverlay 走的是悬浮窗引擎的通道，只有悬浮窗自己调用才生效。
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _ensureSize(collapsed, collapsed);
+      final double w = _capsuleMode ? _kCapsuleW : collapsed;
+      final double h = _capsuleMode ? _kCapsuleH : collapsed;
+      _ensureSize(w, h);
     });
 
     // 玩法文件已改由主页通过 Java MethodChannel 写入；这里不再读 dart:io 文件。
@@ -715,7 +771,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     });
   }
 
-  // 悬浮按钮点击：在"仅按钮"与"分析面板"之间切换（窗口始终常驻在屏幕上）
+  // 悬浮按钮点击：在"仅按钮/胶囊"与"分析面板"之间切换（窗口始终常驻在屏幕上）
   Future<void> _togglePanel() async {
     if (!mounted) return;
     final next = !panelVisible;
@@ -725,7 +781,45 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     if (next) {
       await _ensureSize(panelW, panelH);
     } else {
-      await _ensureSize(collapsed, collapsed);
+      final double w = _capsuleMode ? _kCapsuleW : collapsed;
+      final double h = _capsuleMode ? _kCapsuleH : collapsed;
+      await _ensureSize(w, h);
+    }
+  }
+
+  // 切换胶囊模式与圆形悬浮球模式
+  Future<void> _toggleCapsuleMode() async {
+    if (!mounted) return;
+    final next = !_capsuleMode;
+    setState(() {
+      _capsuleMode = next;
+    });
+    if (!panelVisible) {
+      final double w = next ? _kCapsuleW : collapsed;
+      final double h = next ? _kCapsuleH : collapsed;
+      await _ensureSize(w, h);
+    }
+  }
+
+  // 循环切换定缺花色（万 -> 筒 -> 条 -> 自动感知）
+  Future<void> _cycleDingque() async {
+    final dynamic rawSuit = result?['dingque_suit'];
+    final int current = (rawSuit is int) ? rawSuit : -1;
+    final int next;
+    if (current == -1) {
+      next = 0; // 万
+    } else if (current == 0) {
+      next = 1; // 筒
+    } else if (current == 1) {
+      next = 2; // 条
+    } else {
+      next = -1; // 自动感知
+    }
+    try {
+      await const MethodChannel('com.example.realtime_mahjong_trainer/channel')
+          .invokeMethod('setDingque', {'suit': next});
+    } catch (e) {
+      print('定缺切换失败: $e');
     }
   }
 
@@ -954,6 +1048,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final shanten = result?['shanten'];
     return GestureDetector(
       onTap: _togglePanel,
+      onLongPress: _toggleCapsuleMode,
       child: Container(
         width: size,
         height: size,
@@ -994,6 +1089,283 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               ),
           ],
         ),
+      ),
+    );
+  }
+
+  // 定缺状态徽章（支持点击交互快速循环切换：万 -> 筒 -> 条 -> 自动）
+  Widget _dingqueBadge() {
+    final dingque = result?['dingque'];
+    final dynamic rawSuit = result?['dingque_suit'];
+    final int suitIdx = (rawSuit is int) ? rawSuit : -1;
+    final String label = dingque != null ? '缺$dingque' : '定缺';
+    final Color badgeBg;
+    if (suitIdx == 0) {
+      badgeBg = const Color(0xFFC62828); // 万-深红
+    } else if (suitIdx == 1) {
+      badgeBg = const Color(0xFFEF6C00); // 筒-深橙
+    } else if (suitIdx == 2) {
+      badgeBg = const Color(0xFF2E7D32); // 条-深绿
+    } else {
+      badgeBg = const Color(0xFF455A64); // 自动-蓝灰
+    }
+
+    return GestureDetector(
+      onTap: _cycleDingque,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+        decoration: BoxDecoration(
+          color: badgeBg,
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(color: Colors.white70, width: 0.8),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              label,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 9.5,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(width: 2),
+            const Icon(Icons.sync, color: Colors.white70, size: 9),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // 收起态：胶囊微缩模式（横向微缩条，不遮挡牌局，实时展示听牌/最优打法/定缺）
+  Widget _miniCapsule() {
+    final shanten = result?['shanten'];
+    final dingque = result?['dingque'];
+    final adviceList = _shownAdvice.isNotEmpty ? _shownAdvice : (result?['advice'] as List<dynamic>? ?? const []);
+    final topAdvice = adviceList.isNotEmpty ? adviceList[0] as Map<dynamic, dynamic>? : null;
+    final String bestTile = _shownBest.isNotEmpty ? _shownBest : (result?['best'] ?? '');
+    final String tileStr = (topAdvice != null && topAdvice['tile'] != null) ? topAdvice['tile'] as String : bestTile;
+    final int ukeire = (topAdvice != null && topAdvice['ukeire'] is int) ? topAdvice['ukeire'] as int : 0;
+    final String? reason = (topAdvice != null && topAdvice['reason'] is String) ? topAdvice['reason'] as String : null;
+
+    return GestureDetector(
+      onTap: _togglePanel,
+      onLongPress: _toggleCapsuleMode,
+      child: Container(
+        height: _kCapsuleH,
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        decoration: BoxDecoration(
+          color: const Color(0xF21B2620), // 墨绿半透明底色
+          borderRadius: BorderRadius.circular(23),
+          border: Border.all(color: const Color(0xFF80CBC4), width: 1.2),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withAlpha(140),
+              blurRadius: 8,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            // 向听数徽章
+            if (shanten != null && shanten is int)
+              _ShantenBadge(shanten: shanten, size: 36)
+            else
+              const MahjongTileIcon(size: 20),
+            const SizedBox(width: 5),
+            if (dingque != null && dingque.toString().isNotEmpty) ...[
+              GestureDetector(
+                onTap: _cycleDingque,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF004D40),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: const Color(0xFF80CBC4), width: 0.6),
+                  ),
+                  child: Text(
+                    '缺$dingque',
+                    style: const TextStyle(
+                      color: Color(0xFFE0F2F1),
+                      fontSize: 9,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 4),
+            ],
+            if (tileStr.isNotEmpty) ...[
+              const Text(
+                '打',
+                style: TextStyle(color: Colors.white70, fontSize: 10.5),
+              ),
+              const SizedBox(width: 2),
+              TileChip(tile: tileStr, size: 19),
+              const SizedBox(width: 3),
+              Flexible(
+                child: Text(
+                  ukeire > 0 ? '进$ukeire张' : (reason ?? '最优'),
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.lightGreenAccent,
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ] else ...[
+              const Text(
+                '分析中…',
+                style: TextStyle(color: Colors.white70, fontSize: 10.5),
+              ),
+            ],
+            const SizedBox(width: 2),
+            const Icon(Icons.chevron_right, color: Colors.white54, size: 14),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // 9×3 剩余存活牌矩阵面板（万/筒/条 各 9 种牌当前牌池/手牌扣除后的剩余存活数 0~4）
+  Widget _remainingMatrixSection(Map<String, dynamic>? matrix) {
+    if (matrix == null) return const SizedBox.shrink();
+    final List<dynamic>? m = matrix['m'] as List<dynamic>?;
+    final List<dynamic>? p = matrix['p'] as List<dynamic>?;
+    final List<dynamic>? s = matrix['s'] as List<dynamic>?;
+    if (m == null || p == null || s == null) return const SizedBox.shrink();
+
+    Widget buildRow(String suitName, Color labelColor, List<dynamic> counts) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 1.0),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 14,
+              child: Text(
+                suitName,
+                style: TextStyle(
+                  color: labelColor,
+                  fontSize: 9.5,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            const SizedBox(width: 4),
+            Expanded(
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: List.generate(9, (idx) {
+                  final int cnt = (counts.length > idx && counts[idx] is int) ? counts[idx] as int : 0;
+                  final Color numColor;
+                  final Color cellBg;
+                  if (cnt == 0) {
+                    numColor = Colors.white24;
+                    cellBg = Colors.white.withAlpha(4);
+                  } else if (cnt == 1) {
+                    numColor = const Color(0xFFFFB74D); // 仅剩1张预警
+                    cellBg = const Color(0x33FFB74D);
+                  } else {
+                    numColor = const Color(0xFF81C784); // 2~4张充足
+                    cellBg = const Color(0x2281C784);
+                  }
+
+                  return Container(
+                    width: 23,
+                    height: 25,
+                    decoration: BoxDecoration(
+                      color: cellBg,
+                      borderRadius: BorderRadius.circular(3),
+                      border: Border.all(
+                        color: cnt == 0
+                            ? Colors.white10
+                            : (cnt == 1 ? const Color(0x66FFB74D) : const Color(0x4481C784)),
+                        width: 0.5,
+                      ),
+                    ),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          '${idx + 1}',
+                          style: TextStyle(
+                            color: labelColor.withAlpha(cnt == 0 ? 70 : 220),
+                            fontSize: 7.5,
+                            fontWeight: FontWeight.w600,
+                            height: 1.0,
+                          ),
+                        ),
+                        const SizedBox(height: 1),
+                        Text(
+                          '$cnt',
+                          style: TextStyle(
+                            color: numColor,
+                            fontSize: 9.5,
+                            fontWeight: FontWeight.bold,
+                            height: 1.0,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(8),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              const Text(
+                '9×3 剩余存活牌',
+                style: TextStyle(
+                  color: Colors.white70,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.3,
+                ),
+              ),
+              const Spacer(),
+              GestureDetector(
+                onTap: () => setState(() => _matrixExpanded = !_matrixExpanded),
+                behavior: HitTestBehavior.opaque,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                  child: Text(
+                    _matrixExpanded ? '收起 ▾' : '展开 ▸',
+                    style: const TextStyle(
+                      color: Color(0xFF80CBC4),
+                      fontSize: 9.5,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (_matrixExpanded) ...[
+            const SizedBox(height: 3),
+            buildRow('万', const Color(0xFF1E6B7A), m),
+            buildRow('筒', const Color(0xFF1E6B7A), p),
+            buildRow('条', const Color(0xFF66BB6A), s),
+          ],
+        ],
       ),
     );
   }
@@ -1052,14 +1424,22 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                         ),
                       ),
                     ),
-                    Expanded(child: HandChipRow(hand: grouped[k]!.join(), chipSize: 20)),
-                  ],
-                ),
-              ),
-        ],
-      ),
-    );
-  }
+                     Expanded(
+                       child: HandChipRow(
+                         hand: grouped[k]!.join(),
+                         chipSize: 20,
+                         drawingTile: result?['is_drawing'] == true
+                             ? (result?['drawing_tile'] as String?)
+                             : null,
+                       ),
+                     ),
+                   ],
+                 ),
+               ),
+         ],
+       ),
+     );
+   }
 
   Widget _adviceSection(List<dynamic> advice, String best, int count) {
     if (advice.isEmpty) {
@@ -1100,6 +1480,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             best: best.isNotEmpty && sorted[i]['tile'] == best,
             dealIn: sorted[i]['deal_in'] as String?,
             ponKong: sorted[i]['pon_kong'] as String?,
+            reason: sorted[i]['reason'] as String?,
+            isDingque: (sorted[i]['is_dingque'] ?? false) as bool,
           ),
       ],
     );
@@ -1111,7 +1493,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   @override
   Widget build(BuildContext context) {
     if (!panelVisible) {
-      return SizedBox.expand(child: _floatingButton());
+      return SizedBox.expand(
+        child: _capsuleMode ? _miniCapsule() : _floatingButton(),
+      );
     }
 
     final String hand = (result?['hand'] ?? '') as String;
@@ -1148,7 +1532,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // 顶部栏：标题 + 收起。
+                // 顶部栏：标题 + 定缺 + 收起。
                 // 固定高度而非自然高度：minPanelH 的推导依赖这个确定值，
                 // 若让它随字体/图标自然变化，算术就不再成立。
                 SizedBox(
@@ -1171,6 +1555,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                       ),
                       // 连接状态条：一直可见，"●实时 / ⏳等待 / ⚠错误"任一
                       _statusBanner(),
+                      const SizedBox(width: 4),
+                      // 定缺交互快捷按钮（点击快速循环切换）
+                      _dingqueBadge(),
                       const SizedBox(width: 6),
                       GestureDetector(
                         onTap: _togglePanel,
@@ -1188,15 +1575,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                   ),
                 ),
                 const SizedBox(height: _kTitleGap),
-                // 实时画面预览 + 可上下滑动/缩放的识别框。用户把高亮带对准
-                // 自己手牌所在的纵向区域，引擎只识别带内 —— 真机布局与训练
-                // 截图不同时也能对准，直接解决"识别不出来"。
+                // 实时画面预览 + 可上下滑动/缩放的识别框。
                 _previewArea(),
                 const SizedBox(height: _kSectionGap),
-                // 三段严格按"建议 / 牌河 / 手牌"顺序，自上而下排列。
-                // 三段都是 Expanded 弹性高度，随窗口一起伸缩：窗口调高则三段一起
-                // 长大、调低则一起压缩（内容超出时各自段内滚动），永不溢出。
-                // 这样高度可以自由调整（只受 minPanelH/maxPanelH 限制），不再被锁死。
                 Expanded(
                   child: _section(
                     title: '建议',
@@ -1217,6 +1598,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                   ),
                 ),
                 const SizedBox(height: _kSectionGap),
+                // 9x3 剩余牌矩阵面板
+                _remainingMatrixSection(result?['remaining_matrix'] as Map<String, dynamic>?),
                 _diagnosticFooter(),
               ],
             ),

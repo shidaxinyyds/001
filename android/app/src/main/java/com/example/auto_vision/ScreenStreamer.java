@@ -90,8 +90,9 @@ public class ScreenStreamer {
     // 绝不能在同一 MediaProjection 上二次 createVirtualDisplay：
     // Android 14 起会抛 SecurityException（每个 projection 只允许一次）。
     ImageReader oldReader = mImageReader;
+    // 使用 2 帧缓冲深度：acquireLatestImage 模式下 2 帧足矣，彻底规避 60 帧带来的数百 MB 显存浪费与 GC 顿挫
     ImageReader newReader =
-      ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 60);
+      ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2);
     mVirtualDisplay.resize(width, height, density);
     mVirtualDisplay.setSurface(newReader.getSurface());
     mImageReader = newReader;
@@ -141,7 +142,7 @@ public class ScreenStreamer {
       "Setting up a VirtualDisplay: " + width + "x" + height + " (" + density + ")"
     );
     mImageReader =
-      ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 60);
+      ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2);
 
     mVirtualDisplay =
       mMediaProjection.createVirtualDisplay(
