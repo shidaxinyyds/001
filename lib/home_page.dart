@@ -114,7 +114,7 @@ class _HomePageState extends State<HomePage> {
   static const double btnSizeDp = 56;
 
   // 悬浮窗初始位置（dp）。必须显式给出，原因见下方 showOverlay 注释。
-  static const OverlayPosition _startPos = OverlayPosition(8, 140);
+  static const OverlayPosition _startPos = OverlayPosition(16, 100);
 
   String _status = '未开始';
 
@@ -171,7 +171,7 @@ class _HomePageState extends State<HomePage> {
         // 关键：必须是 none。若为 auto，松手后插件会把窗口吸附到最近的左右边缘，
         // 无法停在屏幕任意位置。插件源码中只有 "none" 才跳过吸附动画。
         positionGravity: PositionGravity.none,
-        alignment: OverlayAlignment.topRight,
+        alignment: OverlayAlignment.topLeft,
         width: (btnSizeDp * 3).toInt(),
         height: (btnSizeDp * 3).toInt(),
         startPosition: _startPos,

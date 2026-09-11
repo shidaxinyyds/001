@@ -1106,7 +1106,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                   final int cnt = (counts.length > idx && counts[idx] is int) ? counts[idx] as int : 0;
                   final Color numColor;
                   final Color cellBg;
-                  final bool isHongzhong = (idx == 6);
                   if (cnt == 0) {
                     numColor = Colors.white24;
                     cellBg = Colors.white.withAlpha(4);
@@ -1114,8 +1113,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                     numColor = const Color(0xFFFFB74D);
                     cellBg = const Color(0x33FFB74D);
                   } else {
-                    numColor = isHongzhong ? const Color(0xFFFF8A80) : const Color(0xFF81C784);
-                    cellBg = isHongzhong ? const Color(0x33FF5252) : const Color(0x2281C784);
+                    numColor = const Color(0xFF81C784);
+                    cellBg = const Color(0x2281C784);
                   }
 
                   return Padding(
@@ -1129,7 +1128,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                         border: Border.all(
                           color: cnt == 0
                               ? Colors.white10
-                              : (cnt == 1 ? const Color(0x66FFB74D) : (isHongzhong ? const Color(0x88FF5252) : const Color(0x4481C784))),
+                              : (cnt == 1 ? const Color(0x66FFB74D) : const Color(0x4481C784)),
                           width: 0.5,
                         ),
                       ),
@@ -1139,7 +1138,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                           Text(
                             zNames[idx],
                             style: TextStyle(
-                              color: isHongzhong ? const Color(0xFFFF5252) : labelColor.withAlpha(cnt == 0 ? 70 : 220),
+                              color: labelColor.withAlpha(cnt == 0 ? 70 : 220),
                               fontSize: 7.5,
                               fontWeight: FontWeight.bold,
                               height: 1.0,
@@ -1429,6 +1428,13 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       final String best = _shownBest;
       final String discards = (result?['discards'] ?? '') as String;
       final int discardCount = (result?['discard_count'] ?? 0) as int;
+      final String status = (result?['status'] as String?) ?? '';
+      final bool inMatch = status != 'waiting' &&
+          status != 'no_tiles' &&
+          count >= 4 &&
+          result?['remaining_matrix'] is Map &&
+          (result!['remaining_matrix'] as Map)['m'] != null &&
+          ((result!['remaining_matrix'] as Map)['m'] as List).isNotEmpty;
 
       current = SizedBox.expand(
         child: Stack(
@@ -1588,9 +1594,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                           ),
                           const SizedBox(height: 5),
                         ],
-                        // 3. 全场记牌器与牌河（对局内才显示，两者保持一致）
-                        if (result?['remaining_matrix'] is Map &&
-                            (result!['remaining_matrix'] as Map)['m'] != null) ...[
+                        // 3. 全场记牌器与牌河（对局开始后才显示，两者保持一致）
+                        if (inMatch) ...[
                           _remainingMatrixSection(result?['remaining_matrix'] as Map<String, dynamic>?),
                           const SizedBox(height: 5),
                           _discardBlock(discards: discards, discardCount: discardCount, hand: hand),

@@ -535,6 +535,7 @@ class _HandStabilizer:
         self._last_key = ""
         self._recent.clear()
         self.pending = False
+        self._empty_streak = 0
 
     def observe(self, labels, valid_sizes, avail=None) -> str:
         """喂入本帧手牌行的标签列表，返回应当对外输出的稳定 mpsz。"""
@@ -551,6 +552,18 @@ class _HandStabilizer:
             cnt[lab] += 1
 
         n = sum(cnt.values())
+        if n < 5:
+            self._empty_streak = getattr(self, "_empty_streak", 0) + 1
+            if self._empty_streak >= 4:
+                # 连续 4 帧手牌区无有效手牌（对局结束/未开局/大厅）：彻底重置稳定手牌，绝不跨局残留
+                self.stable_mpsz = ""
+                self._streak = 0
+                self._last_key = ""
+                self.pending = False
+                return ""
+        else:
+            self._empty_streak = 0
+
         # 张数不合法（漏识别 / 多识别 / 根本没切到牌）→ 这一帧不参与共识。
         # 稳定手牌原样保留，界面继续显示上一副确定的手牌。
         if n not in valid_sizes:
@@ -933,14 +946,11 @@ class Engine:
     def _is_mahjong_table(self, image: np.ndarray) -> bool:
         """检测当前画面是否为真实的麻将牌桌对局场景（排除大厅/主菜单/结算界面）。
 
-        真实麻将牌桌中央有大面积的绿色桌布（HSV H:32~95, S>28），
-        而在大厅/主菜单/选场界面中为蓝天/UI背景，绿色占比极低（<0.20）。
+        真实麻将牌桌中央有大面积的桌布（经典绿/深青/湖蓝/仿木纹），
+        而在大厅/主菜单/选场界面中为蓝天/UI背景，桌布占比极低（<0.18）。
         """
         if image is None or image.size == 0:
             return False
-        # 如果已经存在稳定的手牌，且没有彻底换场景，直接判定为对局中
-        if len(self._stable_hand_mpsz) >= 8:
-            return True
         h, w = image.shape[:2]
         center = image[int(h * 0.25):int(h * 0.75), int(w * 0.25):int(w * 0.75)]
         if center.size == 0:
@@ -956,13 +966,14 @@ class Engine:
             ((hsv[:, :, 0] >= 95) & (hsv[:, :, 0] <= 130) & (hsv[:, :, 1] >= 22)) |
             ((hsv[:, :, 0] >= 10) & (hsv[:, :, 0] <= 30) & (hsv[:, :, 1] >= 20))
         )
-        return float(np.mean(table_mask)) >= 0.20
+        return float(np.mean(table_mask)) >= 0.18
 
     def _reset_game_state(self):
         """重置整局游戏的动态状态（新开局/返回大厅/结算时调用）。"""
         self._monotonic_discards.clear()
         self._discard_history.clear()
         self._tile_voter.reset()
+        self._hand_stab.reset()
         self._stable_hand_mpsz = ""
         self._stable_hand_count = 0
         self._partial_mpsz = ""
@@ -1734,10 +1745,10 @@ class Engine:
             # ===== 牌桌场景校验（过滤大厅/菜单/结算，加入防抖）=====
             if not self._is_mahjong_table(image):
                 self._non_table_frames += 1
-                if self._non_table_frames >= 6:
+                if not self._stable_hand_mpsz or self._non_table_frames >= 4:
                     self._reset_game_state()
                     return EngineResult(
-                        image=np.zeros((1, 1, 3), dtype=np.uint8),
+                        image=_make_preview(image),
                         result=json.dumps({
                             "mode": self.mode,
                             "mode_name": MODES.get(self.mode, {}).get("name", self.mode),
@@ -1766,8 +1777,11 @@ class Engine:
                         }, ensure_ascii=False),
                         stage=None,
                     )
-                # 连续非桌布帧数不足 6 帧（局中半透明遮罩/弹窗如"取消托管"等）：保留当前对局状态与手牌，跳过重绘
-                return self._build_skip_result(image, t0, "popup_or_dialog")
+                # 连续非桌布帧数不足 4 帧（局中半透明遮罩/弹窗）：若有缓存则复用，否则重置
+                if self._frame_skipper.cached is not None:
+                    return self._build_skip_result(image, self._frame_skipper.cached)
+                else:
+                    self._reset_game_state()
             else:
                 self._non_table_frames = 0
 
@@ -2007,7 +2021,9 @@ class Engine:
             # 新局判定：若当前牌桌上弃牌数突降至 <= 2 张，而历史牌池已累积 >= 5 张，说明上一局已结束并开始了全新对局
             if len(discard_labels) <= 2 and sum(self._monotonic_discards.values()) >= 5:
                 self._monotonic_discards.clear()
+                self._discard_history.clear()
                 self._tile_voter.reset()
+                self._hand_stab.reset()
                 self._stable_hand_mpsz = ""
                 self._stable_hand_count = 0
                 self._last_hand_y = None
@@ -2111,7 +2127,10 @@ class Engine:
                 except Exception:
                     partial_now = ""
                 partial_n = len(partial_now) // 2
-                if partial_n >= PARTIAL_MIN_TILES:
+                if len(raw_labels) < 4:
+                    self._partial_mpsz = ""
+                    self._partial_ttl = 0
+                elif partial_n >= PARTIAL_MIN_TILES:
                     self._partial_mpsz = partial_now
                     self._partial_ttl = PARTIAL_TTL_FRAMES
                 elif self._partial_ttl > 0:
@@ -2153,7 +2172,7 @@ class Engine:
                             pass
 
             # 最终兜底：若手牌有内容但 advice 仍为空，启动全手牌启发式推演（永远保证建议非空）
-            if not advice and hand_mpsz:
+            if not advice and hand_mpsz and tile_count >= 4:
                 advice = self._heuristic_discard_advice(hand_mpsz, mode=self.mode, dingque_suit=dingque_suit, disc_counts=disc_counts)
                 if shanten is None:
                     shanten = 2
@@ -2218,13 +2237,21 @@ class Engine:
                     dead = sum(1 for i in avail_list if hand_counts[i] + fc[i] >= 4)
             self._discard_history.append(disc_mpsz)
 
-            # ---- 全场记牌矩阵面板（含万/筒/条，以及字牌/红中）----
-            remaining_matrix = {
-                "m": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(0, 9)],
-                "p": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(9, 18)],
-                "s": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(18, 27)],
-                "z": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(27, 34)],
-            }
+            # ---- 全场记牌矩阵面板（含万/筒/条，以及字牌/红中，仅在对局开始后生成）----
+            if tile_count == 0 or status in ("waiting", "no_tiles") or not hand_mpsz:
+                remaining_matrix = {}
+                disc_mpsz_out = ""
+                disc_counts_out = [0] * 34
+                discarded_labels_out = []
+                remaining = 108 if self.mode == "sc" else 136
+                dead = 0
+            else:
+                remaining_matrix = {
+                    "m": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(0, 9)],
+                    "p": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(9, 18)],
+                    "s": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(18, 27)],
+                    "z": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(27, 34)],
+                }
 
             # ===== 方向自愈：连续 3 帧整帧 0 牌 → 解锁重探方向 =====
             # 用户中途旋转手机/切后台再回来，VirtualDisplay 朝向可能变了，
