@@ -695,9 +695,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     required int discardCount,
     required String hand,
   }) {
-    if (discards.isEmpty || discardCount == 0) {
-      return const SizedBox.shrink();
-    }
     return Container(
       margin: const EdgeInsets.only(bottom: 2),
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
@@ -1205,12 +1202,20 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           Row(
             children: [
               const Text(
-                '全场记牌器 (剩余活牌)',
+                '全场未现存牌 (记牌器)',
                 style: TextStyle(
-                  color: Colors.white70,
+                  color: Colors.white,
                   fontSize: 10,
-                  fontWeight: FontWeight.w600,
+                  fontWeight: FontWeight.bold,
                   letterSpacing: 0.3,
+                ),
+              ),
+              const SizedBox(width: 4),
+              Text(
+                '· 初始各4张 实时扣除',
+                style: TextStyle(
+                  color: Colors.white.withAlpha(100),
+                  fontSize: 8.5,
                 ),
               ),
               const Spacer(),
@@ -1231,6 +1236,14 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             ],
           ),
           if (_matrixExpanded) ...[
+            const SizedBox(height: 2),
+            Text(
+              '牌池未打出的活牌：绿(2~4张安全) · 黄(仅剩1张绝张预警) · 灰(已绝)',
+              style: TextStyle(
+                color: Colors.white.withAlpha(90),
+                fontSize: 8,
+              ),
+            ),
             const SizedBox(height: 3),
             buildRow('万', const Color(0xFF1E6B7A), m),
             buildRow('筒', const Color(0xFF1E6B7A), p),
@@ -1479,48 +1492,56 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // 顶部控制栏：精简干净，杜绝溢出，无多余干扰
-                SizedBox(
-                  height: _kTitleBarH,
-                  child: Row(
+                // 顶部控制与拖动手柄区：支持全顶栏自由拖动与屏幕边界自由滑行
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onPanStart: (details) {
+                    _isDraggingTitle = true;
+                    FlutterOverlayWindow.getOverlayPosition().then((pos) {
+                      _overlayBaseX = pos.x;
+                      _overlayBaseY = pos.y;
+                    }).catchError((_) {});
+                  },
+                  onPanUpdate: (details) {
+                    if (!_isDraggingTitle) return;
+                    // Android WindowManager (Gravity.TOP | Gravity.RIGHT) 下：
+                    // 手指左拖 (dx < 0)，距右边缘增加 (x += -dx)
+                    // 手指右拖 (dx > 0)，距右边缘减小 (x -= dx)
+                    _overlayBaseX -= details.delta.dx;
+                    _overlayBaseY += details.delta.dy;
+
+                    // 允许全屏自由滑动（避免被悬浮窗自身局部 MediaQuery 尺寸错误归零）
+                    final targetX = _overlayBaseX.clamp(-40.0, 1200.0);
+                    final targetY = _overlayBaseY.clamp(0.0, 2400.0);
+
+                    _sendMoveOverlay(targetX, targetY);
+                  },
+                  onPanEnd: (_) => _isDraggingTitle = false,
+                  onPanCancel: () => _isDraggingTitle = false,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      const MahjongTileIcon(size: 15),
-                      const SizedBox(width: 5),
-                      Expanded(
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onPanStart: (details) async {
-                            _isDraggingTitle = true;
-                            try {
-                              final pos = await FlutterOverlayWindow.getOverlayPosition();
-                              _overlayBaseX = pos.x;
-                              _overlayBaseY = pos.y;
-                            } catch (_) {}
-                          },
-                          onPanUpdate: (details) {
-                            if (!_isDraggingTitle) return;
-                            // 注意：showOverlay 采用了 topRight 对齐。
-                            // 在 Android WindowManager (Gravity.RIGHT) 下，params.x 代表距屏幕右边缘的距离。
-                            // 手指往左拖动 (dx < 0)，距右边缘变大，因此 params.x 需增加（即 -= dx）。
-                            // 手指往右拖动 (dx > 0)，距右边缘变小，因此 params.x 需减小（即 -= dx）。
-                            _overlayBaseX -= details.delta.dx;
-                            _overlayBaseY += details.delta.dy;
-
-                            final mediaQuery = MediaQuery.of(context);
-                            final screenW = mediaQuery.size.width;
-                            final screenH = mediaQuery.size.height;
-                            final maxX = max(0.0, screenW - panelW);
-                            final maxY = max(0.0, screenH - panelH);
-                            final targetX = _overlayBaseX.clamp(0.0, maxX);
-                            final targetY = _overlayBaseY.clamp(0.0, maxY);
-
-                            _sendMoveOverlay(targetX, targetY);
-                          },
-                          onPanEnd: (_) => _isDraggingTitle = false,
-                          onPanCancel: () => _isDraggingTitle = false,
-                          child: const Row(
-                            children: [
-                              Text(
+                      // 居中拖动手柄 Pill（醒目提示可自由移动）
+                      Center(
+                        child: Container(
+                          width: 38,
+                          height: 3.5,
+                          margin: const EdgeInsets.only(bottom: 4),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withAlpha(50),
+                            borderRadius: BorderRadius.circular(2),
+                          ),
+                        ),
+                      ),
+                      SizedBox(
+                        height: _kTitleBarH,
+                        child: Row(
+                          children: [
+                            const MahjongTileIcon(size: 15),
+                            const SizedBox(width: 5),
+                            const Expanded(
+                              child: Text(
                                 '雀神助手',
                                 overflow: TextOverflow.ellipsis,
                                 style: TextStyle(
@@ -1531,38 +1552,38 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                                   decoration: TextDecoration.none,
                                 ),
                               ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      _statusBanner(),
-                      const SizedBox(width: 6),
-                      GestureDetector(
-                        onTap: _togglePanel,
-                        behavior: HitTestBehavior.opaque,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withAlpha(25),
-                            borderRadius: BorderRadius.circular(4),
-                            border: Border.all(color: Colors.white12, width: 0.6),
-                          ),
-                          child: const Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.unfold_less_rounded, color: Colors.white70, size: 11),
-                              SizedBox(width: 2),
-                              Text(
-                                '收起',
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.w500,
-                                  decoration: TextDecoration.none,
+                            ),
+                            _statusBanner(),
+                            const SizedBox(width: 6),
+                            GestureDetector(
+                              onTap: _togglePanel,
+                              behavior: HitTestBehavior.opaque,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withAlpha(25),
+                                  borderRadius: BorderRadius.circular(4),
+                                  border: Border.all(color: Colors.white12, width: 0.6),
+                                ),
+                                child: const Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.unfold_less_rounded, color: Colors.white70, size: 11),
+                                    SizedBox(width: 2),
+                                    Text(
+                                      '收起',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.w500,
+                                        decoration: TextDecoration.none,
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
-                            ],
-                          ),
+                            ),
+                          ],
                         ),
                       ),
                     ],

@@ -745,47 +745,54 @@ def detect_river_discards(image: np.ndarray, detector) -> List[str]:
     if image is None or detector is None:
         return []
     try:
-        h, w = image.shape[:2]
-        rx1, rx2 = int(w * 0.20), int(w * 0.80)
-        ry1, ry2 = int(h * 0.16), int(h * 0.78)
+        ih, iw = image.shape[:2]
+        ry1, ry2 = int(ih * 0.14), int(ih * 0.72)
+        rx1, rx2 = int(iw * 0.18), int(iw * 0.82)
         if rx2 <= rx1 or ry2 <= ry1:
             return []
         river_crop = image[ry1:ry2, rx1:rx2]
         hsv = cv2.cvtColor(river_crop, cv2.COLOR_BGR2HSV)
-        mask = ((hsv[:, :, 1] < 90) & (hsv[:, :, 2] > 130)).astype(np.uint8) * 255
+        mask = ((hsv[:, :, 1] < 85) & (hsv[:, :, 2] > 140)).astype(np.uint8) * 255
+
+        # 排除中心骰子区域（避免将倒计时/风位盘误认为牌面）
+        dcx = int(iw * 0.5) - rx1
+        dcy = int(ih * 0.38) - ry1
+        dx1, dx2 = max(0, dcx - 70), min(river_crop.shape[1], dcx + 70)
+        dy1, dy2 = max(0, dcy - 50), min(river_crop.shape[0], dcy + 50)
+        mask[dy1:dy2, dx1:dx2] = 0
+
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         discards = []
 
         for cnt in contours:
-            x, y, bw, bh = cv2.boundingRect(cnt)
-            area = bw * bh
-            if bw < 14 or bh < 14 or bw > int(w * 0.25) or bh > int(h * 0.25):
+            bx, by, bw, bh = cv2.boundingRect(cnt)
+            if bw < 14 or bh < 14 or bw > int(iw * 0.35) or bh > int(ih * 0.30):
                 continue
-            if area < 250 or area > 0.04 * w * h:
+            if bw * bh < 280:
                 continue
             aspect = bw / float(bh)
             sub_boxes = []
-            if aspect > 1.4:
-                num_t = max(2, min(4, int(round(aspect / 0.8))))
+            if aspect > 1.35:
+                num_t = max(2, min(6, int(round(bw / 28.0))))
                 step = bw / float(num_t)
                 for i in range(num_t):
-                    sub_boxes.append((int(x + i * step), y, int(step), bh))
-            elif aspect < 0.65:
-                num_t = max(2, min(4, int(round(bh / (bw * 1.25)))))
+                    sub_boxes.append((int(bx + i * step), by, int(step), bh))
+            elif aspect < 0.72:
+                num_t = max(2, min(6, int(round(bh / 34.0))))
                 step = bh / float(num_t)
                 for i in range(num_t):
-                    sub_boxes.append((x, int(y + i * step), bw, int(step)))
+                    sub_boxes.append((bx, int(by + i * step), bw, int(step)))
             else:
-                sub_boxes.append((x, y, bw, bh))
+                sub_boxes.append((bx, by, bw, bh))
 
             for (sx, sy, sbw, sbh) in sub_boxes:
                 if sbw < 12 or sbh < 12:
                     continue
                 gx, gy = rx1 + sx, ry1 + sy
                 face = image[gy:gy+sbh, gx:gx+sbw]
-                if face.std() < 12.0:
+                if face.size == 0 or face.std() < 10.0:
                     continue
                 best_l, best_c = None, 0.0
                 rots = [None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_180, cv2.ROTATE_90_COUNTERCLOCKWISE]
@@ -799,7 +806,7 @@ def detect_river_discards(image: np.ndarray, detector) -> List[str]:
                         best_l = lbl
                     if best_c >= 0.88:
                         break
-                if best_l and best_c >= 0.60:
+                if best_l and best_c >= 0.75:
                     discards.append(best_l)
         return discards
     except Exception:
@@ -1547,6 +1554,109 @@ class Engine:
             return image
         return self._rotate_to(image, self._orient)
 
+    def _heuristic_discard_advice(self, hand_mpsz: str, mode: str = "sc", dingque_suit: Optional[int] = None, disc_counts=None) -> List[Dict]:
+        """启发式最优出牌推演：在任何张数、冷启动或非标手牌下，永远给出明确最优解。"""
+        if not hand_mpsz or len(hand_mpsz) < 2:
+            return []
+        tiles = [hand_mpsz[i:i+2] for i in range(0, len(hand_mpsz), 2)]
+        if not tiles:
+            return []
+
+        # 1. 四川麻将：若有定缺门花色，100% 优先建议打定缺牌
+        if mode == "sc" and dingque_suit is not None and 0 <= dingque_suit <= 2:
+            dq_char = ['m', 'p', 's'][dingque_suit]
+            dq_name = ['万', '筒', '条'][dingque_suit]
+            dq_tiles = [t for t in tiles if t.endswith(dq_char)]
+            if dq_tiles:
+                counts = {t: dq_tiles.count(t) for t in set(dq_tiles)}
+                # 优先打出现单张的孤牌，且 1/9 优先打
+                sorted_dq = sorted(set(dq_tiles), key=lambda t: (counts[t], 0 if t[0] in '19' else 1))
+                return [{
+                    "tile": t,
+                    "ukeire": 0,
+                    "shanten": 2,
+                    "ev": 99000.0 - i * 100,
+                    "reason": f"定缺必打{dq_name}",
+                    "ting_tiles": [],
+                    "is_dingque": True
+                } for i, t in enumerate(sorted_dq)]
+
+        # 2. 通用孤张 / 效用价值评分（分数越高代表越无用、越应优先打出）
+        counts = {t: tiles.count(t) for t in set(tiles)}
+        scored_tiles = []
+
+        for t in set(tiles):
+            suit = t[1]
+            val = int(t[0]) if t[0].isdigit() else 0
+            score = 0
+
+            # 字牌（z）：无刻子/对子时价值极低，优先打出
+            if suit == 'z':
+                if counts[t] == 1:
+                    score += 100
+                elif counts[t] == 2:
+                    score += 20
+                else:
+                    score -= 50
+            else:
+                # 数牌（m, p, s）：检查同花色邻近连搭
+                has_adj1 = any(f"{val+d}{suit}" in counts for d in (-1, 1) if 1 <= val+d <= 9)
+                has_adj2 = any(f"{val+d}{suit}" in counts for d in (-2, 2) if 1 <= val+d <= 9)
+
+                if counts[t] == 1:
+                    if not has_adj1 and not has_adj2:
+                        score += 80  # 全孤张
+                    elif not has_adj1 and has_adj2:
+                        score += 40  # 嵌隔张
+                    else:
+                        score += 10  # 邻近搭子
+                elif counts[t] == 2:
+                    score += 15  # 对子
+                else:
+                    score -= 30  # 刻子/暗刻
+
+                # 幺九孤张（1, 9）进张窄，孤立时优先打
+                if val in (1, 9):
+                    score += 15
+                elif val in (2, 8):
+                    score += 5
+
+            # 绝张感知：若全场已见4张，为绝张，毫无进张价值
+            if disc_counts and 0 <= mpsz_to_tile34_index(t) < 34:
+                idx = mpsz_to_tile34_index(t)
+                tot_seen = counts[t] + disc_counts[idx]
+                if tot_seen >= 4:
+                    score += 60
+
+            scored_tiles.append((t, score, counts[t]))
+
+        scored_tiles.sort(key=lambda x: -x[1])
+
+        advice = []
+        for rank, (t, sc, cnt) in enumerate(scored_tiles[:4]):
+            if t.endswith('z'):
+                reason = "孤张字牌" if cnt == 1 else "多余字牌"
+            elif sc >= 80:
+                reason = "全孤无连"
+            elif sc >= 40:
+                reason = "间搭孤张"
+            elif sc >= 15:
+                reason = "防守/留搭"
+            else:
+                reason = "拆搭推演"
+
+            advice.append({
+                "tile": t,
+                "ukeire": max(0, 4 - cnt),
+                "shanten": 2,
+                "ev": 1000.0 - rank * 100,
+                "reason": reason,
+                "ting_tiles": [],
+                "is_dingque": False
+            })
+        return advice
+
+
     def process(self, image: CVImage) -> Optional[EngineResult]:
         try:
             # ===== 崩溃兜底（C 层 SIGSEGV 不可被 Python try/except 捕获）=====
@@ -1845,6 +1955,15 @@ class Engine:
                         except Exception:
                             pass
 
+            # 融合牌桌中央区域四方牌河的多角度弃牌检测（提取各家打出的牌）
+            try:
+                central_discards = detect_river_discards(image, self._detector)
+                for cd in central_discards:
+                    if cd and mpsz_to_tile34_index(cd) in avail:
+                        discard_labels.append(cd)
+            except Exception:
+                pass
+
             # 新局判定：若当前牌桌上弃牌数突降至 <= 2 张，而历史牌池已累积 >= 5 张，说明上一局已结束并开始了全新对局
             if len(discard_labels) <= 2 and sum(self._monotonic_discards.values()) >= 5:
                 self._monotonic_discards.clear()
@@ -1966,6 +2085,38 @@ class Engine:
                     status = "partial"
                     tile_count = len(self._partial_mpsz) // 2
                     hand_mpsz = self._partial_mpsz
+
+                    # 当处于 partial 或冷启动，只要有效牌数 >= 4，即刻推演实时出牌建议（杜绝界面空等）
+                    if not advice and tile_count >= 4:
+                        try:
+                            tentative_hand = TileCollection.from_mpsz(hand_mpsz)
+                            t_shanten, t_adv = self.build_advice(tentative_hand, disc_counts)
+                            if t_adv:
+                                advice = t_adv
+                                if t_shanten is not None:
+                                    shanten = t_shanten
+                            elif self.mode == "sc" and dingque_suit is not None:
+                                dq_char = ['m', 'p', 's'][dingque_suit]
+                                tiles_in_hand = [hand_mpsz[k:k+2] for k in range(0, len(hand_mpsz), 2)]
+                                dq_tiles = [t for t in tiles_in_hand if t.endswith(dq_char)]
+                                if dq_tiles:
+                                    advice = [{
+                                        "tile": t,
+                                        "ukeire": 0,
+                                        "shanten": shanten or 2,
+                                        "ev": 99000.0,
+                                        "reason": f"定缺必打{dingque_name}",
+                                        "ting_tiles": [],
+                                        "is_dingque": True
+                                    } for t in sorted(set(dq_tiles))]
+                        except Exception:
+                            pass
+
+            # 最终兜底：若手牌有内容但 advice 仍为空，启动全手牌启发式推演（永远保证建议非空）
+            if not advice and hand_mpsz:
+                advice = self._heuristic_discard_advice(hand_mpsz, mode=self.mode, dingque_suit=dingque_suit, disc_counts=disc_counts)
+                if shanten is None:
+                    shanten = 2
 
             # 标记"最优"那张牌（最高 EV 或最高 ukeire），UI 上加"最优"角标
             if advice:
