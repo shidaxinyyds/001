@@ -81,9 +81,10 @@ FACE_INSET = 0.06            # 牌面内缩比例（去掉牌边框）
 #   shrink 为左右各内缩比例。覆盖「相位偏了」和「切太宽含了邻牌边框」两种情况。
 RETRY_CONF = 0.62
 RETRY_OFFSETS = (
-    (-0.135, 0.0), (0.135, 0.0),
-    (-0.08, 0.0), (0.08, 0.0),
-    (0.0, 0.04), (-0.055, 0.04), (0.055, 0.04),
+    (-0.135, 0.0, 0.0), (0.135, 0.0, 0.0),
+    (-0.08, 0.0, 0.0), (0.08, 0.0, 0.0),
+    (0.0, 0.04, 0.0), (-0.055, 0.04, 0.0), (0.055, 0.04, 0.0),
+    (0.0, 0.0, 0.06), (0.0, 0.0, -0.06),
 )
 INK_MIN_FRAC = 0.035         # 低于此墨迹占比 -> 白板
 TILE_H_RATIO = 0.105         # 牌高初值（占屏幕短边）——只用于圈横条
@@ -132,7 +133,7 @@ STYLE_MARGIN_LO = 0.48
 # >=0.10），恰好骑在 0.08 上，任何重采样抖动都会把 9s 掀翻 —— 掉出风格通道
 # 后几何数不准 9 根条（粘成 3 列，arr=0.15），最终经 _try_honor 错成 1z(東)。
 # 1.5x 缩放下实测复现。取 0.056（空隙中点）后：真对 90/90 放行、真错 0/2 放行。
-STYLE_MARGIN_GAP = 0.025
+STYLE_MARGIN_GAP = 0.015
 NUMERAL_REGION = 0.58        # 万牌数字区（占牌高）
 # 萬字块起始（占牌高）。设 0.60 而非 0.55，给数字"三"的最下横杠留出 0.05 余量，
 # 避免 0.55~0.58 区间的数字笔画被圈进 bottom 把 bbox 拉大、密度拉低、萬检测失败。
@@ -1716,15 +1717,18 @@ class StructuralDetector(Detector):
         self._retry_done.add(q)
         self._retry_budget -= 1
 
-        def _try(fdx, fsh):
-            """按 (相对 x 偏移, 相对内缩) 重切一次并分类。"""
+        def _try(fdx, fsh, fdy=0.0):
+            """按 (相对 x 偏移, 相对内缩, 相对 y 偏移) 重切一次并分类。"""
             dx = int(round(fdx * w))
             sh = int(round(fsh * w))
+            dy = int(round(fdy * h))
             x1 = max(0, x + dx + sh)
             x2 = min(W, x + dx + w - sh)
-            if x2 - x1 < 24:
+            y1 = max(0, y + dy)
+            y2 = min(H, y + dy + h)
+            if x2 - x1 < 24 or y2 - y1 < 24:
                 return None, 0.0
-            return self._classify_face(img[y:y + h, x1:x2])
+            return self._classify_face(img[y1:y2, x1:x2])
 
         # 注：曾经这里有个 _try_upscaled()（小牌面上采样到 120 再分类）。
         # 尺度归一化上移到 _classify_face 入口（_canon_scale）后它已多余 ——
@@ -2343,12 +2347,8 @@ class StructuralDetector(Detector):
         # 所以先只切牌，再去重，最后才对胜出的带做昂贵的分类。
         cand_bands = []
         for (y1, y2) in bands:
-            # 向上多扩、向下几乎不扩：_find_bands 给的 band 已≈牌高，仅顶沿比真牌顶低
-            # 约 0.1 牌高，向上补一点把牌顶补回；向下扩太多会吞进牌行下方的桌面。
-            bh_band = y2 - y1
-            pad_up = int(0.10 * bh_band)
-            pad_dn = int(0.02 * bh_band)
-            y1e, y2e = max(0, y1 - pad_up), min(wh, y2 + pad_dn)
+            # 牌行上下准确对齐，避免虚假向上偏移切断牌面底部图案
+            y1e, y2e = y1, y2
             band = work_color[y1e:y2e, :]
             # 过滤纯色带（牌墙背面、纯色背景等）：用"均匀度"而非亮度。
             # 手牌行有大量字符/圆点，灰度呈"亮牌面 + 暗墨迹"的双峰分布，

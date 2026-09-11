@@ -1806,15 +1806,6 @@ class Engine:
                         except Exception:
                             pass
 
-            # 叠加中心公共牌河多角度弃牌检测（严格按当前玩法可用集过滤，防止杂乱字牌污染）
-            for lab in detect_river_discards(image, detector):
-                if lab:
-                    try:
-                        if mpsz_to_tile34_index(lab) in avail:
-                            discard_labels.append(lab)
-                    except Exception:
-                        pass
-
             # 新局判定：若当前牌桌上弃牌数突降至 <= 2 张，而历史牌池已累积 >= 5 张，说明上一局已结束并开始了全新对局
             if len(discard_labels) <= 2 and sum(self._monotonic_discards.values()) >= 5:
                 self._monotonic_discards.clear()
@@ -1822,6 +1813,10 @@ class Engine:
                 self._stable_hand_mpsz = ""
                 self._stable_hand_count = 0
                 self._last_hand_y = None
+
+            # 当牌桌上没有任何弃牌（新局/换牌/定缺/刚起手发牌阶段），牌池累加器严格保持为空，绝不残留旧弃牌
+            if len(discard_labels) == 0:
+                self._monotonic_discards.clear()
 
             # 新洗牌发牌判定：若新手牌张数完整（>=13张），且与旧稳定手牌重合度极低（<= 3 张相同），说明洗牌重新发牌了
             if self._stable_hand_mpsz and len(hand_mpsz) >= 26:

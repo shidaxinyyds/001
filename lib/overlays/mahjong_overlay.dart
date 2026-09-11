@@ -17,7 +17,7 @@ Map<String, dynamic>? parseEngineResult(List<int> b) {
     return null;
   }
   try {
-    return jsonDecode(String.fromCharCodes(b.sublist(0, sepIndex)))
+    return jsonDecode(utf8.decode(b.sublist(0, sepIndex)))
         as Map<String, dynamic>;
   } catch (e) {
     print('解析分析结果失败：$e');
@@ -422,7 +422,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   static const double collapsed = 56;
   // 胶囊微缩模式：收起态下在屏幕边缘显示小巧横条，展示听牌/最优打法
   bool _capsuleMode = true;
-  static const double _kCapsuleW = 180;
+  static const double _kCapsuleW = 200;
   static const double _kCapsuleH = 38;
   // 9x3 剩余牌矩阵面板折叠态：默认折叠，弹窗小巧简约不眼花
   bool _matrixExpanded = false;
@@ -518,8 +518,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final String best = (json['best'] ?? '') as String;
     _adviceTimer?.cancel();
     if (!_antiBan) {
-      _shownAdvice = advice;
-      _shownBest = best;
+      setState(() {
+        _shownAdvice = advice;
+        _shownBest = best;
+      });
       return;
     }
     final int delay = 180 + Random().nextInt(241); // [180, 420]
@@ -925,39 +927,63 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             else
               const MahjongTileIcon(size: 17),
             const SizedBox(width: 5),
-            if (tileStr.isNotEmpty) ...[
+            if (result?['status'] == 'waiting') ...[
               const Text(
-                '打',
+                '等待对局',
                 style: TextStyle(
                   color: Colors.white70,
                   fontSize: 10.5,
                   decoration: TextDecoration.none,
                 ),
               ),
-              const SizedBox(width: 3),
-              TileChip(tile: tileStr, size: 19),
-              const SizedBox(width: 4),
-              Flexible(
-                child: Text(
-                  ukeire > 0 ? '进$ukeire张' : (reason ?? '最优'),
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Color(0xFF69F0AE),
-                    fontSize: 10.5,
-                    fontWeight: FontWeight.bold,
-                    decoration: TextDecoration.none,
-                  ),
-                ),
-              ),
             ] else ...[
-              Text(
-                (result?['status'] == 'waiting') ? '等待对局' : '雀神就绪',
-                style: const TextStyle(
+              const Text(
+                '就绪',
+                style: TextStyle(
                   color: Colors.white70,
                   fontSize: 10.5,
+                  fontWeight: FontWeight.w500,
                   decoration: TextDecoration.none,
                 ),
               ),
+              const SizedBox(width: 5),
+              if (tileStr.isNotEmpty) ...[
+                const Text(
+                  '打',
+                  style: TextStyle(
+                    color: Colors.white70,
+                    fontSize: 10.5,
+                    decoration: TextDecoration.none,
+                  ),
+                ),
+                const SizedBox(width: 2),
+                TileChip(tile: tileStr, size: 19),
+                const SizedBox(width: 3),
+                Flexible(
+                  child: Text(
+                    ukeire > 0 ? '进$ukeire张' : (reason ?? '最优'),
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Color(0xFF69F0AE),
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.bold,
+                      decoration: TextDecoration.none,
+                    ),
+                  ),
+                ),
+              ] else ...[
+                const Flexible(
+                  child: Text(
+                    '分析中…',
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: Colors.white38,
+                      fontSize: 9.5,
+                      decoration: TextDecoration.none,
+                    ),
+                  ),
+                ),
+              ],
             ],
             const SizedBox(width: 3),
             const Icon(Icons.arrow_drop_down, color: Colors.white38, size: 16),
