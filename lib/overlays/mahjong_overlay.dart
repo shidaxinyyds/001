@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
-import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -426,38 +425,19 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   static const double _kCapsuleH = 46;
   // 9x3 剩余牌矩阵面板折叠态
   bool _matrixExpanded = true;
-  double panelW = 296;
-  // 默认高度含预览区（~150）+ 三段；加大到 540 让首屏即可看清识别框与建议。
-  double panelH = 540;
+  // 默认小巧面板：宽度 210dp，高度 240dp，避免遮挡底部 14 张手牌与牌桌中央
+  double panelW = 210;
+  double panelH = 240;
 
-  // ── 固定三段布局的尺寸常量 ────────────────────────────────────────────
-  // 这组常量同时决定"每段多高"和"面板最矮能拖到多少"（minPanelH 由它们推导）。
-  // 必须同源推导，否则一旦 minPanelH 小于固定部分之和，外层 Column 就会
-  // overflow —— debug 构建下会在越界侧画出红色 "BOTTOM OVERFLOWED BY x
-  // PIXELS" 文字。这正是"弹窗缩到一定尺寸就冒红字"的直接原因。
-  static const double _kTitleBarH = 26; // 顶部「麻将助手 / 收起」行
-  static const double _kTitleGap = 8;
-  static const double _kSectionGap = 6;
+  // ── 紧凑布局尺寸常量 ──
+  static const double _kTitleBarH = 28; // 顶部栏高度
 
-  static const double minPanelW = 220;
-  // 宽度上限（沿用原始实现 440）：允许横向自由拉伸，但封顶避免拖出屏幕外。
-  static const double maxPanelW = 440;
+  static const double minPanelW = 160;
+  static const double maxPanelW = 380;
+  static const double minPanelH = 100;
+  static const double maxPanelH = 550;
 
-  // 关键修复：之前 minPanelH 由三段固定高度推导为 366，而默认 panelH=380 仅比
-  // 下限高 14px —— 往下拖几乎立刻被 clamp 卡死，表现就是"高度调不动，只能调宽"。
-  // 现在三段全部改为 Expanded 弹性高度（段内内容超出时自身滚动），窗口高度可
-  // 自由收缩到 minPanelH 而绝不会 overflow。minPanelH 只是"可读性下限"，
-  // 不再是硬性布局约束。上限 760 给足放大空间（系统会按屏幕实际高度再裁切）。
-  // 下限：展开预览时 320（预览区 ~150 + 标题/三段）；折叠预览后 200，
-  // 只显示标题+三段，大幅减小占位，也避免弹窗挡住自己的手牌。
-  static const double _kMinPanelHExpanded = 320;
-  static const double _kMinPanelHCollapsedPreview = 200;
-  static const double maxPanelH = 760;
-  // 牌河折叠态下的标题行高度（仅显示「牌河 · N 张 + 展开」一行，不占弹性高度）。
-  static const double _kDiscardHeaderH = 32;
-  double _minPanelH() => _previewCollapsed
-      ? _kMinPanelHCollapsedPreview
-      : _kMinPanelHExpanded;
+  double _minPanelH() => minPanelH;
 
   // 缩放中：此期间关闭原生拖动，避免"拖把手时整窗跟着跑"
   bool _draggingResize = false;
@@ -466,94 +446,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // 牌河折叠态。常驻可见（默认 true），但用户可手动折叠/展开以释放空间。
   // 状态在弹窗生命周期内持久化：用户收起 → 重新展开会保持上一次选择，
   // 不强制每次都重置为展开。
+  // 牌河折叠态。常驻可见（默认 true），但用户可手动折叠/展开以释放空间。
   bool _discardExpanded = true;
-
-  // 识别区域（实时预览区）折叠态。默认展开，用户可一键收起以释放屏幕空间。
-  // 收起后不再显示实时 preview，避免"画中画"遮挡，也降低解码/传输开销。
-  bool _previewCollapsed = false;
-
-  // 手动方向覆盖（悬浮窗「旋转」按钮）。0/90/180/270，点一下循环切换到下
-  // 一个角度，经 shareData 发给主 App → 引擎 set_orient。自动方向探测在
-  // 特殊画面/异常朝向下可能选错导致"识别不出来"，用户一眼看到牌被横置时
-  // 点一下即可校正，无需等自动重探，也不依赖任何设备日志。
-  int _orientDeg = 0;
-
-  // ===== 实时画面预览 + 可拖动识别框（ROI）=====
-  // 引擎每帧随结果一起发来一张全屏缩略图（PNG），这里解码出来显示在面板顶部，
-  // 用户拖动上面的"高亮带"对准自己手牌所在的纵向位置；带的比例经 MethodChannel
-  // 告诉引擎，引擎只识别带内 → 真机布局与训练截图不同时也能对准，解决"识别不出来"。
-  ui.Image? _preview;
-  // 识别框纵向比例（相对整屏高度，[0,1]）。默认整屏。
-  double _roiTop = 0.0;
-  double _roiBottom = 1.0;
-  // 拖动识别框时，本次手势锁定操作的边（按下瞬间按落点决定）。
-  String _roiDragMode = 'both';
-  // 预览区固定高度。预览图按 BoxFit.contain 原比例显示，不再拉伸变形。
-  static const double _kPreviewH = 132.0;
-
-  void _decodePreview(List<int> png) {
-    if (png.isEmpty) return;
-    // 异步解码：即便某帧解码失败也只是少一张预览，绝不抛错影响主流程。
-    ui.instantiateImageCodec(Uint8List.fromList(png)).then((codec) {
-      return codec.getNextFrame();
-    }).then((frame) {
-      if (mounted) setState(() => _preview = frame.image);
-    }).catchError((Object e) {
-      print('预览解码失败（已忽略）: $e');
-    });
-  }
-
-  void _sendRoi() {
-    // 悬浮窗是独立 Flutter 引擎，直接调 MethodChannel 到不了 MainActivity。
-    // 必须经 shareData 回主 App，由主 App 的 overlayListener 转成 MethodChannel。
-    try {
-      FlutterOverlayWindow.shareData({
-        'type': 'roi',
-        'top': _roiTop,
-        'bottom': _roiBottom,
-      });
-    } catch (e) {
-      print('识别框位置发送失败（已忽略）: $e');
-    }
-  }
-
-  // 手动方向覆盖：点一下循环切换到下一个角度（0→90→180→270→0）。
-  // 经 shareData 回主 App → 引擎 set_orient。自动方向探测在特殊画面/异常
-  // 朝向下可能选错导致"识别不出来"，用户一眼看到牌被横置时点一下即可校正。
-  void _cycleOrient() {
-    final int next = (_orientDeg + 90) % 360;
-    setState(() {
-      _orientDeg = next;
-    });
-    try {
-      FlutterOverlayWindow.shareData({
-        'type': 'orient',
-        'deg': next,
-      });
-    } catch (e) {
-      print('方向覆盖发送失败（已忽略）: $e');
-    }
-  }
-
-  // 拖动识别框：which 决定动哪条边。
-  //  'top'    仅移上边；'bottom' 仅移下边；'both' 整条带跟随手指移动。
-  void _dragRoi(double dy, String which) {
-    final double f = (dy / _kPreviewH).clamp(0.0, 1.0);
-    setState(() {
-      if (which == 'top') {
-        _roiTop = f.clamp(0.0, _roiBottom - 0.05);
-      } else if (which == 'bottom') {
-        _roiBottom = f.clamp(_roiTop + 0.05, 1.0);
-      } else {
-        // 整条带跟随：保持当前高度，中心移到手指处。
-        final double h = _roiBottom - _roiTop;
-        double c = f;
-        _roiTop = (c - h / 2).clamp(0.0, 1.0 - h);
-        _roiBottom = _roiTop + h;
-      }
-    });
-    _sendRoi();
-  }
 
   @override
   void initState() {
@@ -571,12 +465,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         callback: (data) {
           final json = parseEngineResult(data);
           if (json == null) return;
-          // 解析出 PNG 预览（JSON 之后第一个 '\n' 之后），异步解码显示。
-          // 解码失败只影响预览，不影响识别结果本身。
-          final int sep = data.indexOf(10);
-          if (sep > 0 && sep + 1 < data.length) {
-            _decodePreview(data.sublist(sep + 1));
-          }
           if (mounted) {
             setState(() {
               result = json;
@@ -679,34 +567,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   //   方向  当前锁定的旋转角度
   //   张数  已建立稳定手牌的张数
   // 全部做空安全处理，任何字段缺失都不渲染、绝不抛错。
-  Widget _diagnosticFooter() {
-    final Map<String, dynamic>? r = result;
-    if (r == null) return const SizedBox.shrink();
-    final String status = (r['status'] is String) ? r['status'] as String : '?';
-    final Map<dynamic, dynamic>? diag =
-        (r['diag'] is Map) ? r['diag'] as Map<dynamic, dynamic> : null;
-    final int raw =
-        (diag != null && diag['raw'] is int) ? diag['raw'] as int : -1;
-    final dynamic orient = diag != null ? diag['orient'] : null;
-    final int count = (r['count'] is int) ? r['count'] as int : 0;
-    final String orientStr = (orient is int) ? '$orient°' : '?';
-    final String txt = '状态:$status  切牌:$raw  方向:$orientStr  张数:$count';
-    return SizedBox(
-      height: 16,
-      child: Padding(
-        padding: const EdgeInsets.only(top: 2),
-        child: Text(
-          txt,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(
-            color: Colors.white38,
-            fontSize: 9,
-            letterSpacing: 0.2,
-          ),
-        ),
-      ),
-    );
-  }
+
 
   void _maybeShareStatus(Map<String, dynamic> json) {
     final key =
@@ -823,94 +684,59 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     }
   }
 
-  // 牌河段标题：左侧"牌河 · N 张"。右侧的"展开▸ / 收起▾"**始终显示**——
-  // 即便牌河为空也允许用户折叠这一段以释放屏幕空间（用户明确要求牌河也能
-  // 收起）。空牌河时文字显示"· 暂无"，但折叠按钮照常可用。
-  Widget _discardSectionHeader({
-    required int discardCount,
-    required bool expanded,
-    required VoidCallback onToggle,
-  }) {
-    final hasContent = discardCount > 0;
-    return Row(
-      children: [
-        const Text(
-          '牌河',
-          style: TextStyle(
-            color: Colors.white70,
-            fontSize: 11,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 0.5,
-          ),
-        ),
-        const SizedBox(width: 6),
-        Text(
-          hasContent ? '· $discardCount 张' : '· 暂无',
-          style: const TextStyle(
-            color: Colors.white38,
-            fontSize: 11,
-            fontWeight: FontWeight.w400,
-          ),
-        ),
-        const Spacer(),
-        // 始终渲染折叠按钮：用户要求牌河区也能收起。空牌河时折叠只是把
-        // 这段占位收成一行标题，同样释放弹性高度。
-        GestureDetector(
-          onTap: onToggle,
-          behavior: HitTestBehavior.opaque,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-            child: Text(
-              expanded ? '收起 ▾' : '展开 ▸',
-              style: const TextStyle(
-                color: Color(0xFF80CBC4), // 青绿 200（主色家族），提示交互
-                fontSize: 10,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
+
 
   // 牌河段容器：展开时占弹性高度（Expanded），折叠时收回成一行标题、
   // 不占弹性高度，把纵向空间让给「建议 / 手牌」两段 —— 与识别区域收起行为一致。
-  // 之前牌河虽能折叠，但内容被 Expanded 包裹，折叠后仍占 1/3 弹性高度、
-  // 空间并未真正释放；这里按展开/折叠切换 Expanded ↔ 定高，彻底收回空间。
   Widget _discardBlock({
     required String discards,
     required int discardCount,
     required String hand,
   }) {
-    if (_discardExpanded) {
-      return Expanded(
-        child: _section(
-          title: '牌河',
-          titleOverride: _discardSectionHeader(
-            discardCount: discardCount,
-            expanded: true,
-            onToggle: () => setState(() => _discardExpanded = !_discardExpanded),
+    return Container(
+      margin: const EdgeInsets.only(bottom: 2),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(6),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: Colors.white10, width: 0.5),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Text(
+                '牌河 ($discardCount张)',
+                style: const TextStyle(
+                  color: Colors.white70,
+                  fontSize: 9.5,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.3,
+                ),
+              ),
+              const Spacer(),
+              GestureDetector(
+                onTap: () => setState(() => _discardExpanded = !_discardExpanded),
+                behavior: HitTestBehavior.opaque,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                  child: Text(
+                    _discardExpanded ? '收起 ▾' : '展开 ▸',
+                    style: const TextStyle(
+                      color: Color(0xFF80CBC4),
+                      fontSize: 9.5,
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
-          child: _discardSection(discards, discardCount, hand: hand),
-          fillHeight: true,
-        ),
-      );
-    }
-    // 折叠态：只保留标题行（含「展开 ▸」按钮），定高不占弹性空间。
-    return SizedBox(
-      height: _kDiscardHeaderH,
-      child: Container(
-        decoration: BoxDecoration(
-          color: Colors.white.withAlpha(8),
-          borderRadius: BorderRadius.circular(6),
-        ),
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-        child: _discardSectionHeader(
-          discardCount: discardCount,
-          expanded: false,
-          onToggle: () => setState(() => _discardExpanded = !_discardExpanded),
-        ),
+          if (_discardExpanded) ...[
+            const SizedBox(height: 3),
+            _discardSection(discards, discardCount, hand: hand),
+          ],
+        ],
       ),
     );
   }
@@ -1443,52 +1269,109 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
   Widget _adviceSection(List<dynamic> advice, String best, int count) {
     if (advice.isEmpty) {
-      // 原实现在这里直接返回 SizedBox.shrink()，导致用户刚开始时看到一段空白
-      // ——不知道是「正在识别」「没牌可看」还是「坏了」。给个轻量的初始提示。
-      final bool hasHand = count > 0;
-      final String hint = hasHand
-          ? '向听 / 打牌建议（识别稳定后会显示）'
-          : '尚无手牌 — 等待识别到 13/14 张再给出推荐\n'
-              '· 若持续无牌：请把弹窗拖到不遮挡手牌的位置\n'
-              '· 也可点上方"收起"只保留悬浮按钮\n'
-              '· 仍无法识别可能是牌面美术与内置模板不匹配';
-      return Padding(
-        padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
-        child: Text(
-          hint,
-          style: TextStyle(
-            color: Colors.white.withAlpha(110),
-            fontSize: 10,
-            fontStyle: FontStyle.italic,
-            height: 1.35,
-          ),
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        decoration: BoxDecoration(
+          color: Colors.white.withAlpha(6),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: Colors.white10, width: 0.5),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.tips_and_updates_outlined, color: Colors.white38, size: 13),
+            const SizedBox(width: 5),
+            Expanded(
+              child: Text(
+                count > 0 ? '手牌识别中，正在推演建议…' : '等待手牌入镜（请勿遮挡底部手牌）',
+                style: const TextStyle(color: Colors.white60, fontSize: 9.5),
+              ),
+            ),
+          ],
         ),
       );
     }
-    // best 第一张，其余按 ukeire 降序展示
+
     final sorted = [...advice];
-    sorted.sort((a, b) => ((b['ukeire'] ?? 0) as int)
-        .compareTo(((a['ukeire'] ?? 0) as int)));
-    return Wrap(
-      spacing: 4,
-      runSpacing: 4,
-      children: [
-        for (var i = 0; i < sorted.length && i < 4; i++)
-          AdviceCard(
-            tile: (sorted[i]['tile'] ?? '') as String,
-            ukeire: (sorted[i]['ukeire'] ?? 0) as int,
-            best: best.isNotEmpty && sorted[i]['tile'] == best,
-            dealIn: sorted[i]['deal_in'] as String?,
-            ponKong: sorted[i]['pon_kong'] as String?,
-            reason: sorted[i]['reason'] as String?,
-            isDingque: (sorted[i]['is_dingque'] ?? false) as bool,
+    if (sorted.isNotEmpty && best.isNotEmpty) {
+      final bestIdx = sorted.indexWhere((a) => a['tile'] == best);
+      if (bestIdx > 0) {
+        final bItem = sorted.removeAt(bestIdx);
+        sorted.insert(0, bItem);
+      }
+    }
+
+    final top = sorted.first;
+    final topTile = (top['tile'] ?? '') as String;
+    final topUkeire = (top['ukeire'] ?? 0) as int;
+    final topReason = top['reason'] as String?;
+    final bool isDingque = (top['is_dingque'] ?? false) as bool;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
+      decoration: BoxDecoration(
+        color: const Color(0x33004D40), // 墨绿微底
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: const Color(0x6680CBC4), width: 0.8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Text('建议打', style: TextStyle(color: Colors.white70, fontSize: 11)),
+              const SizedBox(width: 4),
+              TileChip(tile: topTile, size: 21),
+              const SizedBox(width: 6),
+              if (isDingque) ...[
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF00695C),
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                  child: const Text('定缺', style: TextStyle(color: Colors.white, fontSize: 8.5, fontWeight: FontWeight.bold)),
+                ),
+                const SizedBox(width: 4),
+              ],
+              const Spacer(),
+              if (topUkeire > 0)
+                Text(
+                  '进张 $topUkeire 张',
+                  style: const TextStyle(color: Colors.lightGreenAccent, fontSize: 11, fontWeight: FontWeight.bold),
+                ),
+            ],
           ),
-      ],
+          if (topReason != null && topReason.isNotEmpty) ...[
+            const SizedBox(height: 3),
+            Text(
+              topReason,
+              style: const TextStyle(color: Color(0xFF80CBC4), fontSize: 9.5, height: 1.15),
+            ),
+          ],
+          if (sorted.length > 1) ...[
+            const SizedBox(height: 4),
+            Wrap(
+              spacing: 6,
+              runSpacing: 2,
+              children: [
+                for (int i = 1; i < sorted.length && i < 3; i++)
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text('次选:', style: TextStyle(color: Colors.white.withAlpha(140), fontSize: 9)),
+                      const SizedBox(width: 2),
+                      TileChip(tile: (sorted[i]['tile'] ?? '') as String, size: 16),
+                      const SizedBox(width: 2),
+                      Text('${sorted[i]['ukeire'] ?? 0}张', style: TextStyle(color: Colors.white.withAlpha(160), fontSize: 9)),
+                    ],
+                  ),
+              ],
+            ),
+          ],
+        ],
+      ),
     );
   }
-
-  // 上一手点评（commentary）已不在弹窗内显示——
-// 只在 shareData 中作为状态传给主界面（主界面有专门区域呈现），避免弹窗被文字占满。
 
   @override
   Widget build(BuildContext context) {
@@ -1500,14 +1383,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
     final String hand = (result?['hand'] ?? '') as String;
     final int count = (result?['count'] ?? 0) as int;
-    // 「建议」段走防封号延迟态（_shownAdvice/_shownBest），手牌/牌河用 result 即时值。
     final List<dynamic> advice = _shownAdvice;
     final String best = _shownBest;
     final String discards = (result?['discards'] ?? '') as String;
     final int discardCount = (result?['discard_count'] ?? 0) as int;
 
-    // 三段固定布局：顶部建议 / 中部牌河 / 下部手牌。
-    // 严格按要求：移除所有 LayoutBuilder/MediaQuery 自适应分支。
     return SizedBox.expand(
       child: Stack(
         children: [
@@ -1516,91 +1396,146 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               gradient: const LinearGradient(
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
-                colors: [Color(0xF01E2126), Color(0xF0111418)],
+                colors: [Color(0xF51A1D24), Color(0xF5101216)],
               ),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: Colors.white.withAlpha(28)),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: Colors.white.withAlpha(24), width: 0.8),
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withAlpha(80),
-                  blurRadius: 12,
-                  offset: const Offset(0, 4),
+                  color: Colors.black.withAlpha(120),
+                  blurRadius: 10,
+                  offset: const Offset(0, 3),
                 ),
               ],
             ),
-            padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+            padding: const EdgeInsets.fromLTRB(7, 6, 7, 6),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // 顶部栏：标题 + 定缺 + 收起。
-                // 固定高度而非自然高度：minPanelH 的推导依赖这个确定值，
-                // 若让它随字体/图标自然变化，算术就不再成立。
+                // 顶部控制栏
                 SizedBox(
                   height: _kTitleBarH,
                   child: Row(
                     children: [
-                      const MahjongTileIcon(size: 16),
-                      const SizedBox(width: 5),
+                      const MahjongTileIcon(size: 15),
+                      const SizedBox(width: 4),
                       const Expanded(
                         child: Text(
-                          '识牌助手',
+                          '雀神助手',
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                             color: Colors.white,
                             fontWeight: FontWeight.bold,
-                            fontSize: 13,
-                            letterSpacing: 0.5,
+                            fontSize: 12.5,
+                            letterSpacing: 0.3,
                           ),
                         ),
                       ),
-                      // 连接状态条：一直可见，"●实时 / ⏳等待 / ⚠错误"任一
                       _statusBanner(),
                       const SizedBox(width: 4),
-                      // 定缺交互快捷按钮（点击快速循环切换）
                       _dingqueBadge(),
-                      const SizedBox(width: 6),
+                      const SizedBox(width: 4),
+                      GestureDetector(
+                        onTap: () {
+                          _toggleCapsuleMode();
+                          _togglePanel();
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withAlpha(20),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: const Text('胶囊', style: TextStyle(color: Colors.white70, fontSize: 9.5)),
+                        ),
+                      ),
+                      const SizedBox(width: 4),
                       GestureDetector(
                         onTap: _togglePanel,
                         child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 3),
-                          color: Colors.white.withAlpha(28),
-                          child: const Text(
-                            '收起',
-                            style: TextStyle(color: Colors.white, fontSize: 11),
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withAlpha(28),
+                            borderRadius: BorderRadius.circular(4),
                           ),
+                          child: const Text('收起', style: TextStyle(color: Colors.white, fontSize: 10)),
                         ),
                       ),
                     ],
                   ),
                 ),
-                const SizedBox(height: _kTitleGap),
-                // 实时画面预览 + 可上下滑动/缩放的识别框。
-                _previewArea(),
-                const SizedBox(height: _kSectionGap),
+                const SizedBox(height: 5),
+                // 核心卡片滚动流：全包裹于 SingleChildScrollView，彻底杜绝 RenderFlex overflow
                 Expanded(
-                  child: _section(
-                    title: '建议',
-                    child: _adviceSection(advice, best, count),
-                    fillHeight: true,
+                  child: SingleChildScrollView(
+                    physics: const ClampingScrollPhysics(),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        // 1. 核心建议（出牌决策）
+                        _adviceSection(advice, best, count),
+                        const SizedBox(height: 5),
+                        // 2. 当前手牌
+                        if (hand.isNotEmpty && count > 0) ...[
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withAlpha(6),
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(color: Colors.white10, width: 0.5),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                Row(
+                                  children: [
+                                    Text(
+                                      '手牌 ($count张)',
+                                      style: const TextStyle(
+                                        color: Colors.white70,
+                                        fontSize: 9.5,
+                                        fontWeight: FontWeight.w600,
+                                        letterSpacing: 0.3,
+                                      ),
+                                    ),
+                                    if (result?['is_drawing'] == true) ...[
+                                      const SizedBox(width: 6),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 0.5),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFFE65100),
+                                          borderRadius: BorderRadius.circular(2),
+                                        ),
+                                        child: const Text(
+                                          '摸牌中',
+                                          style: TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 7.5,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                                const SizedBox(height: 2),
+                                _handSection(hand, count),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 5),
+                        ],
+                        // 3. 9x3 剩余存活牌记牌器
+                        _remainingMatrixSection(result?['remaining_matrix'] as Map<String, dynamic>?),
+                        // 4. 牌河弃牌（有弃牌才显示）
+                        if (discards.isNotEmpty || discardCount > 0) ...[
+                          const SizedBox(height: 5),
+                          _discardBlock(discards: discards, discardCount: discardCount, hand: hand),
+                        ],
+                      ],
+                    ),
                   ),
                 ),
-                const SizedBox(height: _kSectionGap),
-                _discardBlock(discards: discards, discardCount: discardCount, hand: hand),
-                const SizedBox(height: _kSectionGap),
-                Expanded(
-                  child: _section(
-                    title: '手牌',
-                    child: (hand.isNotEmpty && count > 0)
-                        ? _handSection(hand, count)
-                        : const SizedBox.shrink(),
-                    fillHeight: true,
-                  ),
-                ),
-                const SizedBox(height: _kSectionGap),
-                // 9x3 剩余牌矩阵面板
-                _remainingMatrixSection(result?['remaining_matrix'] as Map<String, dynamic>?),
-                _diagnosticFooter(),
               ],
             ),
           ),
@@ -1610,242 +1545,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     );
   }
 
-  /// 实时画面预览区 + 可拖动/缩放的识别框（ROI）。
-  ///
-  /// 整块区域是一个 GestureDetector：按下瞬间按落点判定操作"上边/下边/整条带"，
-  /// 拖动时所有 dy 都是相对整块预览区的局部坐标 → 比例直接等于相对整屏高度，
-  /// 引擎据此裁剪识别区域。识别框仅仅是个视觉指示，真正的识别范围由比例决定。
-  /// 即便预览还没解码出来（_preview 为 null），拖动依然有效——比例照常发送。
-  Widget _previewArea() {
-    // 折叠态：只显示一行提示+展开按钮，释放屏幕空间，避免弹窗遮挡手牌。
-    if (_previewCollapsed) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              const Expanded(
-                child: Text(
-                  '识别区域 · 已收起',
-                  style: TextStyle(
-                    color: Colors.white54,
-                    fontSize: 9.5,
-                    letterSpacing: 0.3,
-                  ),
-                ),
-              ),
-              GestureDetector(
-                onTap: () => setState(() {
-                  _previewCollapsed = false;
-                  // 展开后把面板高度恢复到能容纳预览区的最小值，避免挤压
-                  if (panelH < _kMinPanelHExpanded) {
-                    panelH = _kMinPanelHExpanded;
-                    _ensureSize(panelW, panelH);
-                  }
-                }),
-                child: const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                  child: Text(
-                    '展开 ▾',
-                    style: TextStyle(
-                      color: Color(0xFF80CBC4),
-                      fontSize: 10,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ],
-      );
-    }
-
-    final double bandTop = _roiTop * _kPreviewH;
-    final double bandH = (_roiBottom - _roiTop) * _kPreviewH;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            const Expanded(
-              child: Padding(
-                padding: EdgeInsets.only(bottom: 3),
-                child: Text(
-                  '识别区域 · 拖动高亮框对准手牌',
-                  style: TextStyle(
-                    color: Colors.white54,
-                    fontSize: 9.5,
-                    letterSpacing: 0.3,
-                  ),
-                ),
-              ),
-            ),
-            GestureDetector(
-              onTap: _cycleOrient,
-              child: Padding(
-                padding: const EdgeInsets.only(left: 6, bottom: 3),
-                child: Text(
-                  '旋转 $_orientDeg° ⟳',
-                  style: const TextStyle(
-                    color: Color(0xFF80CBC4),
-                    fontSize: 10,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ),
-            ),
-            GestureDetector(
-              onTap: () => setState(() {
-                _previewCollapsed = true;
-                // 收起后允许面板更矮，并立即把当前高度限制在折叠后的最小值以上
-                panelH = panelH.clamp(_minPanelH(), maxPanelH).toDouble();
-                _ensureSize(panelW, panelH);
-              }),
-              child: const Padding(
-                padding: EdgeInsets.only(left: 6, bottom: 3),
-                child: Text(
-                  '收起 ▴',
-                  style: TextStyle(
-                    color: Color(0xFF80CBC4),
-                    fontSize: 10,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-        SizedBox(
-          height: _kPreviewH,
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onVerticalDragStart: (d) {
-              final double y = (d.localPosition.dy / _kPreviewH).clamp(0.0, 1.0);
-              setState(() {
-                if (y < _roiTop + 0.06) {
-                  _roiDragMode = 'top';
-                } else if (y > _roiBottom - 0.06) {
-                  _roiDragMode = 'bottom';
-                } else {
-                  _roiDragMode = 'both';
-                }
-              });
-            },
-            onVerticalDragUpdate: (d) => _dragRoi(d.localPosition.dy, _roiDragMode),
-            onVerticalDragEnd: (_) => _sendRoi(),
-            child: Stack(
-              children: [
-                // 预览底图（或占位）。用 BoxFit.contain 保持原比例，不再拉伸变形。
-                Positioned.fill(
-                  child: Container(
-                    color: Colors.black.withAlpha(120),
-                    child: _preview == null
-                        ? const Center(
-                            child: Text(
-                              '等待画面…',
-                              style: TextStyle(color: Colors.white54, fontSize: 10),
-                            ),
-                          )
-                        : RawImage(
-                            image: _preview,
-                            fit: BoxFit.contain,
-                            alignment: Alignment.center,
-                          ),
-                  ),
-                ),
-                // 被识别区域高亮带（纯视觉）
-                Positioned(
-                  top: bandTop,
-                  left: 0,
-                  right: 0,
-                  height: bandH,
-                  child: Container(
-                    decoration: BoxDecoration(
-                      border: Border.all(
-                        color: const Color(0xFF80CBC4),
-                        width: 1.5,
-                      ),
-                      color: const Color(0x2080CBC4),
-                    ),
-                  ),
-                ),
-                // 上边把手（视觉提示）
-                Positioned(
-                  top: bandTop - 1.5,
-                  left: 0,
-                  right: 0,
-                  height: 3,
-                  child: Container(color: const Color(0xFF80CBC4)),
-                ),
-                // 下边把手（视觉提示）
-                Positioned(
-                  top: bandTop + bandH - 1.5,
-                  left: 0,
-                  right: 0,
-                  height: 3,
-                  child: Container(color: const Color(0xFF80CBC4)),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  /// 段容器：固定高度的标题栏 + 可滚动内容。无 LayoutBuilder / 无 MediaQuery。
-  /// 可选 titleOverride：传入则用自定义标题组件（如带折叠开关的牌河标题），
-  /// 不传则回退到默认的纯文本标题。
-  Widget _section({
-    required String title,
-    required Widget child,
-    double? height,
-    bool fillHeight = false,
-    Widget? titleOverride,
-  }) {
-    final Widget header = titleOverride ??
-        Text(
-          title,
-          style: const TextStyle(
-            color: Colors.white70,
-            fontSize: 11,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 0.5,
-          ),
-        );
-    final Widget body = Container(
-      decoration: BoxDecoration(
-        color: Colors.white.withAlpha(8),
-        borderRadius: BorderRadius.circular(6),
-      ),
-      padding: const EdgeInsets.all(6),
-      child: SingleChildScrollView(
-        physics: const ClampingScrollPhysics(),
-        child: child,
-      ),
-    );
-    final Widget content = Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        header,
-        const SizedBox(height: 4),
-        // 必须 Expanded：body 内是 SingleChildScrollView，在 Column 中若不给出
-        // 有界高度，它会取"子内容的完整高度"。牌河牌多时子内容远高于段高，
-        // Column 随即 overflow 并画出红色越界文字 —— 且与窗口尺寸无关。
-        // 包上 Expanded 后滚动区被限制在剩余空间内，超出部分改为段内滚动。
-        Expanded(child: body),
-      ],
-    );
-    if (fillHeight) {
-      return content;
-    }
-    return SizedBox(
-      height: height ?? 100,
-      child: content,
-    );
-  }
 }
 
 class _ShantenBadge extends StatelessWidget {

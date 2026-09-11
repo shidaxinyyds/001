@@ -732,6 +732,80 @@ def detect_dingque(screen_img: np.ndarray) -> Tuple[Optional[int], Optional[str]
         return None, None
 
 
+def detect_river_discards(image: np.ndarray, detector) -> List[str]:
+    """中心公共牌河多角度检测：提取牌桌中央各家弃牌。"""
+    if image is None or detector is None:
+        return []
+    try:
+        h, w = image.shape[:2]
+        rx1, rx2 = int(w * 0.20), int(w * 0.80)
+        ry1, ry2 = int(h * 0.16), int(h * 0.78)
+        if rx2 <= rx1 or ry2 <= ry1:
+            return []
+        river_crop = image[ry1:ry2, rx1:rx2]
+        hsv = cv2.cvtColor(river_crop, cv2.COLOR_BGR2HSV)
+        mask = ((hsv[:, :, 1] < 90) & (hsv[:, :, 2] > 130)).astype(np.uint8) * 255
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        discards = []
+
+        for cnt in contours:
+            x, y, bw, bh = cv2.boundingRect(cnt)
+            area = bw * bh
+            if bw < 14 or bh < 14 or bw > int(w * 0.25) or bh > int(h * 0.25):
+                continue
+            if area < 250 or area > 0.04 * w * h:
+                continue
+            aspect = bw / float(bh)
+            sub_boxes = []
+            if aspect > 1.4:
+                num_t = max(2, min(4, int(round(aspect / 0.8))))
+                step = bw / float(num_t)
+                for i in range(num_t):
+                    sub_boxes.append((int(x + i * step), y, int(step), bh))
+            elif aspect < 0.65:
+                num_t = max(2, min(4, int(round(bh / (bw * 1.25)))))
+                step = bh / float(num_t)
+                for i in range(num_t):
+                    sub_boxes.append((x, int(y + i * step), bw, int(step)))
+            else:
+                sub_boxes.append((x, y, bw, bh))
+
+            for (sx, sy, sbw, sbh) in sub_boxes:
+                if sbw < 12 or sbh < 12:
+                    continue
+                gx, gy = rx1 + sx, ry1 + sy
+                face = image[gy:gy+sbh, gx:gx+sbw]
+                if face.std() < 12.0:
+                    continue
+                best_l, best_c = None, 0.0
+                if sbw > sbh * 1.15:
+                    rots = [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE]
+                elif sbh > sbw * 1.15:
+                    rots = [None, cv2.ROTATE_180]
+                else:
+                    rots = [None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_180, cv2.ROTATE_90_COUNTERCLOCKWISE]
+
+                for rot in rots:
+                    cur = face if rot is None else cv2.rotate(face, rot)
+                    fh, fw = cur.shape[:2]
+                    lbl, conf = detector._classify_face_retry(cur, (0, 0, fw, fh), allow_retry=False)
+                    if conf > best_c:
+                        best_c = conf
+                        best_l = lbl
+                    if best_c >= 0.88:
+                        break
+                if best_l and best_c >= 0.70:
+                    discards.append(best_l)
+        return discards
+    except Exception:
+        return []
+
+
+
+
+
 class Engine:
     def __init__(self):
         self.trainer: Optional[Trainer] = None
@@ -1656,6 +1730,11 @@ class Engine:
                 for (rect, label, conf) in row:
                     if label is not None:
                         discard_labels.append(label)
+
+            # 叠加中心公共牌河多角度弃牌检测
+            for lab in detect_river_discards(image, detector):
+                if lab:
+                    discard_labels.append(lab)
 
             # ---- 摸牌独立判定 (基于物理间距 Physical Gap) ----
             is_drawing = False

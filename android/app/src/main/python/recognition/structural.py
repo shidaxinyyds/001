@@ -2388,12 +2388,8 @@ class StructuralDetector(Detector):
         #
         # 方向探测（classify=False）路径必须**保留所有带**，因为它要统计
         # 哪个方向牌最多；其他行里可能恰好是某个方向的手牌行。
-        if classify and cand_bands:
-            bottom = max(cand_bands, key=lambda b: max(r[1] + r[3] for r in b))
-            if len(bottom) >= 11:
-                cand_bands = [bottom]
-            else:
-                cand_bands = [max(cand_bands, key=lambda b: len(b))]
+        # ================== 阶段 2：候选带保留 ==================
+        # 原单行钳制（cand_bands = [bottom]）已移除，允许手牌行与牌河各行协同保留。
         # ================== 阶段 3：竞争带去重 ==================
         cand_bands = self._dedup_bands(cand_bands, img, classify)
 
