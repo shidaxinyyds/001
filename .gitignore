@@ -69,3 +69,7 @@ HANDOVER.md
 apk_extract/
 localtest/apk_extract/
 localtest/app-debug.zip
+localtest/yolo/*.pt
+localtest/tiles/tencent_happy/*_media_*
+localtest/yolo/vis_real.png
+

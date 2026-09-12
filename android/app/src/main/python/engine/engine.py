@@ -1018,10 +1018,21 @@ class Engine:
     def start(self):
         pass
 
-    def get_detector(self) -> Optional[StructuralDetector]:
+    def get_detector(self):
         if self._detector is not None:
             return self._detector
-        # 结构识别器自带字形库，无需外部模板图片，构建一次即可。
+        # 优先使用工业级 YOLO-Mahjong-Nano 端到端目标检测器
+        try:
+            from recognition.yolo_detector import YOLODetector
+            yolo = YOLODetector()
+            if yolo.is_available:
+                self._detector = yolo
+                print("[Engine] Using YOLODetector as primary detection engine.")
+                return self._detector
+        except Exception as e:
+            print(f"[Engine] YOLODetector failed to initialize: {e}, falling back to StructuralDetector")
+
+        # 兜底：结构识别器
         self._detector = StructuralDetector()
         return self._detector
 

@@ -425,11 +425,7 @@ class StructuralDetector(Detector):
                 if _n72.any():
                     self._glyphs.hons.setdefault(_HONOR_GLYPH[_lab], []).append(_n72)
         self._mask_cache: Dict[Tuple[str, int, int], np.ndarray] = {}
-        try:
-            from .neural_classifier import get_neural_classifier
-            self._neural = get_neural_classifier()
-        except Exception as e:
-            self._neural = None
+        self._neural = None
         # 诊断信息（与 TemplateDetector 字段名保持一致）
         self.last_top_score: float = 0.0
         # 牌级分类缓存：真机连续帧里同一张牌被反复分类（13ms/张，13 张 = 173ms/帧，
