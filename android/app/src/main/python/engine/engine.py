@@ -724,31 +724,34 @@ def detect_dingque(screen_img: np.ndarray) -> Tuple[Optional[int], Optional[str]
     """
     try:
         h, w = screen_img.shape[:2]
-        # 定缺徽章位于左下角头像右上侧 (x in 8.0%~12.8%, y in 58.0%~68.0%)
-        sx = int(w * 0.080)
-        ex = int(w * 0.128)
-        sy = int(h * 0.580)
-        ey = int(h * 0.680)
+        # 定缺徽章位于左下角头像右上侧 (x in 8.8%~13.8%, y in 58.8%~67.5%)
+        sx = int(w * 0.088)
+        ex = int(w * 0.138)
+        sy = int(h * 0.588)
+        ey = int(h * 0.675)
         badge_crop = screen_img[sy:ey, sx:ex]
         if badge_crop.size == 0 or badge_crop.shape[0] < 10 or badge_crop.shape[1] < 10:
             return None, None
         hsv = cv2.cvtColor(badge_crop, cv2.COLOR_BGR2HSV)
 
-        green_mask = (hsv[:, :, 0] >= 35) & (hsv[:, :, 0] <= 85) & (hsv[:, :, 1] > 80) & (hsv[:, :, 2] > 80)
-        red_mask1 = (hsv[:, :, 0] >= 0) & (hsv[:, :, 0] <= 10) & (hsv[:, :, 1] > 80) & (hsv[:, :, 2] > 80)
-        red_mask2 = (hsv[:, :, 0] >= 170) & (hsv[:, :, 0] <= 180) & (hsv[:, :, 1] > 80) & (hsv[:, :, 2] > 80)
+        green_mask = (hsv[:, :, 0] >= 35) & (hsv[:, :, 0] <= 85) & (hsv[:, :, 1] > 60) & (hsv[:, :, 2] > 60)
+        red_mask1 = (hsv[:, :, 0] >= 0) & (hsv[:, :, 0] <= 10) & (hsv[:, :, 1] > 60) & (hsv[:, :, 2] > 60)
+        red_mask2 = (hsv[:, :, 0] >= 170) & (hsv[:, :, 0] <= 180) & (hsv[:, :, 1] > 60) & (hsv[:, :, 2] > 60)
         red_mask = red_mask1 | red_mask2
+        blue_mask = (hsv[:, :, 0] >= 95) & (hsv[:, :, 0] <= 135) & (hsv[:, :, 1] > 60) & (hsv[:, :, 2] > 60)
         yellow_mask = (hsv[:, :, 0] >= 14) & (hsv[:, :, 0] <= 35) & (hsv[:, :, 1] > 80) & (hsv[:, :, 2] > 80)
 
         g_cnt = int(np.sum(green_mask))
         r_cnt = int(np.sum(red_mask))
+        b_cnt = int(np.sum(blue_mask))
         y_cnt = int(np.sum(yellow_mask))
+        p_cnt = max(b_cnt, y_cnt)
 
-        if g_cnt > r_cnt and g_cnt > y_cnt and g_cnt > 15:
-            return 2, '条'
-        elif r_cnt > g_cnt and r_cnt > y_cnt and r_cnt > 15:
+        if r_cnt > max(g_cnt, p_cnt) and r_cnt > 40:
             return 0, '万'
-        elif y_cnt > g_cnt and y_cnt > r_cnt and y_cnt > 15:
+        elif g_cnt > max(r_cnt, p_cnt) and g_cnt > 40:
+            return 2, '条'
+        elif p_cnt > max(r_cnt, g_cnt) and p_cnt > 40:
             return 1, '筒'
         return None, None
     except Exception:
@@ -1001,6 +1004,11 @@ class Engine:
         self._orient_zerocount = 0
         self._non_table_frames = 0
         self.trainer = None
+
+    def reset_match(self) -> None:
+        """用户或外部显式请求「新对局重置」：瞬间清空牌池、手牌记忆，108张活牌满血恢复。"""
+        self._reset_game_state()
+        print("[engine] 收到用户显式「新对局重置」请求，已重置牌河、手牌记忆与活牌计数")
 
     def set_config(self, key: str, value) -> None:
         """调试页开关：实时修改识别策略。未知 key 静默忽略。"""
@@ -1657,8 +1665,11 @@ class Engine:
             val = int(t[0]) if t[0].isdigit() else 0
             score = 0
 
+            # 四川麻将/红中血流：7z (红中) 是万能赖子百搭牌，价值极高，绝不建议弃打！
+            if mode == "sc" and t == "7z":
+                score = -999999
             # 字牌（z）：无刻子/对子时价值极低，优先打出
-            if suit == 'z':
+            elif suit == 'z':
                 if counts[t] == 1:
                     score += 100
                 elif counts[t] == 2:
@@ -1697,20 +1708,26 @@ class Engine:
 
             scored_tiles.append((t, score, counts[t]))
 
-        scored_tiles.sort(key=lambda x: -x[1])
+        # 过滤掉保护牌（如红中赖子 score < -90000），仅在全是赖子时才保留
+        valid_candidates = [x for x in scored_tiles if x[1] > -90000]
+        if not valid_candidates:
+            valid_candidates = scored_tiles
+        valid_candidates.sort(key=lambda x: -x[1])
 
         advice = []
-        for rank, (t, sc, cnt) in enumerate(scored_tiles[:4]):
-            if t.endswith('z'):
+        for rank, (t, sc, cnt) in enumerate(valid_candidates[:4]):
+            if mode == "sc" and t == "7z":
+                reason = "红中赖子(保留)"
+            elif t.endswith('z'):
                 reason = "孤张字牌" if cnt == 1 else "多余字牌"
             elif sc >= 80:
                 reason = "全孤无连"
             elif sc >= 40:
                 reason = "间搭孤张"
             elif sc >= 15:
-                reason = "防守/留搭"
+                reason = "边张/对子"
             else:
-                reason = "拆搭推演"
+                reason = "多余牌"
 
             advice.append({
                 "tile": t,

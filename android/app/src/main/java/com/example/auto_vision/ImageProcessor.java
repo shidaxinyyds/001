@@ -104,6 +104,12 @@ public class ImageProcessor {
         dingqueDirty = true;
     }
 
+    private static volatile boolean resetRequested = false;
+
+    public static void resetMatch() {
+        resetRequested = true;
+    }
+
     // 调试页开关：经 MainActivity 的 setConfig 通道写入，下一帧处理前推给 Python 引擎。
     // 用独立布尔而非 Map，避免额外的 import 与 Chaquopy 类型转换摩擦。
     private static boolean cfgAutoOrient = true;
@@ -426,6 +432,17 @@ public class ImageProcessor {
                 dingqueDirty = false;
             } catch (Throwable t) {
                 TimedLog.e(TAG, "set_dingque_override 推送失败: " + t);
+            }
+        }
+
+        // 处理新对局重置请求：瞬间清空牌池、手牌记忆，牌池恢复满额
+        if (resetRequested && engine != null) {
+            try {
+                engine.callAttr("reset_match");
+                resetRequested = false;
+                TimedLog.i(TAG, "已成功调用 engine.reset_match() 重置对局");
+            } catch (Throwable t) {
+                TimedLog.e(TAG, "reset_match 调用失败: " + t);
             }
         }
 

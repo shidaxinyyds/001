@@ -83,6 +83,10 @@ class _HomePageState extends State<HomePage> {
         final deg = (event['deg'] as num?)?.toInt() ?? 0;
         channel.invokeMethod<dynamic>('setOrient', {'deg': deg});
       }
+      // 悬浮窗「新局重置」按钮：把重置指令转发给 Java/Python 引擎
+      if (event is Map && event['type'] == 'reset_match') {
+        channel.invokeMethod<dynamic>('resetMatch');
+      }
     });
   }
 

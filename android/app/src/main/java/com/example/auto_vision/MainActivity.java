@@ -118,6 +118,12 @@ public class MainActivity extends FlutterActivity {
         return;
       }
 
+      if (call.method.equals("resetMatch")) {
+        ImageProcessor.resetMatch();
+        result.success(0);
+        return;
+      }
+
       if (call.method.equals("setConfig")) {
         // 调试页开关：实时修改识别策略（自动旋转/冷启动/严格门槛）。
         Object aKey = call.argument("key");

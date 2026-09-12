@@ -599,6 +599,35 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     }).catchError((_) {});
   }
 
+  /// 一键「新局重置」：向原生与 Python 发送重置信号，同时界面瞬间恢复 108 张活牌满额
+  void _requestResetMatch() {
+    FlutterOverlayWindow.shareData({'type': 'reset_match'}).catchError((_) {});
+    if (mounted) {
+      setState(() {
+        final resetMatrix = {
+          'm': List.filled(9, 4),
+          'p': List.filled(9, 4),
+          's': List.filled(9, 4),
+          'z': List.filled(7, 4),
+        };
+        if (result != null) {
+          result = Map<String, dynamic>.from(result!)
+            ..['remaining_matrix'] = resetMatrix
+            ..['hand'] = ''
+            ..['count'] = 0
+            ..['discards'] = ''
+            ..['discard_count'] = 0
+            ..['advice'] = []
+            ..['best'] = ''
+            ..['status'] = 'waiting'
+            ..['message'] = '已重置新对局';
+        }
+        _shownAdvice = const [];
+        _shownBest = '';
+      });
+    }
+  }
+
   /// 持续重试直到窗口尺寸设置成功（首次显示、展开/收起时用）
   Future<void> _ensureSize(double w, double h, {bool drag = true}) async {
     for (int i = 0; i < 40; i++) {
@@ -829,8 +858,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         },
         onPointerUp: (_) async {
           setState(() => _draggingResize = false);
-          // 缩放结束，面板保持打开，drag 保持 false（由内部平滑滚动与标题栏拖动）
-          await _ensureSize(panelW, panelH, drag: false);
+          // 缩放结束，面板保持打开，立即恢复原生拖动开启！彻底解决缩放后无法自由移动弹窗的问题
+          await _ensureSize(panelW, panelH, drag: true);
         },
         child: SizedBox(
           width: 28,
@@ -1028,15 +1057,19 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                   final int cnt = (counts.length > idx && counts[idx] is int) ? counts[idx] as int : 0;
                   final Color numColor;
                   final Color cellBg;
+                  final Color borderColor;
                   if (cnt == 0) {
-                    numColor = Colors.white24;
-                    cellBg = Colors.white.withAlpha(4);
+                    numColor = Colors.white30;
+                    cellBg = const Color(0xFF1E2126);
+                    borderColor = Colors.white10;
                   } else if (cnt == 1) {
-                    numColor = const Color(0xFFFFB74D); // 仅剩1张预警
-                    cellBg = const Color(0x33FFB74D);
+                    numColor = const Color(0xFFFFB74D); // 明亮金橙（仅剩1张）
+                    cellBg = const Color(0xFF2D2013);   // 纯正暖深琥珀底（彻底告别半透明脏棕色）
+                    borderColor = const Color(0xFFFF9800);
                   } else {
-                    numColor = const Color(0xFF81C784); // 2~4张充足
-                    cellBg = const Color(0x2281C784);
+                    numColor = const Color(0xFF81C784); // 翡翠绿（2~4张充裕）
+                    cellBg = const Color(0xFF142416);   // 纯正墨绿底
+                    borderColor = const Color(0xFF2E7D32);
                   }
 
                   return Container(
@@ -1046,10 +1079,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                       color: cellBg,
                       borderRadius: BorderRadius.circular(3),
                       border: Border.all(
-                        color: cnt == 0
-                            ? Colors.white10
-                            : (cnt == 1 ? const Color(0x66FFB74D) : const Color(0x4481C784)),
-                        width: 0.5,
+                        color: borderColor,
+                        width: 0.7,
                       ),
                     ),
                     child: Column(
@@ -1110,15 +1141,19 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                   final int cnt = (counts.length > idx && counts[idx] is int) ? counts[idx] as int : 0;
                   final Color numColor;
                   final Color cellBg;
+                  final Color borderColor;
                   if (cnt == 0) {
-                    numColor = Colors.white24;
-                    cellBg = Colors.white.withAlpha(4);
+                    numColor = Colors.white30;
+                    cellBg = const Color(0xFF1E2126);
+                    borderColor = Colors.white10;
                   } else if (cnt == 1) {
                     numColor = const Color(0xFFFFB74D);
-                    cellBg = const Color(0x33FFB74D);
+                    cellBg = const Color(0xFF2D2013);
+                    borderColor = const Color(0xFFFF9800);
                   } else {
                     numColor = const Color(0xFF81C784);
-                    cellBg = const Color(0x2281C784);
+                    cellBg = const Color(0xFF142416);
+                    borderColor = const Color(0xFF2E7D32);
                   }
 
                   return Padding(
@@ -1130,10 +1165,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                         color: cellBg,
                         borderRadius: BorderRadius.circular(3),
                         border: Border.all(
-                          color: cnt == 0
-                              ? Colors.white10
-                              : (cnt == 1 ? const Color(0x66FFB74D) : const Color(0x4481C784)),
-                          width: 0.5,
+                          color: borderColor,
+                          width: 0.7,
                         ),
                       ),
                       child: Column(
@@ -1193,6 +1226,35 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               ),
               const Spacer(),
               GestureDetector(
+                onTap: _requestResetMatch,
+                behavior: HitTestBehavior.opaque,
+                child: Container(
+                  margin: const EdgeInsets.only(right: 6),
+                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFE65100).withAlpha(160),
+                    borderRadius: BorderRadius.circular(3),
+                    border: Border.all(color: const Color(0xFFFFB74D), width: 0.6),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.refresh_rounded, color: Colors.white, size: 9.5),
+                      SizedBox(width: 2),
+                      Text(
+                        '新局',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 8.5,
+                          fontWeight: FontWeight.bold,
+                          decoration: TextDecoration.none,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              GestureDetector(
                 onTap: () => setState(() => _matrixExpanded = !_matrixExpanded),
                 behavior: HitTestBehavior.opaque,
                 child: Padding(
@@ -1210,6 +1272,18 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           ),
           if (_matrixExpanded) ...[
             const SizedBox(height: 3),
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4, top: 1, left: 18),
+              child: Row(
+                children: [
+                  _legendDot(const Color(0xFF81C784), '充裕(2-4)'),
+                  const SizedBox(width: 8),
+                  _legendDot(const Color(0xFFFFB74D), '仅剩1张'),
+                  const SizedBox(width: 8),
+                  _legendDot(Colors.white38, '绝张(0)'),
+                ],
+              ),
+            ),
             buildRow('万', const Color(0xFF1E6B7A), m),
             buildRow('筒', const Color(0xFF1E6B7A), p),
             buildRow('条', const Color(0xFF66BB6A), s),
@@ -1218,6 +1292,28 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           ],
         ],
       ),
+    );
+  }
+
+  Widget _legendDot(Color color, String label) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 5.5,
+          height: 5.5,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 3),
+        Text(
+          label,
+          style: const TextStyle(
+            color: Colors.white60,
+            fontSize: 8.5,
+            decoration: TextDecoration.none,
+          ),
+        ),
+      ],
     );
   }
 
@@ -1234,15 +1330,30 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (partial)
-            const Padding(
-              padding: EdgeInsets.only(bottom: 3),
-              child: Text(
-                '手牌识别中…稳定后自动补齐',
-                style: TextStyle(
-                  color: Colors.white60,
-                  fontSize: 9,
-                  decoration: TextDecoration.none,
-                ),
+            Container(
+              margin: const EdgeInsets.only(bottom: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+              decoration: BoxDecoration(
+                color: const Color(0xFFE65100).withAlpha(40),
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(color: const Color(0xFFFFB74D), width: 0.6),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.warning_amber_rounded, color: Color(0xFFFFB74D), size: 12),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      '手牌仅 $count 张：若被悬浮窗压住，请上移避免遮挡！',
+                      style: const TextStyle(
+                        color: Color(0xFFFFD54F),
+                        fontSize: 8.5,
+                        fontWeight: FontWeight.w600,
+                        decoration: TextDecoration.none,
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
           HandChipRow(
@@ -1516,7 +1627,36 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                               ),
                             ),
                             _statusBanner(),
-                            const SizedBox(width: 6),
+                            const SizedBox(width: 5),
+                            GestureDetector(
+                              onTap: _requestResetMatch,
+                              behavior: HitTestBehavior.opaque,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2.5),
+                                margin: const EdgeInsets.only(right: 5),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFE65100).withAlpha(160),
+                                  borderRadius: BorderRadius.circular(4),
+                                  border: Border.all(color: const Color(0xFFFFB74D), width: 0.7),
+                                ),
+                                child: const Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.refresh_rounded, color: Colors.white, size: 10),
+                                    SizedBox(width: 2),
+                                    Text(
+                                      '新局',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 9.5,
+                                        fontWeight: FontWeight.bold,
+                                        decoration: TextDecoration.none,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
                             GestureDetector(
                               onTap: _togglePanel,
                               behavior: HitTestBehavior.opaque,
