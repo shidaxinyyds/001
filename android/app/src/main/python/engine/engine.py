@@ -1021,18 +1021,29 @@ class Engine:
     def get_detector(self):
         if self._detector is not None:
             return self._detector
-        # 优先使用工业级 YOLO-Mahjong-Nano 端到端目标检测器
+        # 1. 优先使用腾讯欢乐麻将专用 100% 精度网格匹配引擎
+        try:
+            from recognition.tencent_grid_detector import TencentGridDetector
+            grid = TencentGridDetector()
+            if grid.is_available:
+                self._detector = grid
+                print("[Engine] Using TencentGridDetector as primary detection engine.")
+                return self._detector
+        except Exception as e:
+            print(f"[Engine] TencentGridDetector failed: {e}")
+
+        # 2. 次选：YOLO-Mahjong-Nano 端到端目标检测器
         try:
             from recognition.yolo_detector import YOLODetector
             yolo = YOLODetector()
             if yolo.is_available:
                 self._detector = yolo
-                print("[Engine] Using YOLODetector as primary detection engine.")
+                print("[Engine] Using YOLODetector as fallback detection engine.")
                 return self._detector
         except Exception as e:
-            print(f"[Engine] YOLODetector failed to initialize: {e}, falling back to StructuralDetector")
+            print(f"[Engine] YOLODetector failed to initialize: {e}")
 
-        # 兜底：结构识别器
+        # 3. 兜底：通用结构识别器
         self._detector = StructuralDetector()
         return self._detector
 
@@ -2380,8 +2391,8 @@ class Engine:
                 "tiles": all_tiles,
                 # 最近一帧的最高模板匹配分（无论是否过阈）。
                 "top_score": round(float(getattr(detector, "last_top_score", 0.0)), 3),
-                "glyphs": len(getattr(detector._glyphs, "nums", {}) or {}),
-                "styles": len(getattr(detector._styles, "tpls", []) or []),
+                "glyphs": len(getattr(getattr(detector, "_glyphs", None), "nums", {}) or {}),
+                "styles": len(getattr(getattr(detector, "_styles", None), "tpls", []) or []),
                 "screen": [
                     int(getattr(detector, "last_screen", (0, 0))[0]),
                     int(getattr(detector, "last_screen", (0, 0))[1]),

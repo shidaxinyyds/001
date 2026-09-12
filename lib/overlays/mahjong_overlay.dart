@@ -1614,15 +1614,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                                       decoration: TextDecoration.none,
                                     ),
                                   ),
-                                  SizedBox(width: 5),
-                                  Text(
-                                    '⠿ 拖动',
-                                    style: TextStyle(
-                                      color: Colors.white38,
-                                      fontSize: 9,
-                                      decoration: TextDecoration.none,
-                                    ),
-                                  ),
                                 ],
                               ),
                             ),
