@@ -1070,23 +1070,105 @@ class StructuralDetector(Detector):
                                  max(1, int(round(h * sc)))),
                           interpolation=interp)
 
-    def _verify_neural_suit(self, face: np.ndarray, label: str) -> bool:
-        """轻量级花色与关键颜色守卫，确保神经网络预测与像素事实不冲突。"""
+    def _is_valid_tile_face(self, face: np.ndarray, ink_frac: float) -> bool:
+        """物理牌面硬守卫：校验切片是否具备实体麻将牌的物理视觉特征。
+        排除：纯黑图、灰块、大厅按钮、木纹桌布、头像、游戏UI文字、全屏纯色。
+        """
         if face is None or face.size == 0:
+            return False
+        fh, fw = face.shape[:2]
+        if fw < 16 or fh < 20:
+            return False
+        
+        # 1. 宽高比硬约束：立式单张手牌/弃牌 0.42 <= w/h <= 1.08
+        aspect = fw / float(fh)
+        if aspect < 0.42 or aspect > 1.08:
+            return False
+            
+        # 2. 牌面基底明度与反差校验（麻将牌为象牙白/白玉/亮骨色底）
+        gray = cv2.cvtColor(face, cv2.COLOR_BGR2GRAY) if face.ndim == 3 else face
+        mean_v = float(np.mean(gray))
+        p95_v = float(np.percentile(gray, 95))
+        p05_v = float(np.percentile(gray, 5))
+        contrast = p95_v - p05_v
+
+        # 牌面亮区必须具备高明度（拒绝暗色按钮、黑背景、深色木纹、暗色UI）
+        if p95_v < 118.0 or mean_v < 90.0:
+            return False
+
+        # 3. 象牙白底色占比校验：真实麻将牌面具有大比例的象牙白底色（V>=125, S<=55，通常占 45%~90%）
+        # 彻底排除随机噪声、花哨图标、彩色按钮及复杂背景（通常 < 25%）
+        if face.ndim == 3:
+            hsv = cv2.cvtColor(face, cv2.COLOR_BGR2HSV)
+            v_chan, s_chan = hsv[:, :, 2], hsv[:, :, 1]
+            bg_mask = (v_chan >= 120) & (s_chan <= 58)
+            bg_frac = float(bg_mask.sum()) / float(fw * fh)
+            if bg_frac < 0.35:
+                return False
+        else:
+            hsv = None
+
+        # 4. 白板专项防伪 vs 墨迹对比度
+        # 白板 (5z) 几乎无墨，但必须是极其纯净的白牌面
+        if ink_frac < 0.035:
+            if face.ndim == 3:
+                hsv = cv2.cvtColor(face, cv2.COLOR_BGR2HSV)
+                mean_sat = float(np.mean(hsv[:, :, 1]))
+            else:
+                mean_sat = 0.0
+            # 极亮(mean_v >= 155)且低饱和(mean_sat < 40)才可能是真正的白板
+            return mean_v >= 155.0 and mean_sat < 40.0
+
+        # 普通牌面必须具备墨迹对比度（拒绝平坦渐变色块、无墨迹纯色底）
+        if contrast < 25.0:
+            return False
+
+        # 4. 墨迹占比上限：超过 0.48 说明是大面积字/图标/暗色块，非麻将牌
+        if ink_frac > 0.48:
+            return False
+
+        return True
+
+    def _verify_neural_suit(self, face: np.ndarray, label: str) -> bool:
+        """全花色像素级真实性后验校验，杜绝神经网络闭集分类器在非对应花色上的虚构标签。"""
+        if face is None or face.size == 0 or not label:
             return False
         fh, fw = face.shape[:2]
         hsv = cv2.cvtColor(face, cv2.COLOR_BGR2HSV)
         h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
         
-        # 7z (中) 必须包含红色墨迹
+        # 红色墨迹掩码
+        red_mask = (((h < 10) | (h > 170)) & (s > 35) & (v > 35))
+        red_cnt = int(red_mask.sum())
+        
+        # 绿色墨迹掩码
+        green_mask = ((h >= 35) & (h <= 85) & (s > 35) & (v > 35))
+        green_cnt = int(green_mask.sum())
+        
+        # 7z (中) 必须包含明显红色大字
         if label == "7z":
-            red_cnt = int((((h < 10) | (h > 170)) & (s > 40) & (v > 40)).sum())
-            return red_cnt >= 12
+            return red_cnt >= 18
             
-        # 6z (发) 必须包含绿色墨迹
+        # 6z (发) 必须包含明显绿色大字
         if label == "6z":
-            green_cnt = int(((h >= 35) & (h <= 85) & (s > 40) & (v > 40)).sum())
-            return green_cnt >= 12
+            return green_cnt >= 18
+
+        # 5z (白板) 绝不能包含大面积彩色墨迹
+        if label == "5z":
+            return (red_cnt + green_cnt) < 20
+
+        # 条子 (2s ~ 9s): 除 1s (鸟) 之外，2s~9s 绿竹必须具备实体绿色墨迹！
+        if label.endswith("s") and label != "1s":
+            if green_cnt < 8:
+                return False
+            return True
+
+        # 万字 (1m ~ 9m): 必须有字符墨迹（红字或黑字深墨）
+        if label.endswith("m"):
+            if red_cnt < 8:
+                dark_cnt = int((v < 110).sum())
+                return dark_cnt >= 15
+            return True
 
         return True
 
@@ -1123,8 +1205,12 @@ class StructuralDetector(Detector):
         face_area = fw * fh
         ink_frac = total / float(face_area)
 
+        # 物理牌面硬守卫：非麻将牌（黑块/桌面/按钮/渐变色）物理拦截，杜绝闭集模型虚构标签
+        if not self._is_valid_tile_face(face, ink_frac):
+            return None, 0.0
+
         if ink_frac < INK_MIN_FRAC:
-            return "5z", 0.9  # 白板：几乎无墨
+            return "5z", 0.9  # 白板：通过 _is_valid_tile_face 校验的高亮纯白牌面
 
         # ---- 0.5) 神经网络高精分类（ONNX 34类模型优先）----
         if self._neural is not None and self._neural.is_available:

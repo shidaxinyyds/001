@@ -431,7 +431,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   double panelH = 210;
 
   // ── 紧凑布局尺寸常量 ──
-  static const double _kTitleBarH = 28; // 顶部栏高度
 
   static const double minPanelW = 190;
   static const double maxPanelW = 380;
@@ -901,9 +900,14 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // 收起态：胶囊微缩模式（横向微缩条，不遮挡牌局，实时展示听牌/最优打法）
   Widget _miniCapsule() {
     final shanten = result?['shanten'];
-    final adviceList = _shownAdvice.isNotEmpty ? _shownAdvice : (result?['advice'] as List<dynamic>? ?? const []);
+    final int count = ((result?['count'] as num?)?.toInt() ?? 0);
+    final String status = (result?['status'] as String?) ?? '';
+    final bool inMatch = status != 'waiting' && status != 'no_tiles' && count >= 4;
+    final adviceList = (inMatch && _shownAdvice.isNotEmpty)
+        ? _shownAdvice
+        : (inMatch ? (result?['advice'] as List<dynamic>? ?? const []) : const []);
     final topAdvice = adviceList.isNotEmpty ? adviceList[0] as Map<dynamic, dynamic>? : null;
-    final String bestTile = _shownBest.isNotEmpty ? _shownBest : (result?['best'] ?? '');
+    final String bestTile = inMatch ? (_shownBest.isNotEmpty ? _shownBest : (result?['best'] ?? '')) : '';
     final String tileStr = (topAdvice != null && topAdvice['tile'] != null) ? topAdvice['tile'] as String : bestTile;
     final int ukeire = (topAdvice != null && topAdvice['ukeire'] is int) ? topAdvice['ukeire'] as int : 0;
     final String? reason = (topAdvice != null && topAdvice['reason'] is String) ? topAdvice['reason'] as String : null;
@@ -1460,76 +1464,92 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // 顶部控制与拖动手柄区：由 Android 原生 onTouch 在 55dp 区域执行 120Hz 极速拖动
-                Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    // 居中拖动手柄 Pill（醒目提示可自由移动）
-                    Center(
-                      child: Container(
-                        width: 38,
-                        height: 3.5,
-                        margin: const EdgeInsets.only(bottom: 4),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withAlpha(50),
-                          borderRadius: BorderRadius.circular(2),
+                // 顶部控制与拖动手柄区：由 Android 原生 onTouch 在 50dp 区域执行 120Hz 极速拖动
+                Container(
+                  height: 38,
+                  padding: const EdgeInsets.only(bottom: 2),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      // 居中拖动手柄 Pill（醒目提示可自由移动）
+                      Center(
+                        child: Container(
+                          width: 42,
+                          height: 4,
+                          margin: const EdgeInsets.only(bottom: 4),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withAlpha(75),
+                            borderRadius: BorderRadius.circular(2),
+                          ),
                         ),
                       ),
-                    ),
-                    SizedBox(
-                      height: _kTitleBarH,
-                      child: Row(
-                        children: [
-                          const MahjongTileIcon(size: 15),
-                          const SizedBox(width: 5),
-                          const Expanded(
-                            child: Text(
-                              '雀神助手',
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 12,
-                                letterSpacing: 0.3,
-                                decoration: TextDecoration.none,
-                              ),
-                            ),
-                          ),
-                          _statusBanner(),
-                          const SizedBox(width: 6),
-                          GestureDetector(
-                            onTap: _togglePanel,
-                            behavior: HitTestBehavior.opaque,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
-                              decoration: BoxDecoration(
-                                color: Colors.white.withAlpha(25),
-                                borderRadius: BorderRadius.circular(4),
-                                border: Border.all(color: Colors.white12, width: 0.6),
-                              ),
-                              child: const Row(
+                      Expanded(
+                        child: Row(
+                          children: [
+                            const MahjongTileIcon(size: 15),
+                            const SizedBox(width: 5),
+                            const Expanded(
+                              child: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  Icon(Icons.unfold_less_rounded, color: Colors.white70, size: 11),
-                                  SizedBox(width: 2),
                                   Text(
-                                    '收起',
+                                    '雀神助手',
                                     style: TextStyle(
                                       color: Colors.white,
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.w500,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 12,
+                                      letterSpacing: 0.3,
+                                      decoration: TextDecoration.none,
+                                    ),
+                                  ),
+                                  SizedBox(width: 5),
+                                  Text(
+                                    '⠿ 拖动',
+                                    style: TextStyle(
+                                      color: Colors.white38,
+                                      fontSize: 9,
                                       decoration: TextDecoration.none,
                                     ),
                                   ),
                                 ],
                               ),
                             ),
-                          ),
-                        ],
+                            _statusBanner(),
+                            const SizedBox(width: 6),
+                            GestureDetector(
+                              onTap: _togglePanel,
+                              behavior: HitTestBehavior.opaque,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withAlpha(25),
+                                  borderRadius: BorderRadius.circular(4),
+                                  border: Border.all(color: Colors.white12, width: 0.6),
+                                ),
+                                child: const Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.unfold_less_rounded, color: Colors.white70, size: 11),
+                                    SizedBox(width: 2),
+                                    Text(
+                                      '收起',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.w500,
+                                        decoration: TextDecoration.none,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
                 const SizedBox(height: 5),
                 // 核心卡片滚动流：全包裹于 SingleChildScrollView，彻底杜绝 RenderFlex overflow
@@ -1544,8 +1564,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                         // 1. 核心建议（出牌决策）
                         _adviceSection(advice, best, count),
                         const SizedBox(height: 5),
-                        // 2. 当前手牌
-                        if (hand.isNotEmpty && count > 0) ...[
+                        // 2. 当前手牌（仅在确认对局内才显示，杜绝大厅与非对局干扰）
+                        if (hand.isNotEmpty && count > 0 && inMatch) ...[
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
                             decoration: BoxDecoration(

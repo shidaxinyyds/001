@@ -554,13 +554,15 @@ class _HandStabilizer:
         n = sum(cnt.values())
         if n < 5:
             self._empty_streak = getattr(self, "_empty_streak", 0) + 1
-            if self._empty_streak >= 4:
-                # 连续 4 帧手牌区无有效手牌（对局结束/未开局/大厅）：彻底重置稳定手牌，绝不跨局残留
+            if self._empty_streak >= 8:
+                # 连续 8 帧手牌区无有效手牌（对局结束/未开局/大厅）：彻底重置稳定手牌，绝不跨局残留
                 self.stable_mpsz = ""
                 self._streak = 0
                 self._last_key = ""
                 self.pending = False
                 return ""
+            # 未达 8 帧（玩家出牌手指遮挡或摸打过渡）：平滑维持前序稳定手牌，杜绝闪烁空白
+            return self.stable_mpsz
         else:
             self._empty_streak = 0
 
@@ -843,7 +845,7 @@ def detect_river_discards(image: np.ndarray, detector, mode: str = "4p") -> List
                     if best_c >= 0.88:
                         break
 
-                if best_l and best_c >= 0.76:
+                if best_l and best_c >= 0.82:
                     if mode == "sc":
                         if best_l.endswith(('m', 'p', 's')) or best_l == '7z':
                             discards.append(best_l)
@@ -946,27 +948,43 @@ class Engine:
     def _is_mahjong_table(self, image: np.ndarray) -> bool:
         """检测当前画面是否为真实的麻将牌桌对局场景（排除大厅/主菜单/结算界面）。
 
-        真实麻将牌桌中央有大面积的桌布（经典绿/深青/湖蓝/仿木纹），
-        而在大厅/主菜单/选场界面中为蓝天/UI背景，桌布占比极低（<0.18）。
+        真实麻将牌桌具备两大铁证：
+        1. 牌桌中央为主流桌布颜色（经典绿、深青湖蓝、温润木纹），色相饱和度集中。
+        2. 画面下半部（手牌区）存在实体手牌先验特征（横向排列的象牙白矩形块）。
         """
         if image is None or image.size == 0:
             return False
         h, w = image.shape[:2]
-        center = image[int(h * 0.25):int(h * 0.75), int(w * 0.25):int(w * 0.75)]
+        center = image[int(h * 0.22):int(h * 0.78), int(w * 0.20):int(w * 0.80)]
         if center.size == 0:
             return False
         small = cv2.resize(center, (100, 100), interpolation=cv2.INTER_NEAREST)
         hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
-        # 支持常见麻将桌布颜色：
-        # 1. 经典绿呢桌布: H in [32, 95]
-        # 2. 雀魂/腾讯深青/湖蓝/深蓝桌布: H in [95, 130]
-        # 3. 仿木纹/咖啡色桌布: H in [10, 30]
+        
+        # 常见麻将桌布颜色（更加收敛准确的色相与饱和度区间）：
+        # 1. 经典绿呢桌布: H in [35, 88], S >= 35, V >= 30
+        # 2. 雀魂/腾讯深青/湖蓝/深蓝桌布: H in [95, 125], S >= 35, V >= 30
+        # 3. 仿木纹/咖啡色桌布: H in [12, 25], S >= 45, V >= 35
         table_mask = (
-            ((hsv[:, :, 0] >= 32) & (hsv[:, :, 0] <= 95) & (hsv[:, :, 1] >= 22)) |
-            ((hsv[:, :, 0] >= 95) & (hsv[:, :, 0] <= 130) & (hsv[:, :, 1] >= 22)) |
-            ((hsv[:, :, 0] >= 10) & (hsv[:, :, 0] <= 30) & (hsv[:, :, 1] >= 20))
+            ((hsv[:, :, 0] >= 35) & (hsv[:, :, 0] <= 88) & (hsv[:, :, 1] >= 35) & (hsv[:, :, 2] >= 30)) |
+            ((hsv[:, :, 0] >= 95) & (hsv[:, :, 0] <= 125) & (hsv[:, :, 1] >= 35) & (hsv[:, :, 2] >= 30)) |
+            ((hsv[:, :, 0] >= 12) & (hsv[:, :, 0] <= 25) & (hsv[:, :, 1] >= 45) & (hsv[:, :, 2] >= 35))
         )
-        return float(np.mean(table_mask)) >= 0.18
+        table_ratio = float(np.mean(table_mask))
+        if table_ratio >= 0.28:
+            return True
+
+        # 兜底：若牌桌被中央特效临时遮挡，检查底部手牌区是否具备实体白底手牌块
+        bottom_region = image[int(h * 0.72):, :]
+        if bottom_region.size > 0:
+            b_small = cv2.resize(bottom_region, (120, 40), interpolation=cv2.INTER_NEAREST)
+            b_hsv = cv2.cvtColor(b_small, cv2.COLOR_BGR2HSV)
+            white_tiles = (b_hsv[:, :, 2] >= 135) & (b_hsv[:, :, 1] <= 60)
+            white_ratio = float(np.mean(white_tiles))
+            if white_ratio >= 0.12 and table_ratio >= 0.12:
+                return True
+
+        return False
 
     def _reset_game_state(self):
         """重置整局游戏的动态状态（新开局/返回大厅/结算时调用）。"""
@@ -1745,7 +1763,8 @@ class Engine:
             # ===== 牌桌场景校验（过滤大厅/菜单/结算，加入防抖）=====
             if not self._is_mahjong_table(image):
                 self._non_table_frames += 1
-                if not self._stable_hand_mpsz or self._non_table_frames >= 4:
+                # 只有连续 12 帧非牌桌（约 2~3 秒，明确离开牌局回到大厅或结算完成），才重置整局状态
+                if self._non_table_frames >= 12 or (not self._stable_hand_mpsz and self._non_table_frames >= 2):
                     self._reset_game_state()
                     return EngineResult(
                         image=_make_preview(image),
@@ -1777,11 +1796,9 @@ class Engine:
                         }, ensure_ascii=False),
                         stage=None,
                     )
-                # 连续非桌布帧数不足 4 帧（局中半透明遮罩/弹窗）：若有缓存则复用，否则重置
+                # 连续非桌布帧数不足 12 帧（局中半透明遮罩/出牌动画/弹窗）：若有缓存或稳定手牌则继续平滑输出，绝不中断
                 if self._frame_skipper.cached is not None:
                     return self._build_skip_result(image, self._frame_skipper.cached)
-                else:
-                    self._reset_game_state()
             else:
                 self._non_table_frames = 0
 
@@ -2001,7 +2018,7 @@ class Engine:
                 if yc < 0.20 * ih or yc > 0.72 * ih:
                     continue
                 for (rect, label, conf) in row:
-                    if label is not None:
+                    if label is not None and conf >= 0.78:
                         try:
                             if mpsz_to_tile34_index(label) in avail:
                                 discard_labels.append(label)
@@ -2018,15 +2035,6 @@ class Engine:
                 except Exception:
                     pass
 
-            # 新局判定：若当前牌桌上弃牌数突降至 <= 2 张，而历史牌池已累积 >= 5 张，说明上一局已结束并开始了全新对局
-            if len(discard_labels) <= 2 and sum(self._monotonic_discards.values()) >= 5:
-                self._monotonic_discards.clear()
-                self._discard_history.clear()
-                self._tile_voter.reset()
-                self._hand_stab.reset()
-                self._stable_hand_mpsz = ""
-                self._stable_hand_count = 0
-                self._last_hand_y = None
 
             # ---- 摸牌独立判定 (基于物理间距 Physical Gap) ----
             is_drawing = False
