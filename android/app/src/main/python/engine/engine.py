@@ -1567,60 +1567,58 @@ class Engine:
             return self._rotate_to(image, self._orient_override)
 
         ih, iw = image.shape[:2]
-        if iw >= ih:
-            # Android MediaProjection 在横屏游戏中捕获的画面天然为正向 0°，绝无 180° 倒置可能
-            self._orient = 0
-            self._orient_zerocount = 0
-            return image
 
-        if self._orient is None:
-            # 调试页关掉「自动方向探测」：直接用 0°（或手动覆盖），不做任何方向探测，
-            # 避免误旋转，也省下 4 方向探测的开销/崩溃风险。
+        if self._orient is None or self._orient in (0, 180):
+            # 调试页关掉「自动方向探测」：直接用 0°（或手动覆盖），不做任何方向探测
             if not self._cfg.get("auto_orient", True):
                 self._orient = 0
                 self._orient_zerocount = 0
                 return image
-            # 快路径：原方向够好就直接用
+
             det = self.get_detector()
             if det is not None:
                 try:
-                    # 完整检测（含分类），结果缓存交给 process() 复用，
-                    # 所以这次检测的开销不会被浪费。
-                    rows = det.detect_all_rows(image, classify=True,
-                                               allow_rotation=False)
-                    n = sum(len(r) for r in rows)
-                    confs = [d[2] for r in rows for d in r if d[1] is not None]
-                    avg_conf = (sum(confs) / len(confs)) if confs else 0.0
-                    # 判据必须含分类质量：
-                    #  - 旋转 90/270：牌竖排，n=0 或极少 -> 拒绝
-                    #  - 旋转 180：牌横排、n=13，但图案倒置 -> avg_conf 低 -> 拒绝
-                    #  - 正常：n=13 且 conf 高 -> 接受
-                    # 判据 = 存在"手牌行"（行长 >= 11）+ 分类质量达标。
-                    # 为什么不能用 n>=8：旋转 180 时筒子牌上下对称、倒过来
-                    # 仍能正确分类（conf 0.79），n=9 也能过 n>=8 ——
-                    # 但万/索牌倒置后被判成字牌，行长从 13 掉到 9。
-                    # 用手牌行长度判据即可区分（原图 13 >= 11，旋转 180 只有 9）。
-                    hsizes = hand_sizes(self.mode)
-                    has_hand_row = any(len(r) in hsizes or len(r) >= 7 for r in rows)
-                    # 位置判据（必需）：手牌行必须在画面下半部。
-                    # 只靠 len>=11 + avg_conf 会把 180° 倒置图误判成正确朝向 ——
-                    # 倒置时手牌行仍能切出 11 张（万牌被丢弃，13->11）且
-                    # avg_conf 因存活者偏差反而更高（0.882 > 0.860）。
-                    at_bottom = self._longest_row_at_bottom(rows, image.shape[0])
-                    is_landscape = (image.shape[1] > image.shape[0])
-                    if is_landscape and at_bottom and (has_hand_row or n >= 4):
+                    # 1. 优先快检当前 0° 朝向：手牌行必须在屏幕下半部，且单牌重复不超过4张
+                    rows0 = det.detect_all_rows(image, classify=True, allow_rotation=False)
+                    n0 = sum(len(r) for r in rows0)
+                    at_bottom0 = self._longest_row_at_bottom(rows0, ih)
+                    has_hand0 = any(len(r) >= 7 for r in rows0)
+                    dup_fail0 = False
+                    if rows0:
+                        longest_r = max(rows0, key=len)
+                        labels0 = [d[1] for d in longest_r if d[1]]
+                        if any(labels0.count(lab) > 4 for lab in set(labels0)):
+                            dup_fail0 = True  # 同名牌超过4张必为倒置误判（如万字倒置误分类为2筒）
+
+                    if at_bottom0 and (has_hand0 or n0 >= 4) and not dup_fail0:
                         self._orient = 0
                         self._orient_zerocount = 0
-                        self._cached_rows = rows
+                        self._cached_rows = rows0
                         return image
-                    if has_hand_row and avg_conf >= 0.50 and at_bottom:
-                        self._orient = 0
+
+                    # 2. 手机反向横屏（Reverse Landscape，如左插充电线）自愈：
+                    # 当 0° 下手牌在顶部或同名牌超额时，快速检测 180° 倒转
+                    img180 = cv2.rotate(image, cv2.ROTATE_180)
+                    rows180 = det.detect_all_rows(img180, classify=True, allow_rotation=False)
+                    n180 = sum(len(r) for r in rows180)
+                    at_bottom180 = self._longest_row_at_bottom(rows180, ih)
+                    has_hand180 = any(len(r) >= 7 for r in rows180)
+                    dup_fail180 = False
+                    if rows180:
+                        longest_r180 = max(rows180, key=len)
+                        labels180 = [d[1] for d in longest_r180 if d[1]]
+                        if any(labels180.count(lab) > 4 for lab in set(labels180)):
+                            dup_fail180 = True
+
+                    if at_bottom180 and (has_hand180 or n180 >= 4) and not dup_fail180:
+                        self._orient = 180
                         self._orient_zerocount = 0
-                        self._cached_rows = rows
-                        return image
+                        self._cached_rows = rows180
+                        return img180
                 except Exception:
                     traceback.print_exc()
-            # 慢路径：原方向不对，探测 4 个方向
+
+            # 3. 慢路径：原方向不对，探测 4 个方向
             rot, image = self._probe_orientation(image)
             self._orient = rot
             self._orient_zerocount = 0

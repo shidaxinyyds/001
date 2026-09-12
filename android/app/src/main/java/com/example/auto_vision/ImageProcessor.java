@@ -108,6 +108,8 @@ public class ImageProcessor {
 
     public static void resetMatch() {
         resetRequested = true;
+        orientOverride = -1;
+        orientDirty = true;
     }
 
     // 调试页开关：经 MainActivity 的 setConfig 通道写入，下一帧处理前推给 Python 引擎。
