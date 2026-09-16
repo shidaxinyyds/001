@@ -482,3 +482,151 @@ class SichuanAnalyzer:
 
         results.sort(key=lambda item: item["ev"], reverse=True)
         return results
+
+    @classmethod
+    def evaluate_defense_radar(
+        cls,
+        counts: List[int],
+        pool_remaining: Optional[List[int]] = None,
+        opponents_dingque: Optional[List[int]] = None,
+    ) -> List[Dict]:
+        """防点炮雷达评级 (SAFE / SUSPICIOUS / DANGER)"""
+        ratings = []
+        if opponents_dingque is None:
+            opponents_dingque = []
+        for t in range(27):
+            if counts[t] <= 0:
+                continue
+            s = tile_to_suit(t)
+            rem = pool_remaining[t] if pool_remaining is not None else max(0, 4 - counts[t])
+            seen = 4 - rem - counts[t]
+            num = (t % 9) + 1
+            is_edge = (num in (1, 9))
+            is_middle = (num in (4, 5, 6))
+
+            if s in opponents_dingque:
+                lvl = "SAFE"
+                reason = f"防点炮天条：场上有对手定缺【{SUIT_NAMES[s]}】，该门对其为绝对安全牌"
+            elif rem == 0 or seen >= 3:
+                lvl = "SAFE"
+                reason = f"绝张现物：场上已见 {seen} 张，无人能以此牌胡牌"
+            elif is_edge and seen >= 1:
+                lvl = "SAFE"
+                reason = f"边张安全：1/9 偏张且场上已见 {seen} 张，点炮率极低"
+            elif is_middle and seen == 0:
+                lvl = "DANGER"
+                reason = f"极度高危：中心张 {index27_to_chinese(t)} 为纯生张(未见)，点炮率极高，切勿轻易打出！"
+            elif seen == 0:
+                lvl = "SUSPICIOUS"
+                reason = f"疑牌生张：{index27_to_chinese(t)} 场上尚未出现，存在叫口风险"
+            else:
+                lvl = "SUSPICIOUS"
+                reason = f"一般疑牌：场上已见 {seen} 张，注意防守"
+
+            ratings.append({
+                "tile": index27_to_mpsz(t),
+                "tile_cn": index27_to_chinese(t),
+                "level": lvl,
+                "reason": reason,
+                "seen": seen,
+                "remaining": rem
+            })
+        return ratings
+
+    @classmethod
+    def recommend_huan_san_zhang(cls, counts: List[int]) -> Dict:
+        """开局换三张推荐：换顺不换对，拆孤张，防送清一色"""
+        suit_tiles = {SUIT_M: [], SUIT_P: [], SUIT_S: []}
+        for t in range(27):
+            for _ in range(counts[t]):
+                suit_tiles[tile_to_suit(t)].append(t)
+
+        suits_with_at_least_3 = [s for s, tiles in suit_tiles.items() if len(tiles) >= 3]
+        if not suits_with_at_least_3:
+            return {"viable": False, "reason": "无满3张的花色可换"}
+
+        def suit_cost(s):
+            tiles = suit_tiles[s]
+            total = len(tiles)
+            sub_c = [0] * 9
+            for t in tiles:
+                sub_c[t % 9] += 1
+            isolated = sum(1 for i in range(9) if sub_c[i] == 1 and (i == 0 or sub_c[i - 1] == 0) and (i == 8 or sub_c[i + 1] == 0))
+            return (total, -isolated)
+
+        best_suit = min(suits_with_at_least_3, key=suit_cost)
+        cand_tiles = suit_tiles[best_suit]
+
+        def tile_priority(t):
+            num = (t % 9) + 1
+            c = counts[t]
+            is_edge = (num in (1, 9))
+            is_near_edge = (num in (2, 8))
+            is_mid = (num in (4, 5, 6))
+            p = 0
+            if c == 1: p += 10
+            elif c == 2: p += 50
+            else: p += 100
+            if is_edge: p += 1
+            elif is_near_edge: p += 3
+            elif is_mid: p += 8
+            return p
+
+        cand_tiles.sort(key=tile_priority)
+        chosen = cand_tiles[:3]
+        return {
+            "viable": True,
+            "suit": SUIT_NAMES[best_suit],
+            "tiles": [index27_to_mpsz(t) for t in chosen],
+            "tiles_cn": [index27_to_chinese(t) for t in chosen],
+            "reason": f"【{SUIT_NAMES[best_suit]}】仅持 {len(cand_tiles)} 张，拆换成本最低，优先换出孤张偏张"
+        }
+
+    @classmethod
+    def recommend_dingque(cls, counts: List[int]) -> Dict:
+        """智能定缺决策评估"""
+        def eval_suit(s):
+            sub_c = [counts[s * 9 + i] for i in range(9)]
+            total = sum(sub_c)
+            isolated = sum(1 for i in range(9) if sub_c[i] == 1 and (i == 0 or sub_c[i - 1] == 0) and (i == 8 or sub_c[i + 1] == 0))
+            return (total, isolated)
+
+        scores = {s: eval_suit(s) for s in (SUIT_M, SUIT_P, SUIT_S)}
+        best_suit = min(scores, key=lambda s: (scores[s][0], -scores[s][1]))
+        return {
+            "suit": SUIT_NAMES[best_suit],
+            "suit_id": best_suit,
+            "suit_char": SUIT_CHARS[best_suit],
+            "count": scores[best_suit][0],
+            "reason": f"【{SUIT_NAMES[best_suit]}】手牌最少(仅{scores[best_suit][0]}张)，断门代价最小，能以最快速度进入听牌"
+        }
+
+    @classmethod
+    def generate_tile_matrix(
+        cls,
+        counts: List[int],
+        disc_counts: Optional[List[int]] = None,
+        meld_counts: Optional[List[int]] = None,
+    ) -> Dict:
+        """生成 9x3 记牌器存活矩阵"""
+        matrix = {}
+        for s in (SUIT_M, SUIT_P, SUIT_S):
+            sname = SUIT_NAMES[s]
+            row = []
+            for num in range(1, 10):
+                t = s * 9 + num - 1
+                vis = counts[t]
+                if disc_counts and t < len(disc_counts):
+                    vis += disc_counts[t]
+                if meld_counts and t < len(meld_counts):
+                    vis += meld_counts[t]
+                rem = max(0, 4 - vis)
+                row.append({
+                    "tile": index27_to_mpsz(t),
+                    "name": f"{num}{sname}",
+                    "remaining": rem,
+                    "status": "绝张" if rem == 0 else f"{rem}张",
+                    "is_zero": (rem == 0)
+                })
+            matrix[sname] = row
+        return matrix
