@@ -597,11 +597,12 @@ class _HandStabilizer:
 
         # 需要多少帧共识：稳定手牌建立后固定 2 帧共识即采纳
         need = HAND_CONFIRM_FRAMES
-        # 冷启动：还没有任何稳定手牌时，需要至少 2 帧共识且张数 >= 7，防止大厅/非对局单帧噪点锁死假手牌
+        # 冷启动：还没有任何稳定手牌时
         if not self.stable_mpsz:
             if n < 7:
                 return ""
-            if self._streak >= 2:
+            # 若识别到合法手牌张数（如 13 或 14 张满手），首帧立即可采信并进入稳定态，杜绝首帧延迟与"等待"提示卡顿
+            if n in (13, 14) or self._streak >= 2:
                 self.stable_mpsz = key
                 self.pending = False
                 return self.stable_mpsz
@@ -974,17 +975,17 @@ class Engine:
             ((hsv[:, :, 0] >= 12) & (hsv[:, :, 0] <= 25) & (hsv[:, :, 1] >= 45) & (hsv[:, :, 2] >= 35))
         )
         table_ratio = float(np.mean(table_mask))
-        if table_ratio >= 0.28:
+        if table_ratio >= 0.15:
             return True
 
-        # 兜底：若牌桌被中央特效临时遮挡，检查底部手牌区是否具备实体白底手牌块
+        # 兜底：若牌桌被中央悬浮窗/特效遮挡，检查底部手牌区是否具备实体白底手牌块
         bottom_region = image[int(h * 0.72):, :]
         if bottom_region.size > 0:
             b_small = cv2.resize(bottom_region, (120, 40), interpolation=cv2.INTER_NEAREST)
             b_hsv = cv2.cvtColor(b_small, cv2.COLOR_BGR2HSV)
             white_tiles = (b_hsv[:, :, 2] >= 135) & (b_hsv[:, :, 1] <= 60)
             white_ratio = float(np.mean(white_tiles))
-            if white_ratio >= 0.12 and table_ratio >= 0.12:
+            if white_ratio >= 0.08 or (white_ratio >= 0.05 and table_ratio >= 0.08):
                 return True
 
         return False
@@ -1801,7 +1802,7 @@ class Engine:
             if not self._is_mahjong_table(image):
                 self._non_table_frames += 1
                 # 只有连续 12 帧非牌桌（约 2~3 秒，明确离开牌局回到大厅或结算完成），才重置整局状态
-                if self._non_table_frames >= 12 or (not self._stable_hand_mpsz and self._non_table_frames >= 2):
+                if self._non_table_frames >= 12:
                     self._reset_game_state()
                     return EngineResult(
                         image=_make_preview(image),
@@ -2291,12 +2292,22 @@ class Engine:
                 remaining = 108 if self.mode == "sc" else 136
                 dead = 0
             else:
+                # 重新精准计算当前生效手牌的计数，杜绝 partial 或未归一态导致的 hand_counts 漏计全 4 bug
+                hand_counts_final = [0] * 34
+                for i in range(0, len(hand_mpsz), 2):
+                    try:
+                        hand_counts_final[mpsz_to_tile34_index(hand_mpsz[i:i + 2])] += 1
+                    except Exception:
+                        pass
                 remaining_matrix = {
-                    "m": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(0, 9)],
-                    "p": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(9, 18)],
-                    "s": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(18, 27)],
-                    "z": [max(0, 4 - (hand_counts[i] + disc_counts_out[i])) for i in range(27, 34)],
+                    "m": [max(0, 4 - (hand_counts_final[i] + disc_counts_out[i])) for i in range(0, 9)],
+                    "p": [max(0, 4 - (hand_counts_final[i] + disc_counts_out[i])) for i in range(9, 18)],
+                    "s": [max(0, 4 - (hand_counts_final[i] + disc_counts_out[i])) for i in range(18, 27)],
+                    "z": [max(0, 4 - (hand_counts_final[i] + disc_counts_out[i])) for i in range(27, 34)],
                 }
+                known = sum(hand_counts_final[i] for i in avail_list) + sum(disc_counts_out[i] for i in avail_list)
+                remaining = max(0, wall_total - known)
+                dead = sum(1 for i in avail_list if hand_counts_final[i] + disc_counts_out[i] >= 4)
 
             # ===== 方向自愈：连续 3 帧整帧 0 牌 → 解锁重探方向 =====
             # 用户中途旋转手机/切后台再回来，VirtualDisplay 朝向可能变了，

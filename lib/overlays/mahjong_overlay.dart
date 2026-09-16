@@ -1745,11 +1745,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                           ),
                           const SizedBox(height: 5),
                         ],
-                        // 3. 全场记牌器与牌河（对局开始后才显示，两者保持一致）
+                        // 3. 全场记牌器（对局开始后显示，实时统揽全场 108/136 张活牌剩余数）
                         if (inMatch) ...[
                           _remainingMatrixSection(result?['remaining_matrix'] as Map<String, dynamic>?),
-                          const SizedBox(height: 5),
-                          _discardBlock(discards: discards, discardCount: discardCount, hand: hand),
                         ],
                       ],
                     ),
