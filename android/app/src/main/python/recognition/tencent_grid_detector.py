@@ -178,19 +178,35 @@ class TencentGridDetector(Detector):
         best_lbl = sorted_candidates[0][0]
         best_sc = sorted_candidates[0][1]
 
-        if (best_lbl in ["2m", "3m"] or best_lbl in ["7m", "9m"]) and best_sc < 0.75 and not has_btn:
-            bot_crop = face[60:105, 14:66]
-            bot_hsv = cv2.cvtColor(bot_crop, cv2.COLOR_BGR2HSV)
-            has_red_wan = np.sum(((bot_hsv[:, :, 0] <= 12) | (bot_hsv[:, :, 0] >= 165)) & (bot_hsv[:, :, 1] > 60)) > 40
-            if has_red_wan or is_grey:
-                top_crop = face[20:58, 14:66]
-                top_gray = cv2.cvtColor(top_crop, cv2.COLOR_BGR2GRAY)
-                row_dark = np.sum(top_gray < 140, axis=1)
-                num_peaks = self.count_peaks(row_dark, min_height=8, min_prominence=5)
-                if num_peaks == 2 and scores.get("2m", 0) > 0.35:
-                    best_lbl = "2m"
-                elif num_peaks >= 3 and scores.get("3m", 0) > 0.35:
-                    best_lbl = "3m"
+        # 1. 2万 vs 3万 物理笔画峰值严格判决（仅在最佳候选为 2m 或 3m 时生效）
+        if best_lbl in ["2m", "3m"]:
+            top_crop = face[20:58, 14:66]
+            top_gray = cv2.cvtColor(top_crop, cv2.COLOR_BGR2GRAY)
+            row_dark = np.sum(top_gray < 140, axis=1)
+            num_peaks = self.count_peaks(row_dark, min_height=8, min_prominence=5)
+            if num_peaks == 2 and scores.get("2m", 0) > 0.35:
+                best_lbl = "2m"
+            elif num_peaks >= 3 and scores.get("3m", 0) > 0.35:
+                best_lbl = "3m"
+
+        # 2. 2条 vs 3条 结构严格判决（仅在最佳候选为 2s 或 3s 时生效）
+        if best_lbl in ["2s", "3s"]:
+            bot_center = face[75:105, 35:45]
+            bot_center_g = cv2.cvtColor(bot_center, cv2.COLOR_BGR2GRAY)
+            bot_dark = float(np.mean(bot_center_g < 140))
+            if bot_dark > 0.35 and scores.get("2s", 0) > 0.35:
+                best_lbl = "2s"
+            elif bot_dark <= 0.20 and scores.get("3s", 0) > 0.35:
+                best_lbl = "3s"
+
+        # 3. 2筒 vs 3筒 结构严格判决（仅在最佳候选为 2p 或 3p 时生效）
+        if best_lbl in ["2p", "3p"]:
+            face_hsv = cv2.cvtColor(face[40:80, 20:60], cv2.COLOR_BGR2HSV)
+            red_cnt = int(np.sum(((face_hsv[:, :, 0] <= 10) | (face_hsv[:, :, 0] >= 170)) & (face_hsv[:, :, 1] >= 60) & (face_hsv[:, :, 2] >= 50)))
+            if red_cnt > 50 and scores.get("3p", 0) > 0.35:
+                best_lbl = "3p"
+            elif red_cnt <= 20 and scores.get("2p", 0) > 0.35:
+                best_lbl = "2p"
 
         if best_lbl in ["4p", "5p"]:
             cy, cx = int(face.shape[0] * 0.5), int(face.shape[1] * 0.5)
@@ -232,6 +248,23 @@ class TencentGridDetector(Detector):
             return None, 0.0
         lbl, sc = self.classify_tile(face_bgr)
         return lbl, sc
+
+    def is_dingque_phase(self, image_bgr: np.ndarray) -> bool:
+        """精准检测腾讯欢乐麻将『定缺中..』选门阶段（中央出现万/条/筒三大色盘按钮）"""
+        if image_bgr is None or image_bgr.size == 0:
+            return False
+        ih, iw = image_bgr.shape[:2]
+        sub_center = image_bgr[int(ih * 0.50):int(ih * 0.72), int(iw * 0.35):int(iw * 0.65)]
+        if sub_center.shape[0] < 10 or sub_center.shape[1] < 10:
+            return False
+        hsv = cv2.cvtColor(sub_center, cv2.COLOR_BGR2HSV)
+        red_mask = ((hsv[:, :, 0] <= 10) | (hsv[:, :, 0] >= 170)) & (hsv[:, :, 1] >= 120) & (hsv[:, :, 2] >= 120)
+        green_mask = (hsv[:, :, 0] >= 40) & (hsv[:, :, 0] <= 85) & (hsv[:, :, 1] >= 100) & (hsv[:, :, 2] >= 100)
+        orange_mask = (hsv[:, :, 0] >= 12) & (hsv[:, :, 0] <= 25) & (hsv[:, :, 1] >= 120) & (hsv[:, :, 2] >= 120)
+        r_sum = int(np.sum(red_mask))
+        g_sum = int(np.sum(green_mask))
+        o_sum = int(np.sum(orange_mask))
+        return r_sum > 800 and g_sum > 800 and o_sum > 250
 
     def detect_dingque(self, image_bgr: np.ndarray) -> str:
         ih, iw = image_bgr.shape[:2]

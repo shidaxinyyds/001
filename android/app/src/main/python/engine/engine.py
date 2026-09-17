@@ -1663,6 +1663,27 @@ class Engine:
         """启发式最优出牌推演：在任何张数、冷启动或非标手牌下，永远给出明确最优解。"""
         if not hand_mpsz or len(hand_mpsz) < 2:
             return []
+
+        # 0. 四川麻将模式：优先直通完整 SichuanAnalyzer 规则引擎
+        if mode == "sc":
+            try:
+                from sichuan import SichuanAnalyzer
+                hand_indices = SichuanAnalyzer.parse_hand_mpsz(hand_mpsz)
+                c28 = SichuanAnalyzer.counts_from_tiles(hand_indices)
+                sc_res = SichuanAnalyzer.analyze_discards(c28, dingque_suit=dingque_suit)
+                if sc_res:
+                    return [{
+                        "tile": r["tile"],
+                        "ukeire": r["ukeire"],
+                        "shanten": r["shanten"],
+                        "ev": r["ev"],
+                        "reason": r["reason"],
+                        "ting_tiles": r["ting_tiles"],
+                        "is_dingque": r["is_dingque"],
+                    } for r in sc_res[:6]]
+            except Exception:
+                pass
+
         tiles = [hand_mpsz[i:i+2] for i in range(0, len(hand_mpsz), 2)]
         if not tiles:
             return []
@@ -1707,27 +1728,36 @@ class Engine:
                 else:
                     score -= 50
             else:
-                # 数牌（m, p, s）：检查同花色邻近连搭
+                # 数牌（m, p, s）：检查是否属于已成顺子 (面子保护机制，严防拆散已成顺子)
+                in_sequence = False
+                if 1 <= val <= 7 and f"{val+1}{suit}" in counts and f"{val+2}{suit}" in counts:
+                    in_sequence = True
+                if 2 <= val <= 8 and f"{val-1}{suit}" in counts and f"{val+1}{suit}" in counts:
+                    in_sequence = True
+                if 3 <= val <= 9 and f"{val-2}{suit}" in counts and f"{val-1}{suit}" in counts:
+                    in_sequence = True
+
+                if in_sequence and counts[t] == 1:
+                    score -= 500  # 严厉保护顺子内不可或缺单张！
+
                 has_adj1 = any(f"{val+d}{suit}" in counts for d in (-1, 1) if 1 <= val+d <= 9)
                 has_adj2 = any(f"{val+d}{suit}" in counts for d in (-2, 2) if 1 <= val+d <= 9)
 
                 if counts[t] == 1:
                     if not has_adj1 and not has_adj2:
                         score += 80  # 全孤张
+                        if val in (1, 9):
+                            score += 15  # 只有在全孤无连时，1/9 幺九孤张才优先弃打
+                        elif val in (2, 8):
+                            score += 5
                     elif not has_adj1 and has_adj2:
                         score += 40  # 嵌隔张
                     else:
                         score += 10  # 邻近搭子
                 elif counts[t] == 2:
-                    score += 15  # 对子
+                    score += 25  # 对子（多余重叠搭子，优先于顺子拆牌）
                 else:
                     score -= 30  # 刻子/暗刻
-
-                # 幺九孤张（1, 9）进张窄，孤立时优先打
-                if val in (1, 9):
-                    score += 15
-                elif val in (2, 8):
-                    score += 5
 
             # 绝张感知：若全场已见4张，为绝张，毫无进张价值
             if disc_counts and 0 <= mpsz_to_tile34_index(t) < 34:
@@ -2135,13 +2165,17 @@ class Engine:
 
             # 定缺检测（四川麻将模式：支持手动覆盖与视觉自动感知双通道）
             dingque_suit, dingque_name = None, None
+            is_dq_phase = False
             if self.mode == "sc":
-                override = getattr(self, "_dingque_override", None)
-                if override is not None and 0 <= override <= 2:
-                    dingque_suit = override
-                    dingque_name = ['万', '筒', '条'][dingque_suit]
-                else:
-                    dingque_suit, dingque_name = detect_dingque(full_for_preview)
+                if hasattr(detector, "is_dingque_phase"):
+                    is_dq_phase = detector.is_dingque_phase(full_for_preview)
+                if not is_dq_phase:
+                    override = getattr(self, "_dingque_override", None)
+                    if override is not None and 0 <= override <= 2:
+                        dingque_suit = override
+                        dingque_name = ['万', '筒', '条'][dingque_suit]
+                    else:
+                        dingque_suit, dingque_name = detect_dingque(full_for_preview)
 
             status = "no_tiles"
             commentary: Optional[str] = None
@@ -2149,14 +2183,36 @@ class Engine:
             advice: List[Dict] = []
             best: str = ""
             tile_count = 0
+            message = ""
+            rec_suit_name = None
 
-            if hand is not None:
+            if is_dq_phase:
+                status = "dingque"
+                tile_count = len(hand) if hand else (len(hand_mpsz) // 2 if hand_mpsz else 0)
+                try:
+                    from sichuan import SichuanAnalyzer
+                    h_indices = SichuanAnalyzer.parse_hand_mpsz(hand_mpsz) if hand_mpsz else []
+                    h_counts = SichuanAnalyzer.counts_from_tiles(h_indices)
+                    rec = SichuanAnalyzer.recommend_dingque(h_counts)
+                    rec_suit = rec.get("suit", "筒")
+                    rec_cnt = rec.get("count", 0)
+                    rec_char = rec.get("suit_char", "p")
+                    rec_suit_name = rec_suit
+                    message = f"推荐定缺：{rec_suit}（仅持{rec_cnt}张，断门代价最小）"
+                    advice = [{
+                        "tile": f"1{rec_char}",
+                        "ukeire": rec_cnt,
+                        "shanten": 2,
+                        "ev": 99999.0,
+                        "reason": message,
+                        "ting_tiles": [],
+                        "is_dingque": True,
+                    }]
+                    best = f"1{rec_char}"
+                except Exception:
+                    pass
+            elif hand is not None:
                 tile_count = len(hand)
-                # 走到这里，稳定器已经保证了三件事：张数合法、无同字刷屏、
-                # 连续帧共识。因此**不再做 incomplete 降级** ——
-                # 那套"本帧可疑就整帧降级"的旧逻辑是"一会有一会没有"的
-                # 另一半根因：UI 收到 status=incomplete 的同时还收到本帧的
-                # 脏 hand，于是闪出一副错牌，下一帧又闪回来。
                 status = "ok"
                 commentary = self.update_trainer(hand)
                 if self.mode == "sc" and dingque_suit is not None and self.trainer is not None:
@@ -2164,7 +2220,6 @@ class Engine:
                 shanten, advice = self.build_advice(hand, disc_counts)
                 self._stable_hand_mpsz = hand_mpsz
                 self._stable_hand_count = tile_count
-                # 有合法手牌了，partial 兜底立即让位（否则会与真手牌打架）
                 self._partial_mpsz = ""
                 self._partial_ttl = 0
             else:
@@ -2389,6 +2444,7 @@ class Engine:
                 "mode_name": MODES.get(self.mode, {}).get("name", self.mode),
                 "dingque": dingque_name,
                 "dingque_suit": dingque_suit,
+                "dingque_phase": is_dq_phase,
                 "diag": {
                     "raw": sum(len(r) for r in rows),
                     "rows": row_stats,
@@ -2399,6 +2455,8 @@ class Engine:
                 "hand": hand_mpsz,
                 "count": tile_count,
                 "status": status,
+                "message": message,
+                "dingque_recommend": rec_suit_name,
                 "shanten": shanten,
                 "advice": advice,
                 "best": best,

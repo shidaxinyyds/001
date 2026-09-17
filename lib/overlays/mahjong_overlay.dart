@@ -180,15 +180,16 @@ class HandChipRow extends StatelessWidget {
     if (tiles.isEmpty) {
       return const SizedBox.shrink();
     }
+    final drawingIndex = drawingTile != null ? tiles.lastIndexOf(drawingTile!) : -1;
     return Wrap(
       spacing: 1,
       runSpacing: 3,
-      children: tiles
-          .map((t) => TileChip(
-                tile: t,
+      children: tiles.asMap().entries
+          .map((entry) => TileChip(
+                tile: entry.value,
                 size: chipSize,
-                dead: deadTiles?.contains(t) ?? false,
-                isDrawing: drawingTile != null && t == drawingTile,
+                dead: deadTiles?.contains(entry.value) ?? false,
+                isDrawing: entry.key == drawingIndex,
               ))
           .toList(),
     );
@@ -435,7 +436,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   static const double minPanelW = 190;
   static const double maxPanelW = 380;
   static const double minPanelH = 120;
-  static const double maxPanelH = 550;
+  static const double maxPanelH = 290;
 
   double _minPanelH() => minPanelH;
 
@@ -681,6 +682,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     if (next) {
       // 展开分析面板时保持原生拖动开启，由原生 onTouch 分流：
       // 顶部 55dp 自由拖动窗口（120Hz 原生平滑无延迟），55dp 以下响应内容列表滚动
+      panelH = panelH.clamp(minPanelH, maxPanelH);
       await _ensureSize(panelW, panelH, drag: true);
     } else {
       final double w = _capsuleMode ? _kCapsuleW : collapsed;
@@ -1003,6 +1005,19 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                   ),
                 ),
               ),
+            ] else if (result?['dingque_phase'] == true || status == 'dingque') ...[
+              Flexible(
+                child: Text(
+                  result?['message'] ?? '定缺推荐分析中…',
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Color(0xFFFFD54F),
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                    decoration: TextDecoration.none,
+                  ),
+                ),
+              ),
             ] else ...[
               Flexible(
                 child: Text(
@@ -1074,7 +1089,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
                   return Container(
                     width: 23,
-                    height: 25,
+                    height: 22,
                     decoration: BoxDecoration(
                       color: cellBg,
                       borderRadius: BorderRadius.circular(3),
@@ -1160,7 +1175,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                     padding: const EdgeInsets.only(right: 3.5),
                     child: Container(
                       width: 23,
-                      height: 25,
+                      height: 22,
                       decoration: BoxDecoration(
                         color: cellBg,
                         borderRadius: BorderRadius.circular(3),
@@ -1369,8 +1384,38 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   }
 
   Widget _adviceSection(List<dynamic> advice, String best, int count) {
+    final status = result?['status'] as String? ?? '';
+    final bool isDingquePhase = result?['dingque_phase'] == true || status == 'dingque';
+    if (isDingquePhase) {
+      final msg = (result?['message'] as String?) ?? '正在推演最佳断门…';
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+        decoration: BoxDecoration(
+          color: const Color(0x33FFB300),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: const Color(0xFFFFB300), width: 0.8),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.lightbulb, color: Color(0xFFFFD54F), size: 16),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                '【定缺阶段】$msg',
+                style: const TextStyle(
+                  color: Color(0xFFFFF9C4),
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.bold,
+                  decoration: TextDecoration.none,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     if (advice.isEmpty) {
-      final status = result?['status'] as String? ?? '';
       final String hint;
       if (status == 'waiting') {
         hint = '等待牌局开始（进入游戏后自动识别）';

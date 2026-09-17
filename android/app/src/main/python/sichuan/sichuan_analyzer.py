@@ -21,21 +21,28 @@ SUIT_NAMES = {SUIT_M: "万", SUIT_P: "筒", SUIT_S: "条"}
 SUIT_CHARS = {SUIT_M: "m", SUIT_P: "p", SUIT_S: "s"}
 
 
+INDEX_HONGZHONG = 27
+
+
 def tile_to_suit(idx: int) -> int:
-    """返回牌所在的套系：0=万(m), 1=筒(p), 2=条(s)。"""
+    """返回牌所在的套系：0=万(m), 1=筒(p), 2=条(s), -1=红中(z)。"""
     if 0 <= idx <= 8:
         return SUIT_M
     elif 9 <= idx <= 17:
         return SUIT_P
     elif 18 <= idx <= 26:
         return SUIT_S
-    raise ValueError(f"四川麻将非法牌索引: {idx}（超出 0-26 范围）")
+    elif idx == 27:
+        return -1
+    raise ValueError(f"四川麻将非法牌索引: {idx}（超出 0-27 范围）")
 
 
 def mpsz_to_index27(tile_str: str) -> Optional[int]:
-    """将 '1m', '5p', '9s' 转换为 0-26 索引。字牌返回 None。"""
+    """将 '1m', '5p', '9s', '7z' 转换为 0-27 索引。"""
     if not tile_str or len(tile_str) < 2:
         return None
+    if tile_str == "7z":
+        return 27
     num_ch, suit_ch = tile_str[0], tile_str[1]
     if not num_ch.isdigit():
         return None
@@ -52,33 +59,37 @@ def mpsz_to_index27(tile_str: str) -> Optional[int]:
 
 
 def index27_to_mpsz(idx: int) -> str:
-    """将 0-26 索引转换为 mpsz 字符串。"""
+    """将 0-27 索引转换为 mpsz 字符串。"""
     if 0 <= idx <= 8:
         return f"{idx + 1}m"
     elif 9 <= idx <= 17:
         return f"{idx - 9 + 1}p"
     elif 18 <= idx <= 26:
         return f"{idx - 18 + 1}s"
+    elif idx == 27:
+        return "7z"
     raise ValueError(f"非法牌索引: {idx}")
 
 
 def index27_to_chinese(idx: int) -> str:
-    """将 0-26 索引转换为中文名称，如 '5万', '8筒', '2条'。"""
+    """将 0-27 索引转换为中文名称，如 '5万', '8筒', '2条', '中'。"""
     if 0 <= idx <= 8:
         return f"{idx + 1}万"
     elif 9 <= idx <= 17:
         return f"{idx - 9 + 1}筒"
     elif 18 <= idx <= 26:
         return f"{idx - 18 + 1}条"
+    elif idx == 27:
+        return "中"
     return f"未知({idx})"
 
 
 class SichuanAnalyzer:
-    """四川麻将（血战到底）分析核心。"""
+    """四川麻将（血战到底 / 红中血流）分析核心。"""
 
     @staticmethod
     def parse_hand_mpsz(mpsz: str) -> List[int]:
-        """解析手牌字符串（例如 '123m456p789s11m'）为 0-26 索引列表。"""
+        """解析手牌字符串（例如 '123m456p789s11m7z'）为 0-27 索引列表（27 为红中赖子）。"""
         res = []
         cur_nums = []
         for ch in mpsz:
@@ -95,16 +106,18 @@ class SichuanAnalyzer:
                             res.append(18 + n - 1)
                 cur_nums = []
             elif ch == 'z':
-                # 四川麻将无字牌，自动忽略
+                for n in cur_nums:
+                    if n == 7:
+                        res.append(27)
                 cur_nums = []
         return sorted(res)
 
     @staticmethod
     def counts_from_tiles(tiles: List[int]) -> List[int]:
-        """将手牌列表转换为 27 长度的计数数组。"""
-        c = [0] * 27
+        """将手牌列表转换为 28 长度的计数数组（0-26 为数牌，27 为红中赖子）。"""
+        c = [0] * 28
         for t in tiles:
-            if 0 <= t < 27:
+            if 0 <= t < 28:
                 c[t] += 1
         return c
 
@@ -185,8 +198,8 @@ class SichuanAnalyzer:
         return pairs == 7
 
     @classmethod
-    def can_win(cls, counts: List[int], num_fixed_melds: int = 0) -> bool:
-        """川麻胡牌核心判定（必须缺一门，即花色 <= 2）。"""
+    def _can_win_no_wild(cls, counts: List[int], num_fixed_melds: int = 0) -> bool:
+        """无赖子纯手牌胡牌判定。"""
         suits = cls.get_suits_in_hand(counts)
         if len(suits) > 2:
             return False
@@ -196,7 +209,7 @@ class SichuanAnalyzer:
             return True
 
         num_needed = 4 - num_fixed_melds
-        hand_tiles_count = sum(counts)
+        hand_tiles_count = sum(counts[:27])
         expected_count = 2 + num_needed * 3
         if hand_tiles_count != expected_count:
             return False
@@ -211,6 +224,111 @@ class SichuanAnalyzer:
                 counts[pair_tile] += 2
 
         return False
+
+    @classmethod
+    def can_win(cls, counts: List[int], num_fixed_melds: int = 0) -> bool:
+        """川麻胡牌核心判定（支持红中赖子万能百搭，必须缺一门）。"""
+        suits = cls.get_suits_in_hand(counts)
+        if len(suits) > 2:
+            return False
+
+        num_wild = counts[27] if len(counts) > 27 else 0
+        if num_wild == 0:
+            return cls._can_win_no_wild(counts[:27], num_fixed_melds)
+
+        # 带有红中赖子的七对判定
+        if num_fixed_melds == 0:
+            num_pairs = sum(counts[i] // 2 for i in range(27))
+            num_singles = sum(counts[i] % 2 for i in range(27))
+            if num_wild >= num_singles and (num_pairs + num_singles + (num_wild - num_singles) // 2) >= 7:
+                return True
+
+        # 赖子替张枚举
+        cand = set()
+        for t in range(27):
+            if counts[t] > 0:
+                cand.add(t)
+                num = t % 9
+                if num > 0: cand.add(t - 1)
+                if num < 8: cand.add(t + 1)
+                if num > 1: cand.add(t - 2)
+                if num < 7: cand.add(t + 2)
+        if not cand:
+            return True
+
+        return cls._can_win_wild_recurse(list(counts[:27]), num_wild, sorted(cand), num_fixed_melds)
+
+    @classmethod
+    def _can_win_wild_recurse(
+        cls, c27: List[int], wilds_left: int, cand: List[int], num_fixed_melds: int
+    ) -> bool:
+        if wilds_left == 0:
+            return cls._can_win_no_wild(c27, num_fixed_melds)
+        for t in cand:
+            c27[t] += 1
+            if cls._can_win_wild_recurse(c27, wilds_left - 1, cand, num_fixed_melds):
+                c27[t] -= 1
+                return True
+            c27[t] -= 1
+        return False
+
+    @staticmethod
+    def get_meld_protected_tiles(counts_27: List[int]) -> Set[int]:
+        """返回必须保护的已成顺子/刻子牌集合（弃打会破坏已成型牌面）。"""
+        protected = set()
+        for s in range(3):
+            sub = counts_27[s * 9 : (s + 1) * 9]
+            if sum(sub) < 3:
+                continue
+            best_melds = -1
+            best_leftover_lists = []
+
+            def dfs(c, melds, pairs, leftovers):
+                nonlocal best_melds, best_leftover_lists
+                idx = -1
+                for i in range(9):
+                    if c[i] > 0:
+                        idx = i
+                        break
+                if idx == -1:
+                    score = melds * 10 + pairs * 3
+                    if score > best_melds:
+                        best_melds = score
+                        best_leftover_lists = [set(leftovers)]
+                    elif score == best_melds:
+                        best_leftover_lists.append(set(leftovers))
+                    return
+
+                if c[idx] >= 3:
+                    c[idx] -= 3
+                    dfs(c, melds + 1, pairs, leftovers)
+                    c[idx] += 3
+
+                if idx <= 6 and c[idx + 1] > 0 and c[idx + 2] > 0:
+                    c[idx] -= 1
+                    c[idx + 1] -= 1
+                    c[idx + 2] -= 1
+                    dfs(c, melds + 1, pairs, leftovers)
+                    c[idx] += 1
+                    c[idx + 1] += 1
+                    c[idx + 2] += 1
+
+                if c[idx] >= 2:
+                    c[idx] -= 2
+                    dfs(c, melds, pairs + 1, leftovers)
+                    c[idx] += 2
+
+                c[idx] -= 1
+                dfs(c, melds, pairs, leftovers + [idx])
+                c[idx] += 1
+
+            dfs(list(sub), 0, 0, [])
+            if best_melds >= 10:
+                all_leftovers = set().union(*best_leftover_lists) if best_leftover_lists else set()
+                for num in range(9):
+                    if sub[num] > 0 and num not in all_leftovers:
+                        protected.add(s * 9 + num)
+        return protected
 
     @classmethod
     def find_waiting_tiles(
@@ -243,7 +361,7 @@ class SichuanAnalyzer:
     def calculate_shanten(
         cls, counts: List[int], num_fixed_melds: int = 0
     ) -> int:
-        """计算四川麻将向听数（0=听牌/胡牌, 1=1向听, 2=2向听...）。"""
+        """计算四川麻将向听数（0=听牌/胡牌, 1=1向听, 2=2向听...）。支持红中赖子。"""
         suits = cls.get_suits_in_hand(counts)
         extra_dingque_penalty = 0
         if len(suits) > 2:
@@ -255,7 +373,8 @@ class SichuanAnalyzer:
             min_suit = min(suit_counts, key=suit_counts.get)
             extra_dingque_penalty = suit_counts[min_suit]
 
-        total_tiles = sum(counts)
+        num_wild = counts[27] if len(counts) > 27 else 0
+        total_tiles = sum(counts[:27]) + num_wild
         if total_tiles % 3 == 2:
             if cls.can_win(counts, num_fixed_melds):
                 return 0
@@ -267,6 +386,7 @@ class SichuanAnalyzer:
         if extra_dingque_penalty > 0:
             return max(1, extra_dingque_penalty)
 
+        # 1 向听检测
         if total_tiles % 3 == 2:
             for d in range(27):
                 if counts[d] > 0:
@@ -288,7 +408,10 @@ class SichuanAnalyzer:
                             return 1
                 counts[t] -= 1
 
-        return 2
+        base_shanten = 2
+        if num_wild > 0:
+            base_shanten = max(1, base_shanten - num_wild)
+        return base_shanten
 
     @classmethod
     def calculate_fan(cls, counts: List[int], win_tile: int, num_fixed_melds: int = 0) -> int:
@@ -376,6 +499,9 @@ class SichuanAnalyzer:
             suit_start = dingque_suit * 9
             has_dingque_tiles = any(counts[suit_start + i] > 0 for i in range(9))
 
+        # 面子保护：精准识别所有不可或缺的已成顺子与刻子
+        protected_tiles = cls.get_meld_protected_tiles(counts[:27])
+
         candidate_discards = []
         for t in range(27):
             if counts[t] > 0:
@@ -421,6 +547,10 @@ class SichuanAnalyzer:
                     incoming_cn = [index27_to_chinese(t) for t in incoming_dict.keys()]
                     ev_score = 20000.0 + incoming_ukeire * 10.0
 
+                    # 顺子/刻子面子保护：绝对禁止无故拆散完整面子
+                    if discard in protected_tiles and not is_dingque_discard:
+                        ev_score -= 50000.0
+
                     # 清一色诱导因子
                     non_dq_suits = [s for s in range(3) if s != dingque_suit]
                     suit_counts = {s: sum(counts[s*9:(s+1)*9]) for s in non_dq_suits}
@@ -451,6 +581,8 @@ class SichuanAnalyzer:
                             reason = f"定缺打{SUIT_NAMES[dingque_suit]}，进 {'/'.join(incoming_cn[:3])} 共 {incoming_ukeire} 张"
                         else:
                             reason = f"定缺打{SUIT_NAMES[dingque_suit]}"
+                    elif discard in protected_tiles:
+                        reason = "破坏顺子/刻子"
                     else:
                         if incoming_cn:
                             reason = f"进 {'/'.join(incoming_cn[:3])} 共 {incoming_ukeire} 张"
@@ -461,8 +593,26 @@ class SichuanAnalyzer:
                     ev_score = -1000.0 * shanten
                     if is_dingque_discard:
                         reason = f"定缺打{SUIT_NAMES[dingque_suit]}"
+                    elif discard in protected_tiles:
+                        ev_score -= 50000.0
+                        reason = "破坏顺子/刻子"
                     else:
-                        reason = "整理牌型"
+                        # 2向听及以上：结构性冗余张与全孤张优选模型
+                        suit = tile_to_suit(discard)
+                        has_adj1 = any(0 <= discard + d < 27 and tile_to_suit(discard + d) == suit and counts[discard + d] > 0 for d in (-1, 1))
+                        has_adj2 = any(0 <= discard + d < 27 and tile_to_suit(discard + d) == suit and counts[discard + d] > 0 for d in (-2, 2))
+                        if original_count >= 2:
+                            ev_score += 500.0
+                            reason = "多余对子"
+                        elif not has_adj1 and not has_adj2:
+                            ev_score += 800.0
+                            reason = "全孤单张"
+                        elif not has_adj1 and has_adj2:
+                            ev_score += 300.0
+                            reason = "间搭孤张"
+                        else:
+                            ev_score += 100.0
+                            reason = "多余邻张"
 
             if is_dingque_discard:
                 ev_score += 100000.0
