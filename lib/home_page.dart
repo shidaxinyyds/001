@@ -314,11 +314,98 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
+  IconData _getModeIcon(String key) {
+    switch (key) {
+      case 'sc_hz':
+        return Icons.local_fire_department_rounded;
+      case 'sc_xz':
+        return Icons.shield_rounded;
+      case 'sc_xl':
+        return Icons.water_drop_rounded;
+      case 'gy_zj':
+        return Icons.pets_rounded;
+      case 'std_tdh':
+        return Icons.grid_view_rounded;
+      case 'wh_kk':
+        return Icons.lock_open_rounded;
+      case 'db_qh':
+        return Icons.ac_unit_rounded;
+      case 'hz_bd':
+        return Icons.auto_awesome_rounded;
+      case 'gd_hz':
+        return Icons.stars_rounded;
+      case 'cs_zz':
+        return Icons.sync_rounded;
+      default:
+        return Icons.casino_rounded;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final String mode = selectedMode ?? '';
     return Scaffold(
-      appBar: AppBar(title: const Text("Ace Mahjong")),
+      backgroundColor: const Color(0xFFF8FAFC), // slate 50
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF004D40),
+        elevation: 0,
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(
+                color: const Color(0x26FFFFFF),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Icon(Icons.casino_rounded, color: Colors.white, size: 20),
+            ),
+            const SizedBox(width: 10),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: const [
+                Text(
+                  "Ace Mahjong",
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+                Text(
+                  "商业专业版 · 智能向听推演引擎",
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: Color(0xFF80CBC4),
+                    fontWeight: FontWeight.w400,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+        actions: [
+          Container(
+            margin: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+            decoration: BoxDecoration(
+              color: const Color(0x33FFFFFF),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: const Color(0x66FFFFFF), width: 0.8),
+            ),
+            alignment: Alignment.center,
+            child: const Text(
+              "PRO",
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w900,
+                color: Color(0xFFFFD54F),
+                letterSpacing: 1.0,
+              ),
+            ),
+          ),
+        ],
+      ),
       body: IndexedStack(
         index: _tab,
         children: [
@@ -330,9 +417,12 @@ class _HomePageState extends State<HomePage> {
         currentIndex: _tab,
         onTap: (i) => setState(() => _tab = i),
         selectedItemColor: _kAccent,
+        unselectedItemColor: const Color(0xFF94A3B8),
+        backgroundColor: Colors.white,
+        elevation: 8,
         items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.home), label: '主页'),
-          BottomNavigationBarItem(icon: Icon(Icons.bug_report), label: '调试'),
+          BottomNavigationBarItem(icon: Icon(Icons.home_rounded), label: '主页'),
+          BottomNavigationBarItem(icon: Icon(Icons.tune_rounded), label: '调试'),
         ],
       ),
     );
@@ -347,60 +437,119 @@ class _HomePageState extends State<HomePage> {
 
     return SafeArea(
       child: SingleChildScrollView(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // 顶部当前生效玩法与平台兼容状态
+            // 顶部当前生效玩法与平台兼容状态（暗绿沉浸式卡片）
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              padding: const EdgeInsets.all(14),
               decoration: BoxDecoration(
-                color: _kAccentBg,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: _kAccent.withValues(alpha: 0.35)),
+                gradient: const LinearGradient(
+                  colors: [Color(0xFF004D40), Color(0xFF00695C)],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(16),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Color(0x26004D40),
+                    blurRadius: 10,
+                    offset: Offset(0, 4),
+                  ),
+                ],
               ),
               child: Row(
                 children: [
-                  const Icon(Icons.verified, color: _kAccent, size: 20),
-                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: const Color(0x26FFFFFF),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Icon(
+                      currentInfo != null
+                          ? _getModeIcon(currentInfo.key)
+                          : Icons.casino_rounded,
+                      color: const Color(0xFFFFD54F),
+                      size: 24,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        Row(
+                          children: [
+                            Text(
+                              currentInfo != null ? currentInfo.name : '请选择玩法',
+                              style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: const Color(0x33FFFFFF),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                currentInfo != null
+                                    ? "${currentInfo.wall}张"
+                                    : "全牌",
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                  color: Color(0xFFE0F2F1),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 3),
                         Text(
                           currentInfo != null
-                              ? '当前玩法：${currentInfo.name} (${currentInfo.wall}张)'
-                              : '请选择麻将玩法',
+                              ? currentInfo.subtitle
+                              : '支持腾讯欢乐麻将、微乐、指尖等主流平台自动感知',
                           style: const TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.bold,
-                            color: _kAccent,
-                          ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          '支持腾讯欢乐麻将、微乐、指尖等主流平台自适应',
-                          style: TextStyle(
                             fontSize: 11,
-                            color: _kAccent.withValues(alpha: 0.85),
+                            color: Color(0xFFB2DFDB),
+                            height: 1.2,
                           ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                         ),
                       ],
                     ),
                   ),
+                  const SizedBox(width: 6),
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
                     decoration: BoxDecoration(
-                      color: _kAccent,
-                      borderRadius: BorderRadius.circular(6),
+                      color: const Color(0x33000000),
+                      borderRadius: BorderRadius.circular(8),
+                      border:
+                          Border.all(color: const Color(0x4DFFFFFF), width: 0.8),
                     ),
-                    child: const Text(
-                      '100%完美适配',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.white,
-                      ),
+                    child: Column(
+                      children: const [
+                        Icon(Icons.bolt_rounded,
+                            color: Color(0xFFFFD54F), size: 16),
+                        Text(
+                          "全适配",
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ],
@@ -419,51 +568,157 @@ class _HomePageState extends State<HomePage> {
 
             const SizedBox(height: 12),
 
-            // 开始/停止识别主按钮
-            SizedBox(
-              height: 52,
-              child: ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: canStart ? _kAccent : Colors.grey.shade400,
-                  foregroundColor: Colors.white,
-                  disabledBackgroundColor: Colors.grey.shade300,
-                  disabledForegroundColor: Colors.grey.shade600,
-                  elevation: canStart ? 2 : 0,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10),
-                  ),
+            // 核心主操作按钮（大圆角立体按钮）
+            Container(
+              height: 54,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(14),
+                gradient: LinearGradient(
+                  colors: isProcessing
+                      ? [const Color(0xFFE11D48), const Color(0xFFBE123C)]
+                      : (canStart
+                          ? [const Color(0xFF00695C), const Color(0xFF00897B)]
+                          : [Colors.grey.shade400, Colors.grey.shade500]),
                 ),
-                onPressed: canStart ? _toggleProcessing : null,
-                child: Text(
-                  isProcessing
-                      ? '停止识别'
-                      : (mode.isEmpty ? '请先选择玩法' : '开始识别'),
-                  style: const TextStyle(
-                      fontSize: 18, fontWeight: FontWeight.w600),
+                boxShadow: canStart
+                    ? [
+                        BoxShadow(
+                          color: isProcessing
+                              ? const Color(0x55E11D48)
+                              : const Color(0x4D00695C),
+                          blurRadius: 10,
+                          offset: const Offset(0, 4),
+                        ),
+                      ]
+                    : null,
+              ),
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(14),
+                  onTap: canStart ? _toggleProcessing : null,
+                  child: Center(
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          isProcessing
+                              ? Icons.stop_circle_rounded
+                              : Icons.play_circle_fill_rounded,
+                          color: Colors.white,
+                          size: 24,
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          isProcessing
+                              ? '停止悬浮窗识别'
+                              : (mode.isEmpty ? '请先选择上方玩法' : '开启智能悬浮窗'),
+                          style: const TextStyle(
+                            fontSize: 17,
+                            fontWeight: FontWeight.w700,
+                            color: Colors.white,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
               ),
             ),
-            if (isProcessing)
-              Padding(
-                padding: const EdgeInsets.only(top: 12),
-                child: SizedBox(
-                  height: 44,
-                  child: OutlinedButton(
-                    onPressed: _toggleProcessing,
-                    child: const Text('停止识别'),
+
+            // 终端监控控制台
+            Container(
+              margin: const EdgeInsets.only(top: 14),
+              decoration: BoxDecoration(
+                color: const Color(0xFF0F172A),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: const Color(0xFF334155)),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Color(0x1F000000),
+                    blurRadius: 8,
+                    offset: Offset(0, 3),
                   ),
-                ),
+                ],
               ),
-            const SizedBox(height: 16),
-            Text(
-              _status,
-              style: const TextStyle(fontSize: 13, color: Colors.black54),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              _recognitionText(),
-              style: const TextStyle(
-                  fontSize: 14, color: Colors.black87, height: 1.35),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // 终端顶栏
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF1E293B),
+                      borderRadius:
+                          BorderRadius.vertical(top: Radius.circular(13)),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 8,
+                          height: 8,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: isProcessing
+                                ? const Color(0xFF22C55E)
+                                : const Color(0xFF94A3B8),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          isProcessing ? "实时识别引擎在线 (5 FPS)" : "识别引擎待命",
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: isProcessing
+                                ? const Color(0xFF4ADE80)
+                                : const Color(0xFF94A3B8),
+                          ),
+                        ),
+                        const Spacer(),
+                        Text(
+                          _recogStatus.isNotEmpty
+                              ? "状态: $_recogStatus"
+                              : "未启动",
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Color(0xFF94A3B8),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  // 终端内容
+                  Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _status,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Color(0xFF94A3B8),
+                            fontFamily: 'monospace',
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          _recognitionText(),
+                          style: const TextStyle(
+                            fontSize: 13,
+                            color: Color(0xFFF8FAFC),
+                            fontWeight: FontWeight.w500,
+                            height: 1.4,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ),
           ],
         ),
@@ -490,9 +745,8 @@ class _HomePageState extends State<HomePage> {
       margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(4),
       decoration: BoxDecoration(
-        color: Colors.grey.shade100,
+        color: const Color(0xFFE2E8F0),
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Colors.grey.shade300),
       ),
       child: Row(
         children: GameMode.categories.map((cat) {
@@ -510,11 +764,11 @@ class _HomePageState extends State<HomePage> {
                   color: sel ? Colors.white : Colors.transparent,
                   borderRadius: BorderRadius.circular(8),
                   boxShadow: sel
-                      ? [
+                      ? const [
                           BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.08),
+                            color: Color(0x14000000),
                             blurRadius: 4,
-                            offset: const Offset(0, 1),
+                            offset: Offset(0, 1),
                           ),
                         ]
                       : null,
@@ -525,7 +779,7 @@ class _HomePageState extends State<HomePage> {
                   style: TextStyle(
                     fontSize: 13,
                     fontWeight: sel ? FontWeight.bold : FontWeight.w500,
-                    color: sel ? _kAccent : Colors.black87,
+                    color: sel ? _kAccent : const Color(0xFF475569),
                   ),
                 ),
               ),
@@ -541,18 +795,20 @@ class _HomePageState extends State<HomePage> {
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
       decoration: BoxDecoration(
-        color: isSelected ? _kAccentBg : Colors.white,
-        borderRadius: BorderRadius.circular(12),
+        color: isSelected ? const Color(0xFFF0FDF4) : Colors.white,
+        borderRadius: BorderRadius.circular(14),
         border: Border.all(
-          color: isSelected ? _kAccent : Colors.grey.shade300,
+          color: isSelected
+              ? const Color(0xFF00695C)
+              : const Color(0xFFE2E8F0),
           width: isSelected ? 2 : 1,
         ),
         boxShadow: [
           BoxShadow(
             color: isSelected
-                ? _kAccent.withValues(alpha: 0.12)
-                : Colors.black.withValues(alpha: 0.04),
-            blurRadius: 6,
+                ? const Color(0x1F00695C)
+                : const Color(0x0A000000),
+            blurRadius: isSelected ? 8 : 4,
             offset: const Offset(0, 2),
           ),
         ],
@@ -560,60 +816,83 @@ class _HomePageState extends State<HomePage> {
       child: Material(
         color: Colors.transparent,
         child: InkWell(
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(14),
           onTap: () => _selectMode(info.key),
           child: Padding(
-            padding: const EdgeInsets.all(12),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Row(
                   children: [
+                    Container(
+                      padding: const EdgeInsets.all(7),
+                      decoration: BoxDecoration(
+                        color: isSelected
+                            ? _kAccentBg
+                            : const Color(0xFFF1F5F9),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Icon(
+                        _getModeIcon(info.key),
+                        color: isSelected
+                            ? const Color(0xFF00695C)
+                            : const Color(0xFF64748B),
+                        size: 20,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
                     Expanded(
                       child: Text(
                         info.name,
                         style: TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.bold,
-                          color: isSelected ? _kAccent : Colors.black87,
+                          color: isSelected
+                              ? const Color(0xFF00695C)
+                              : const Color(0xFF1E293B),
                         ),
                       ),
                     ),
                     Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 7, vertical: 3),
+                          horizontal: 8, vertical: 3),
                       decoration: BoxDecoration(
                         color: isSelected
-                            ? _kAccent.withValues(alpha: 0.15)
-                            : Colors.grey.shade100,
+                            ? _kAccentBg
+                            : const Color(0xFFF1F5F9),
                         borderRadius: BorderRadius.circular(6),
                       ),
                       child: Text(
                         info.status,
                         style: TextStyle(
                           fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          color: isSelected ? _kAccent : Colors.grey.shade700,
+                          fontWeight: FontWeight.w700,
+                          color: isSelected
+                              ? const Color(0xFF00695C)
+                              : const Color(0xFF475569),
                         ),
                       ),
                     ),
                     const SizedBox(width: 8),
                     Icon(
                       isSelected
-                          ? Icons.check_circle
-                          : Icons.radio_button_unchecked,
-                      color: isSelected ? _kAccent : Colors.grey.shade400,
-                      size: 20,
+                          ? Icons.check_circle_rounded
+                          : Icons.radio_button_unchecked_rounded,
+                      color: isSelected
+                          ? const Color(0xFF00695C)
+                          : const Color(0xFF94A3B8),
+                      size: 22,
                     ),
                   ],
                 ),
-                const SizedBox(height: 5),
+                const SizedBox(height: 6),
                 Text(
                   info.subtitle,
-                  style: TextStyle(
+                  style: const TextStyle(
                     fontSize: 12,
-                    color: Colors.grey.shade700,
-                    height: 1.25,
+                    color: Color(0xFF64748B),
+                    height: 1.3,
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -623,16 +902,16 @@ class _HomePageState extends State<HomePage> {
                   children: info.tags.map((tag) {
                     return Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 6, vertical: 2),
+                          horizontal: 7, vertical: 2.5),
                       decoration: BoxDecoration(
                         color: isSelected
-                            ? Colors.white.withValues(alpha: 0.85)
-                            : Colors.grey.shade100,
-                        borderRadius: BorderRadius.circular(4),
+                            ? Colors.white
+                            : const Color(0xFFF8FAFC),
+                        borderRadius: BorderRadius.circular(5),
                         border: Border.all(
                           color: isSelected
-                              ? _kAccent.withValues(alpha: 0.3)
-                              : Colors.grey.shade300,
+                              ? const Color(0x4D00695C)
+                              : const Color(0xFFE2E8F0),
                           width: 0.8,
                         ),
                       ),
@@ -640,7 +919,10 @@ class _HomePageState extends State<HomePage> {
                         tag,
                         style: TextStyle(
                           fontSize: 11,
-                          color: isSelected ? _kAccent : Colors.black54,
+                          fontWeight: FontWeight.w500,
+                          color: isSelected
+                              ? const Color(0xFF00695C)
+                              : const Color(0xFF475569),
                         ),
                       ),
                     );
