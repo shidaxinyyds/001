@@ -516,21 +516,20 @@ class _HandStabilizer:
     """
 
     def __init__(self) -> None:
-        # 当前稳定手牌（排序归一化的 mpsz）
+        # 当前稳定手牌（保留手牌在屏幕上从左到右的真实物理顺序）
         self.stable_mpsz: str = ""
+        self._stable_key: str = ""
         # 连续多少帧给出了同一个牌型
         self._streak: int = 0
         self._last_key: str = ""
         # 最近若干帧的合法牌型（供众数兜底）
         self._recent: deque = deque(maxlen=HAND_MODE_WINDOW)
-        # 本帧是否看到了一个"尚未被采纳"的新牌型。引擎据此**强制**下一帧
-        # 跑完整识别（否则帧差去重会把后续帧全跳掉，永远攒不到第二票，
-        # 手牌就再也不更新了 —— 实测中这是"识别不出来"的根因之一）。
         self.pending: bool = False
 
     def reset(self) -> None:
         """玩法切换 / 朝向变化时硬重置：旧手牌与新场景无关。"""
         self.stable_mpsz = ""
+        self._stable_key = ""
         self._streak = 0
         self._last_key = ""
         self._recent.clear()
@@ -538,8 +537,9 @@ class _HandStabilizer:
         self._empty_streak = 0
 
     def observe(self, labels, valid_sizes, avail=None) -> str:
-        """喂入本帧手牌行的标签列表，返回应当对外输出的稳定 mpsz。"""
+        """喂入本帧手牌行的标签列表，返回应当对外输出的从左到右稳定 mpsz。"""
         cnt: Counter = Counter()
+        ordered_list = []
         for lab in labels:
             if not lab:
                 continue
@@ -550,13 +550,17 @@ class _HandStabilizer:
                 except Exception:
                     continue
             cnt[lab] += 1
+            ordered_list.append(lab)
 
         n = sum(cnt.values())
+        ordered_mpsz = "".join(ordered_list)
+
         if n < 5:
             self._empty_streak = getattr(self, "_empty_streak", 0) + 1
             if self._empty_streak >= 8:
                 # 连续 8 帧手牌区无有效手牌（对局结束/未开局/大厅）：彻底重置稳定手牌，绝不跨局残留
                 self.stable_mpsz = ""
+                self._stable_key = ""
                 self._streak = 0
                 self._last_key = ""
                 self.pending = False
@@ -591,7 +595,7 @@ class _HandStabilizer:
             self._last_key = key
 
         # 已经是稳定值 → 无待确认变化，下一帧可以正常按帧差跳过
-        if key == self.stable_mpsz:
+        if key == getattr(self, "_stable_key", ""):
             self.pending = False
             return self.stable_mpsz
 
@@ -603,22 +607,24 @@ class _HandStabilizer:
                 return ""
             # 若识别到合法手牌张数（如 13 或 14 张满手），首帧立即可采信并进入稳定态，杜绝首帧延迟与"等待"提示卡顿
             if n in (13, 14) or self._streak >= 2:
-                self.stable_mpsz = key
+                self.stable_mpsz = ordered_mpsz
+                self._stable_key = key
                 self.pending = False
                 return self.stable_mpsz
             else:
                 self.pending = True
                 return ""
 
-        # 众数兜底：窗口内出现次数够多，说明识别器已经稳定在（可能不完美的）
-        # 这个牌型上，再等下去也不会更好，直接采纳。
+        # 众数兜底：窗口内出现次数够多，说明识别器已经稳定在该牌型上，直接采纳。
         mode_hits = sum(1 for k in self._recent if k == key)
-        if self._streak >= need or mode_hits >= HAND_MODE_VOTES:
-            self.stable_mpsz = key
+        # 摸牌(13->14) 或 打牌(14->13)：单张手牌合法物理变动，即时响应刷新，杜绝出牌/摸牌后的迟钝与卡顿
+        is_move = abs(n - (len(self.stable_mpsz) // 2)) == 1 and n in (13, 14)
+        if is_move or self._streak >= need or mode_hits >= HAND_MODE_VOTES:
+            self.stable_mpsz = ordered_mpsz
+            self._stable_key = key
             self.pending = False
         else:
-            # 看到了新牌型但证据还不够 —— 通知引擎下一帧必须真跑一次，
-            # 别被帧差去重跳掉。
+            # 看到了新牌型但证据还不够 —— 通知引擎下一帧必须真跑一次，别被跳过
             self.pending = True
         return self.stable_mpsz
 
@@ -639,6 +645,7 @@ def _reconcile_hand_tiles(row, stable_mpsz: str):
     """
     if not stable_mpsz or not row:
         return row
+    row = sorted(row, key=lambda d: d[0][0])
     cnt_row = Counter(d[1] for d in row if d[1] is not None)
     cnt_stable = _mpsz_to_counter(stable_mpsz)
     if cnt_row == cnt_stable:
@@ -649,7 +656,7 @@ def _reconcile_hand_tiles(row, stable_mpsz: str):
     labels = [stable_mpsz[i:i + 2] for i in range(0, len(stable_mpsz), 2)]
     out = []
     for i, (rect, lab, conf) in enumerate(row):
-        out.append((rect, labels[i] if i < len(labels) else None, conf))
+        out.append((rect, labels[i] if i < len(labels) else lab, conf))
     return out
 
 
@@ -2020,6 +2027,7 @@ class Engine:
             # 这是"界面永远有内容、且不会闪"的根本保证。
             raw_labels: List[str] = []
             if hand_row is not None:
+                hand_row = sorted(hand_row, key=lambda d: d[0][0])
                 raw_labels = [d[1] for d in hand_row if d[1] is not None]
 
             # 新洗牌发牌 / 换三张判定：若当前帧原始手牌张数完整（>=13张），且与旧稳定手牌重合度很低（<= 5 张相同），
