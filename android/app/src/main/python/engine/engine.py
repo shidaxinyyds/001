@@ -615,11 +615,11 @@ class _HandStabilizer:
                 self.pending = True
                 return ""
 
-        # 众数兜底：窗口内出现次数够多，说明识别器已经稳定在该牌型上，直接采纳。
-        mode_hits = sum(1 for k in self._recent if k == key)
-        # 摸牌(13->14) 或 打牌(14->13)：单张手牌合法物理变动，即时响应刷新，杜绝出牌/摸牌后的迟钝与卡顿
-        is_move = abs(n - (len(self.stable_mpsz) // 2)) == 1 and n in (13, 14)
-        if is_move or self._streak >= need or mode_hits >= HAND_MODE_VOTES:
+        # 摸牌(13->14)、打牌(14->13) 或单张出牌变动 (diff <= 2)：即时响应刷新，杜绝出牌/摸牌后的迟钝与卡顿
+        hand_len = len(self.stable_mpsz) // 2
+        is_count_move = abs(n - hand_len) == 1 and n in (13, 14)
+        is_tile_swap = (n == hand_len and n in (13, 14) and _hand_diff_count(key, getattr(self, "_stable_key", "")) <= 2)
+        if is_count_move or is_tile_swap or self._streak >= need or mode_hits >= HAND_MODE_VOTES:
             self.stable_mpsz = ordered_mpsz
             self._stable_key = key
             self.pending = False

@@ -27,30 +27,62 @@ class TencentGridDetector(Detector):
         self._load_templates()
 
     def _load_templates(self):
-        if not os.path.isdir(self.templates_dir):
-            print(f"[TencentGridDetector] Templates dir not found: {self.templates_dir}")
-            return
+        # 1. 优先从离线预打包的 tencent_templates.npz 读取 (100% 穿透 Android Chaquopy zip 文件系统，秒级加载)
+        cur_dir = os.path.dirname(os.path.abspath(__file__))
+        npz_path = os.path.join(cur_dir, "tencent_templates.npz")
+        if os.path.exists(npz_path):
+            try:
+                with open(npz_path, "rb") as f:
+                    npz_data = np.load(f)
+                    for key in npz_data.files:
+                        bgr = npz_data[key]
+                        self.templates_bgr[key] = bgr
+                        self.templates_gray[key] = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+                print(f"[TencentGridDetector] Successfully loaded {len(self.templates_bgr)} templates from pre-bundled npz.")
+            except Exception as e:
+                print(f"[TencentGridDetector] Failed to load npz: {e}")
 
-        for fname in os.listdir(self.templates_dir):
-            if fname.endswith(".png"):
-                name = fname[:-4]
-                path = os.path.join(self.templates_dir, fname)
-                bgr = cv2.imread(path)
-                if bgr is not None:
-                    self.templates_bgr[name] = bgr
-                    self.templates_gray[name] = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        # 2. 备用降级：逐文件从 templates_dir 读取，使用 Python open() + cv2.imdecode 绕过 C 层 fopen 限制
+        if len(self.templates_bgr) < 27 and os.path.isdir(self.templates_dir):
+            try:
+                for fname in os.listdir(self.templates_dir):
+                    if fname.endswith(".png"):
+                        name = fname[:-4]
+                        path = os.path.join(self.templates_dir, fname)
+                        bgr = None
+                        try:
+                            with open(path, "rb") as f:
+                                buf = np.frombuffer(f.read(), dtype=np.uint8)
+                                bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+                        except Exception:
+                            bgr = cv2.imread(path)
+                        if bgr is not None:
+                            self.templates_bgr[name] = bgr
+                            self.templates_gray[name] = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+            except Exception as e:
+                print(f"[TencentGridDetector] Error loading templates from {self.templates_dir}: {e}")
 
+        # 3. 载入碰杠搭子模板
         meld_dir = os.path.join(self.templates_dir, "melds")
         if os.path.isdir(meld_dir):
-            for fname in os.listdir(meld_dir):
-                if fname.endswith(".png"):
-                    name = fname[:-4]
-                    path = os.path.join(meld_dir, fname)
-                    img = cv2.imread(path)
-                    if img is not None:
-                        self.meld_templates[name] = img
+            try:
+                for fname in os.listdir(meld_dir):
+                    if fname.endswith(".png"):
+                        name = fname[:-4]
+                        path = os.path.join(meld_dir, fname)
+                        img = None
+                        try:
+                            with open(path, "rb") as f:
+                                buf = np.frombuffer(f.read(), dtype=np.uint8)
+                                img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+                        except Exception:
+                            img = cv2.imread(path)
+                        if img is not None:
+                            self.meld_templates[name] = img
+            except Exception as e:
+                pass
 
-        print(f"[TencentGridDetector] Successfully loaded {len(self.templates_bgr)} templates and {len(self.meld_templates)} meld templates.")
+        print(f"[TencentGridDetector] Final active templates: {len(self.templates_bgr)} templates, {len(self.meld_templates)} meld templates.")
 
     @property
     def templates(self) -> Dict[str, np.ndarray]:
@@ -220,99 +252,81 @@ class TencentGridDetector(Detector):
         sh, sw = hand_strip.shape[:2]
 
         hsv = cv2.cvtColor(hand_strip, cv2.COLOR_BGR2HSV)
-        is_felt = (hsv[:, :, 0] >= 55) & (hsv[:, :, 0] <= 105) & (hsv[:, :, 1] >= 60)
+        is_felt = (hsv[:, :, 0] >= 50) & (hsv[:, :, 0] <= 110) & (hsv[:, :, 1] >= 50)
         is_tile = ~is_felt & (hsv[:, :, 2] > 70)
 
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
         mask = cv2.morphologyEx(is_tile.astype(np.uint8) * 255, cv2.MORPH_CLOSE, kernel)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        valid_boxes = []
+        boxes = []
         for c in contours:
             x, y, bw, bh = cv2.boundingRect(c)
-            if bh > sh * 0.5 and bw > 120 and x < sw * 0.65:
-                valid_boxes.append((x, y, bw, bh))
+            # 立牌高度通常占手牌条 58% 以上，过滤左下角头像区域 (x >= sw * 0.05)
+            if bh > sh * 0.58 and x < sw * 0.92 and bw >= 25 and x >= sw * 0.05:
+                boxes.append((x, y, bw, bh))
 
-        if not valid_boxes:
-            valid_boxes = [(int(sw * 0.05), 0, int(sw * 0.70), sh)]
+        if not boxes:
+            return []
 
-        valid_boxes.sort(key=lambda b: b[2], reverse=True)
-        bx, by, bw, bh = valid_boxes[0]
+        boxes.sort(key=lambda b: b[0])
 
-        est_tw = bh / 1.40
-        raw_tiles_est = bw / est_tw
-        legal_counts = [1, 2, 4, 5, 7, 8, 10, 11, 13, 14]
-        best_target_count = min(legal_counts, key=lambda c: abs(c - raw_tiles_est))
+        # 检查是否包含独立摸牌连通域 (例如位于末尾且宽度约为单个立牌宽度的独立牌盒)
+        main_box = max(boxes, key=lambda b: b[2])
+        std_bh = main_box[3]
+        std_tw = std_bh / 1.38
 
-        active_strip = hand_strip[:, bx:bx + bw]
-        felt_sub = is_felt[:, bx:bx + bw]
-        col_felt = np.mean(felt_sub[int(sh * 0.2):int(sh * 0.8), :], axis=0)
-
-        search_start = int(bw * 0.75)
-        search_end = int(bw * 0.95)
-        is_gap_col = (col_felt[search_start:search_end] > 0.20)
-        max_run = 0
-        cur_run = 0
-        gap_start_in_sub = -1
-        for idx_g, v in enumerate(is_gap_col):
-            if v:
-                cur_run += 1
-                if cur_run > max_run:
-                    max_run = cur_run
-                    gap_start_in_sub = idx_g - cur_run + 1
-            else:
-                cur_run = 0
-
-        has_draw_gap = (max_run >= 10)
-        split_x = (search_start + gap_start_in_sub) if has_draw_gap else -1
-
-        if has_draw_gap:
-            best_target_count = min([2, 5, 8, 11, 14], key=lambda c: abs(c - raw_tiles_est))
+        drawn_box = None
+        if len(boxes) >= 2 and boxes[-1][2] <= std_tw * 1.5:
+            drawn_box = boxes[-1]
+            standing_boxes = boxes[:-1]
         else:
-            best_target_count = min([1, 4, 7, 10, 13], key=lambda c: abs(c - raw_tiles_est))
+            standing_boxes = boxes
 
-        detections: List[Tuple[Rect, str, float]] = []
-        top_conf = 0.0
+        # 切分立牌区域
+        bx, by, bw, bh = standing_boxes[0]
+        raw_est = bw / std_tw
 
-        if has_draw_gap and split_x > 0:
-            standing_crop = active_strip[:, :split_x]
-            after_gap = active_strip[:, split_x:]
-            ag_hsv = cv2.cvtColor(after_gap, cv2.COLOR_BGR2HSV)
-            ag_felt = (ag_hsv[:, :, 0] >= 55) & (ag_hsv[:, :, 0] <= 105) & (ag_hsv[:, :, 1] >= 60)
-            non_felt_cols = np.where(np.mean(~ag_felt[int(sh * 0.2):int(sh * 0.8), :], axis=0) > 0.35)[0]
-            if len(non_felt_cols) > 20:
-                drawn_tile_crop = after_gap[:, non_felt_cols[0]:non_felt_cols[-1] + 1]
-            else:
-                drawn_tile_crop = after_gap
-
-            standing_count = best_target_count - 1
-            stw = standing_crop.shape[1] / float(standing_count)
-            for i in range(standing_count):
-                x1 = int(round(i * stw))
-                x2 = int(round((i + 1) * stw))
-                c = standing_crop[:, x1:x2]
-                lbl, sc = self.classify_tile(c)
-                rect: Rect = (bx + x1, y_top + by, x2 - x1, bh)
-                detections.append((rect, lbl, sc))
-                top_conf = max(top_conf, sc)
-
-            lbl, sc = self.classify_tile(drawn_tile_crop)
-            rect14: Rect = (bx + split_x, y_top + by, int(est_tw), bh)
-            detections.append((rect14, lbl, sc))
-            top_conf = max(top_conf, sc)
+        # 合法立牌张数
+        if drawn_box is not None:
+            legal_standing = [1, 4, 7, 10, 13]
         else:
-            tw = bw / float(best_target_count)
-            for i in range(best_target_count):
+            legal_standing = [1, 2, 4, 5, 7, 8, 10, 11, 13, 14]
+
+        cand_counts = sorted(legal_standing, key=lambda c: abs(c - raw_est))[:2]
+
+        best_standing_dets: List[Tuple[Rect, str, float]] = []
+        best_standing_mean = -1.0
+
+        for k in cand_counts:
+            tw = bw / float(k)
+            dets: List[Tuple[Rect, str, float]] = []
+            for i in range(k):
                 x1 = int(round(i * tw))
                 x2 = int(round((i + 1) * tw))
-                c = active_strip[:, x1:x2]
+                c = hand_strip[by:by + bh, bx + x1:bx + x2]
                 lbl, sc = self.classify_tile(c)
-                rect = (bx + x1, y_top + by, x2 - x1, bh)
-                detections.append((rect, lbl, sc))
-                top_conf = max(top_conf, sc)
+                rect: Rect = (bx + x1, y_top + by, x2 - x1, bh)
+                dets.append((rect, lbl, sc))
+            mean_sc = float(np.mean([d[2] for d in dets])) if dets else 0.0
+            if mean_sc > best_standing_mean:
+                best_standing_mean = mean_sc
+                best_standing_dets = dets
+
+        all_dets = list(best_standing_dets)
+        top_conf = max([d[2] for d in all_dets], default=0.0)
+
+        # 追加独立摸牌
+        if drawn_box is not None:
+            dbx, dby, dbw, dbh = drawn_box
+            c_draw = hand_strip[dby:dby + dbh, dbx:dbx + dbw]
+            lbl_d, sc_d = self.classify_tile(c_draw)
+            rect_d: Rect = (dbx, y_top + dby, dbw, dbh)
+            all_dets.append((rect_d, lbl_d, sc_d))
+            top_conf = max(top_conf, sc_d)
 
         self.last_top_score = top_conf
-        return detections
+        return all_dets
 
     def detect_all_rows(
         self, image: CVImage, classify: bool = True, allow_rotation: bool = False, **kwargs
