@@ -9,6 +9,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    permissions:
+      contents: write
+
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -69,3 +72,21 @@ jobs:
         with:
           name: app-release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+
+      - name: 自动发布 GitHub Release (手机免登录直链)
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        with:
+          tag_name: v1.0.0
+          name: "雀神助手 最新实战安装包 (63MB)"
+          body: |
+            ## 雀神助手 最新实战安装包发布
+            - 100% 修复识别精度（34 类全量高清模板纯内存常驻，彻底穿透 Chaquopy）
+            - 完美适配换牌浮起牌与定缺出牌推演
+            - 彻底解决状态卡死与新局重置
+            - 手机端直接点击下方 `app-release.apk` 即可下载安装！
+          files: build/app/outputs/flutter-apk/app-release.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

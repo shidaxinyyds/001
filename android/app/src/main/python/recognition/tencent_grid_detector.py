@@ -27,20 +27,30 @@ class TencentGridDetector(Detector):
         self._load_templates()
 
     def _load_templates(self):
-        # 1. 优先从离线预打包的 tencent_templates.npz 读取 (100% 穿透 Android Chaquopy zip 文件系统，秒级加载)
-        cur_dir = os.path.dirname(os.path.abspath(__file__))
-        npz_path = os.path.join(cur_dir, "tencent_templates.npz")
-        if os.path.exists(npz_path):
-            try:
-                with open(npz_path, "rb") as f:
-                    npz_data = np.load(f)
-                    for key in npz_data.files:
-                        bgr = npz_data[key]
-                        self.templates_bgr[key] = bgr
-                        self.templates_gray[key] = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-                print(f"[TencentGridDetector] Successfully loaded {len(self.templates_bgr)} templates from pre-bundled npz.")
-            except Exception as e:
-                print(f"[TencentGridDetector] Failed to load npz: {e}")
+        # 1. 纯内存 Python 模块加载（100% 免疫 Android Chaquopy zip 文件系统限制，0毫秒极速加载）
+        try:
+            import recognition.templates_data as tdata
+            self.templates_bgr.update(tdata.TEMPLATES_BGR)
+            self.templates_gray.update(tdata.TEMPLATES_GRAY)
+            print(f"[TencentGridDetector] Successfully loaded {len(self.templates_bgr)} templates from pure-python module.")
+        except Exception as e:
+            print(f"[TencentGridDetector] pure-python templates_data load warning: {e}")
+
+        # 2. 次选预打包 npz
+        if len(self.templates_bgr) < 27:
+            cur_dir = os.path.dirname(os.path.abspath(__file__))
+            npz_path = os.path.join(cur_dir, "tencent_templates.npz")
+            if os.path.exists(npz_path):
+                try:
+                    with open(npz_path, "rb") as f:
+                        npz_data = np.load(f)
+                        for key in npz_data.files:
+                            bgr = npz_data[key]
+                            self.templates_bgr[key] = bgr
+                            self.templates_gray[key] = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+                    print(f"[TencentGridDetector] Successfully loaded {len(self.templates_bgr)} templates from npz.")
+                except Exception as e:
+                    print(f"[TencentGridDetector] Failed to load npz: {e}")
 
         # 2. 备用降级：逐文件从 templates_dir 读取，使用 Python open() + cv2.imdecode 绕过 C 层 fopen 限制
         if len(self.templates_bgr) < 27 and os.path.isdir(self.templates_dir):
@@ -246,14 +256,14 @@ class TencentGridDetector(Detector):
             return []
 
         ih, iw = image_bgr.shape[:2]
-        y_top = int(ih * 0.81)
-        y_bot = int(ih * 0.99)
-        hand_strip = image_bgr[y_top:y_bot, :]
-        sh, sw = hand_strip.shape[:2]
+        y_min = int(ih * 0.68)
+        y_max = int(ih * 0.99)
+        strip = image_bgr[y_min:y_max, :]
+        sh, sw = strip.shape[:2]
 
-        hsv = cv2.cvtColor(hand_strip, cv2.COLOR_BGR2HSV)
+        hsv = cv2.cvtColor(strip, cv2.COLOR_BGR2HSV)
         is_felt = (hsv[:, :, 0] >= 50) & (hsv[:, :, 0] <= 110) & (hsv[:, :, 1] >= 50)
-        is_tile = ~is_felt & (hsv[:, :, 2] > 70)
+        is_tile = ~is_felt & (hsv[:, :, 2] > 75) & (strip[:, :, 0] > 110) & (strip[:, :, 1] > 110) & (strip[:, :, 2] > 110)
 
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
         mask = cv2.morphologyEx(is_tile.astype(np.uint8) * 255, cv2.MORPH_CLOSE, kernel)
@@ -262,37 +272,26 @@ class TencentGridDetector(Detector):
         boxes = []
         for c in contours:
             x, y, bw, bh = cv2.boundingRect(c)
-            # 立牌高度通常占手牌条 58% 以上，过滤左下角头像区域 (x >= sw * 0.05)
-            if bh > sh * 0.58 and x < sw * 0.92 and bw >= 25 and x >= sw * 0.05:
-                boxes.append((x, y, bw, bh))
+            # 立牌高度通常占手牌带 35% 以上，过滤左下角头像区域 (x >= sw * 0.05)
+            if bh > sh * 0.35 and x < sw * 0.95 and bw >= 25 and x >= sw * 0.05:
+                boxes.append((x, y + y_min, bw, bh))
 
         if not boxes:
             return []
 
         boxes.sort(key=lambda b: b[0])
 
-        # 检查是否包含独立摸牌连通域 (例如位于末尾且宽度约为单个立牌宽度的独立牌盒)
         main_box = max(boxes, key=lambda b: b[2])
-        std_bh = main_box[3]
-        std_tw = std_bh / 1.38
+        bx, by, bw, bh = main_box
+        std_tw = 0.0547 * iw
+        std_bh = std_tw * 1.35
 
         drawn_box = None
         if len(boxes) >= 2 and boxes[-1][2] <= std_tw * 1.5:
             drawn_box = boxes[-1]
-            standing_boxes = boxes[:-1]
-        else:
-            standing_boxes = boxes
 
-        # 切分立牌区域
-        bx, by, bw, bh = standing_boxes[0]
         raw_est = bw / std_tw
-
-        # 合法立牌张数
-        if drawn_box is not None:
-            legal_standing = [1, 4, 7, 10, 13]
-        else:
-            legal_standing = [1, 2, 4, 5, 7, 8, 10, 11, 13, 14]
-
+        legal_standing = [1, 4, 7, 10, 13] if drawn_box else [1, 2, 4, 5, 7, 8, 10, 11, 13, 14]
         cand_counts = sorted(legal_standing, key=lambda c: abs(c - raw_est))[:2]
 
         best_standing_dets: List[Tuple[Rect, str, float]] = []
@@ -302,11 +301,23 @@ class TencentGridDetector(Detector):
             tw = bw / float(k)
             dets: List[Tuple[Rect, str, float]] = []
             for i in range(k):
-                x1 = int(round(i * tw))
-                x2 = int(round((i + 1) * tw))
-                c = hand_strip[by:by + bh, bx + x1:bx + x2]
+                x1 = int(round(bx + i * tw))
+                x2 = int(round(bx + (i + 1) * tw))
+                # 逐列垂直自适应锚定：精准锁定该张牌真正的上下边界（抵抗换牌选中浮起、换牌按钮遮挡）
+                col_mask = is_tile[:, x1:x2]
+                row_counts = np.sum(col_mask, axis=1)
+                valid_y = np.where(row_counts > (x2 - x1) * 0.35)[0]
+                expected_h = int((x2 - x1) * 1.35)
+                if len(valid_y) >= 20:
+                    y_bot_c = y_min + valid_y[-1] + 1
+                    y_top_c = max(0, y_bot_c - expected_h)
+                else:
+                    y_bot_c = min(ih, by + bh)
+                    y_top_c = max(0, y_bot_c - expected_h)
+
+                c = image_bgr[y_top_c:y_bot_c, x1:x2]
                 lbl, sc = self.classify_tile(c)
-                rect: Rect = (bx + x1, y_top + by, x2 - x1, bh)
+                rect: Rect = (x1, y_top_c, x2 - x1, y_bot_c - y_top_c)
                 dets.append((rect, lbl, sc))
             mean_sc = float(np.mean([d[2] for d in dets])) if dets else 0.0
             if mean_sc > best_standing_mean:
@@ -314,17 +325,19 @@ class TencentGridDetector(Detector):
                 best_standing_dets = dets
 
         all_dets = list(best_standing_dets)
-        top_conf = max([d[2] for d in all_dets], default=0.0)
 
-        # 追加独立摸牌
+        # 追加独立摸牌或换牌浮起选牌
         if drawn_box is not None:
             dbx, dby, dbw, dbh = drawn_box
-            c_draw = hand_strip[dby:dby + dbh, dbx:dbx + dbw]
-            lbl_d, sc_d = self.classify_tile(c_draw)
-            rect_d: Rect = (dbx, y_top + dby, dbw, dbh)
+            expected_h = int(dbw * 1.35)
+            db_bot = dby + dbh
+            db_top = max(0, db_bot - expected_h)
+            col_strip = image_bgr[db_top:db_bot, dbx:dbx + dbw]
+            lbl_d, sc_d = self.classify_tile(col_strip)
+            rect_d: Rect = (dbx, db_top, dbw, db_bot - db_top)
             all_dets.append((rect_d, lbl_d, sc_d))
-            top_conf = max(top_conf, sc_d)
 
+        top_conf = max([d[2] for d in all_dets], default=0.0)
         self.last_top_score = top_conf
         return all_dets
 

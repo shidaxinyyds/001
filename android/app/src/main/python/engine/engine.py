@@ -619,6 +619,7 @@ class _HandStabilizer:
         hand_len = len(self.stable_mpsz) // 2
         is_count_move = abs(n - hand_len) == 1 and n in (13, 14)
         is_tile_swap = (n == hand_len and n in (13, 14) and _hand_diff_count(key, getattr(self, "_stable_key", "")) <= 2)
+        mode_hits = self._recent.count(key)
         if is_count_move or is_tile_swap or self._streak >= need or mode_hits >= HAND_MODE_VOTES:
             self.stable_mpsz = ordered_mpsz
             self._stable_key = key
@@ -1003,6 +1004,7 @@ class Engine:
         self._discard_history.clear()
         self._tile_voter.reset()
         self._hand_stab.reset()
+        self._frame_skipper = _FrameSkipper()
         self._stable_hand_mpsz = ""
         self._stable_hand_count = 0
         self._partial_mpsz = ""
@@ -2030,16 +2032,17 @@ class Engine:
                 hand_row = sorted(hand_row, key=lambda d: d[0][0])
                 raw_labels = [d[1] for d in hand_row if d[1] is not None]
 
-            # 新洗牌发牌 / 换三张判定：若当前帧原始手牌张数完整（>=13张），且与旧稳定手牌重合度很低（<= 5 张相同），
-            # 说明洗牌重新发牌或刚发生换三张！立即重置稳定器与牌池，绝不让旧牌反向覆盖新牌！
-            if self._hand_stab.stable_mpsz and len(raw_labels) in hsizes:
+            # 新洗牌发牌 / 换三张判定：若当前帧原始手牌张数较完整（>=10张），且与旧稳定手牌重合度很低（<= 5 张相同），
+            # 说明洗牌重新发牌或刚发生换三张！立即重置稳定器、帧跳跃缓存与牌池，绝不让旧牌反向覆盖新牌！
+            if self._hand_stab.stable_mpsz and len(raw_labels) >= 10:
                 old_set = [self._hand_stab.stable_mpsz[i:i+2] for i in range(0, len(self._hand_stab.stable_mpsz), 2)]
                 raw_set = [l for l in raw_labels if l]
                 overlap = sum(min(old_set.count(t), raw_set.count(t)) for t in set(raw_set))
-                if overlap <= 5 and len(old_set) >= 13:
+                if overlap <= 5 and len(old_set) >= 10:
                     self._monotonic_discards.clear()
                     self._hand_stab.reset()
                     self._tile_voter.reset()
+                    self._frame_skipper = _FrameSkipper()
                     self._stable_hand_mpsz = ""
                     self._stable_hand_count = 0
                     self._last_hand_y = None

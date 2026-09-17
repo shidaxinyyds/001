@@ -51,7 +51,7 @@ MODES: Dict[str, Dict] = {
         "name": "川麻血战",
         "players": 4,
         "available": list(range(27)) + [33],  # 0-26 万筒条各9张共27种，+ 33(7z 红中/赖子)
-        "hand_sizes": (14, 13, 11, 10, 8, 7, 5, 4, 2, 1),
+        "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
         "wall": 108,
     },
     "4p": {
