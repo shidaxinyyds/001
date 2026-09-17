@@ -3,7 +3,9 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:auto_vision/config_store.dart';
 import 'package:auto_vision/overlays/tile_labels.dart';
 import 'package:auto_vision/server.dart';
@@ -434,18 +436,17 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // 展开态独立垂直滚动控制器
   final ScrollController _panelScrollController = ScrollController();
 
-  // ── 紧凑布局尺寸常量 ──
-
+  // ── 自由缩放临界点常量 ──
   static const double minPanelW = 190;
-  static const double maxPanelW = 380;
+  static const double maxPanelW = 420;
   static const double minPanelH = 120;
-  static const double maxPanelH = 290;
+  static const double maxPanelH = 520;
 
-  double _minPanelH() => minPanelH;
-
-  // 缩放中：此期间关闭原生拖动，避免"拖把手时整窗跟着跑"
+  // 缩放中：此期间关闭原生拖动，避免拖把手时整窗跟着位移
   bool _draggingResize = false;
   bool _resizeInFlight = false;
+  bool _isResizing = false;
+  bool _hitLimitFeedback = false;
 
 
 
@@ -463,6 +464,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     DebugConfig.load().then((c) {
       if (mounted) setState(() => _antiBan = c.antiBan);
     });
+    // 加载用户自定义记忆弹窗尺寸
+    _loadSavedSize();
 
     // 监听原生层通过本地 socket 发来的每帧分析结果（端口 12345 与 ImageProcessor 发送端一致）。
     // 即便 socket 启动失败也不能让悬浮窗引擎崩溃（否则按钮永远不渲染），因此整体 try/catch 兜底。
@@ -650,37 +653,35 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   double? _pendingH;
   DateTime? _lastResizeCallTime;
 
-  String _currentSizeLabel() {
-    if (panelW >= 280) return '大';
-    if (panelW >= 235) return '中';
-    return '小';
-  }
-
-  /// 一键预设尺寸切换：在 紧凑(小) / 标准(中) / 放大(大) 之间极速切换
-  Future<void> _cyclePresetSize() async {
-    setState(() {
-      if (panelW < 235) {
-        // 小 -> 中 (标准)
-        panelW = 250;
-        panelH = 225;
-      } else if (panelW < 280) {
-        // 中 -> 大 (放大)
-        panelW = 300;
-        panelH = 270;
-      } else {
-        // 大 -> 小 (紧凑)
-        panelW = 215;
-        panelH = 195;
+  /// 读取用户在本地记忆的悬浮窗自定义尺寸
+  Future<void> _loadSavedSize() async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      final double? sw = sp.getDouble('overlay_panel_w');
+      final double? sh = sp.getDouble('overlay_panel_h');
+      if (sw != null && sh != null && mounted) {
+        setState(() {
+          panelW = sw.clamp(minPanelW, maxPanelW);
+          panelH = sh.clamp(minPanelH, maxPanelH);
+        });
       }
-    });
-    await _ensureSize(panelW, panelH, drag: true);
+    } catch (_) {}
   }
 
-  /// 拖动缩放把手时实时调整尺寸。
+  /// 持久化保存用户自定义悬浮窗尺寸
+  Future<void> _savePanelSize(double w, double h) async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      await sp.setDouble('overlay_panel_w', w);
+      await sp.setDouble('overlay_panel_h', h);
+    } catch (_) {}
+  }
+
+  /// 拖动缩放把手时实时平滑更新原生窗口物理尺寸。
   ///
-  /// 节流防抖机制：
-  /// resizeOverlay 走 MethodChannel 到原生，高频调用会导致 Android 频繁重置 View 布局触发 Touch Cancel。
-  /// 此处加上 45ms 节流，既保证视觉尺寸丝滑收敛，又防止底层事件通道被冲垮。
+  /// 关键要点：
+  /// 1. 传 false 彻底屏蔽原生拖动，防止原生 onTouch 将缩放手势识别为整窗位移。
+  /// 2. 35ms 极速节流，既保证 60Hz 视觉丝滑缩放，又绝不造成 Android 消息通道阻塞。
   void _resizeLive(double w, double h) {
     _pendingW = w;
     _pendingH = h;
@@ -690,8 +691,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final elapsed = _lastResizeCallTime == null
         ? 999
         : now.difference(_lastResizeCallTime!).inMilliseconds;
-    if (elapsed < 45) {
-      Future.delayed(Duration(milliseconds: 45 - elapsed), () {
+    if (elapsed < 35) {
+      Future.delayed(Duration(milliseconds: 35 - elapsed), () {
         if (_pendingW != null && _pendingH != null && !_resizeInFlight && mounted) {
           final nw = _pendingW!;
           final nh = _pendingH!;
@@ -705,7 +706,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
     _resizeInFlight = true;
     _lastResizeCallTime = now;
-    FlutterOverlayWindow.resizeOverlay(w.toInt(), h.toInt(), true)
+    FlutterOverlayWindow.resizeOverlay(w.toInt(), h.toInt(), false)
         .catchError((Object _) => null)
         .whenComplete(() {
       _resizeInFlight = false;
@@ -887,45 +888,114 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     return counts.entries.where((e) => e.value >= 4).map((e) => e.key).toSet();
   }
 
-  // 缩放把手：右下角，可自由改变弹窗长宽
+  // 自由缩放把手：右下角，支持手指任意平滑拖动，实时自由缩放，带有边界临界点与触感反馈
   Widget _resizeHandle() {
     return Positioned(
       right: 0,
       bottom: 0,
-      child: GestureDetector(
+      child: Listener(
         behavior: HitTestBehavior.opaque,
-        onPanStart: (_) {
+        onPointerDown: (e) {
+          _isResizing = true;
+          _hitLimitFeedback = false;
           setState(() => _draggingResize = true);
+          // 立即向原生层关闭顶栏拖动，防止手势被原生拦截位移
+          FlutterOverlayWindow.resizeOverlay(panelW.toInt(), panelH.toInt(), false);
         },
-        onPanUpdate: (DragUpdateDetails details) {
-          setState(() {
-            // 显式 toDouble()：旧版 Dart 的 clamp 返回 num，直接赋给 double 会报错
-            panelW = (panelW + details.delta.dx).clamp(minPanelW, maxPanelW).toDouble();
-            panelH = (panelH + details.delta.dy).clamp(_minPanelH(), maxPanelH).toDouble();
-          });
-          _resizeLive(panelW, panelH);
+        onPointerMove: (e) {
+          if (!_isResizing) return;
+          final double prevW = panelW;
+          final double prevH = panelH;
+          final double nw = (panelW + e.delta.dx).clamp(minPanelW, maxPanelW);
+          final double nh = (panelH + e.delta.dy).clamp(minPanelH, maxPanelH);
+
+          // 达到最大或最小临界点（临界点控制）
+          final bool atLimit = (nw == minPanelW || nw == maxPanelW || nh == minPanelH || nh == maxPanelH);
+          if (atLimit && !_hitLimitFeedback) {
+            _hitLimitFeedback = true;
+            HapticFeedback.selectionClick();
+          } else if (!atLimit) {
+            _hitLimitFeedback = false;
+          }
+
+          if (nw != prevW || nh != prevH) {
+            setState(() {
+              panelW = nw;
+              panelH = nh;
+            });
+            _resizeLive(panelW, panelH);
+          }
         },
-        onPanEnd: (_) async {
+        onPointerUp: (e) async {
+          if (!_isResizing) return;
+          _isResizing = false;
           setState(() => _draggingResize = false);
-          // 缩放结束，关键：必须保持 drag: true，确保顶栏原生 120Hz 极速拖动永远生效！
+          // 释放手指，恢复原生顶栏拖动并固定精确尺寸
           await _ensureSize(panelW, panelH, drag: true);
+          _savePanelSize(panelW, panelH);
         },
-        onPanCancel: () async {
+        onPointerCancel: (e) async {
+          if (!_isResizing) return;
+          _isResizing = false;
           setState(() => _draggingResize = false);
           await _ensureSize(panelW, panelH, drag: true);
+          _savePanelSize(panelW, panelH);
         },
         child: Container(
-          width: 36,
-          height: 36,
+          width: 46,
+          height: 46,
           alignment: Alignment.bottomRight,
           padding: const EdgeInsets.only(right: 3, bottom: 3),
-          child: CustomPaint(
-            size: const Size(20, 20),
-            painter: _GripPainter(
-              color: _draggingResize
-                  ? const Color(0xFF80CBC4)
-                  : Colors.white.withAlpha(150),
-            ),
+          child: Stack(
+            clipBehavior: Clip.none,
+            alignment: Alignment.bottomRight,
+            children: [
+              CustomPaint(
+                size: const Size(22, 22),
+                painter: _GripPainter(
+                  color: _draggingResize
+                      ? const Color(0xFF64FFDA)
+                      : Colors.white.withAlpha(150),
+                ),
+              ),
+              // 拖拽缩放时，在右上角浮现精确实时像素与临界点提示
+              if (_draggingResize)
+                Positioned(
+                  right: 20,
+                  bottom: 20,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: const Color(0xF20F172A),
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(
+                        color: _hitLimitFeedback
+                            ? const Color(0xFFFFB74D)
+                            : const Color(0xFF64FFDA),
+                        width: 0.8,
+                      ),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color(0x33000000),
+                          blurRadius: 4,
+                          offset: Offset(0, 1),
+                        ),
+                      ],
+                    ),
+                    child: Text(
+                      '${panelW.toInt()} × ${panelH.toInt()}${_hitLimitFeedback ? " (临界)" : ""}',
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w600,
+                        color: _hitLimitFeedback
+                            ? const Color(0xFFFFB74D)
+                            : Colors.white,
+                        decoration: TextDecoration.none,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
           ),
         ),
       ),
@@ -2035,35 +2105,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                                     Text(
                                       '新局',
                                       style: TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 9.5,
-                                        fontWeight: FontWeight.bold,
-                                        decoration: TextDecoration.none,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                            GestureDetector(
-                              onTap: _cyclePresetSize,
-                              behavior: HitTestBehavior.opaque,
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2.5),
-                                margin: const EdgeInsets.only(right: 5),
-                                decoration: BoxDecoration(
-                                  color: Colors.white.withAlpha(20),
-                                  borderRadius: BorderRadius.circular(4),
-                                  border: Border.all(color: Colors.white12, width: 0.6),
-                                ),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    const Icon(Icons.aspect_ratio_rounded, color: Colors.white70, size: 10),
-                                    const SizedBox(width: 2),
-                                    Text(
-                                      _currentSizeLabel(),
-                                      style: const TextStyle(
                                         color: Colors.white,
                                         fontSize: 9.5,
                                         fontWeight: FontWeight.bold,
