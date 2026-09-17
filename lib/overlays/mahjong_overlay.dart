@@ -431,8 +431,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   double panelW = 220;
   double panelH = 210;
 
-  // 展开态窗口拖动定位与独立垂直滚动控制器
-  OverlayPosition? _panelPos;
+  // 展开态独立垂直滚动控制器
   final ScrollController _panelScrollController = ScrollController();
 
   // ── 紧凑布局尺寸常量 ──
@@ -663,7 +662,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       return;
     }
     _resizeInFlight = true;
-    FlutterOverlayWindow.resizeOverlay(w.toInt(), h.toInt(), false)
+    FlutterOverlayWindow.resizeOverlay(w.toInt(), h.toInt(), true)
         .catchError((Object _) => null)
         .whenComplete(() {
       _resizeInFlight = false;
@@ -685,10 +684,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       panelVisible = next;
     });
     if (next) {
-      // 展开分析面板时关闭原生全局拖动，把垂直触摸事件完全释放给 Flutter 的 SingleChildScrollView，
-      // 确保能顺畅自由地上下滑动到最顶部和最底部。窗口移动由顶部标题栏手势接管。
+      // 展开分析面板时保持原生拖动开启（enableDrag = true）。
+      // 原生 OverlayService 保证：顶部 50dp 区域触发 120Hz 极速原生拖动位移；
+      // 50dp 以下内容区域完全透传给 Flutter SingleChildScrollView 自由顺畅滚动。
       panelH = panelH.clamp(minPanelH, maxPanelH);
-      await _ensureSize(panelW, panelH, drag: false);
+      await _ensureSize(panelW, panelH, drag: true);
     } else {
       final double w = _capsuleMode ? _kCapsuleW : collapsed;
       final double h = _capsuleMode ? _kCapsuleH : collapsed;
@@ -1947,41 +1947,24 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                         child: Row(
                           children: [
                             Expanded(
-                              child: GestureDetector(
-                                behavior: HitTestBehavior.opaque,
-                                onPanStart: (_) async {
-                                  try {
-                                    _panelPos = await FlutterOverlayWindow.getOverlayPosition();
-                                  } catch (_) {}
-                                },
-                                onPanUpdate: (DragUpdateDetails details) {
-                                  if (_panelPos != null) {
-                                    _panelPos = OverlayPosition(
-                                      _panelPos!.x + details.delta.dx,
-                                      _panelPos!.y + details.delta.dy,
-                                    );
-                                    FlutterOverlayWindow.moveOverlay(_panelPos!).catchError((_) => null);
-                                  }
-                                },
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    const MahjongTileIcon(size: 15),
-                                    const SizedBox(width: 5),
-                                    const Text(
-                                      '雀神助手',
-                                      style: TextStyle(
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.bold,
-                                        fontSize: 12,
-                                        letterSpacing: 0.3,
-                                        decoration: TextDecoration.none,
-                                      ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const MahjongTileIcon(size: 15),
+                                  const SizedBox(width: 5),
+                                  const Text(
+                                    '雀神助手',
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 12,
+                                      letterSpacing: 0.3,
+                                      decoration: TextDecoration.none,
                                     ),
-                                    const SizedBox(width: 4),
-                                    _statusBanner(),
-                                  ],
-                                ),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  _statusBanner(),
+                                ],
                               ),
                             ),
                             const SizedBox(width: 5),
@@ -2115,6 +2098,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                         // 3. 全场记牌器（对局开始后显示，实时统揽全场 108/136 张活牌剩余数）
                         if (inMatch) ...[
                           _remainingMatrixSection(result?['remaining_matrix'] as Map<String, dynamic>?),
+                          if (discards.isNotEmpty && discardCount > 0) ...[
+                            const SizedBox(height: 5),
+                            _discardBlock(discards: discards, discardCount: discardCount, hand: hand),
+                          ],
                         ],
                         // 底部安全留白：确保可以顺畅滑到最底部且不被右下角缩放手柄遮挡
                         const SizedBox(height: 26),

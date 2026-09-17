@@ -251,14 +251,10 @@ class _MotionGuard:
         if len(self._history) == 0:
             self._history.append(diff)
             return False
-        avg = sum(self._history) / len(self._history)
         self._history.append(diff)
-        # "静止帧" diff 极小（约 0~3），它的均值会被拉低很多，比较时把它去掉；
-        # 否则每一次画面静止都会"训练"出一个极低均值，下一帧稍动就触发误判。
-        non_static = [d for d in self._history if d >= 0.5]
-        if non_static:
-            avg = sum(non_static) / len(non_static)
-        return diff > max(8.0, avg * MOTION_SPIKE_RATIO)
+        # 只有整屏大幅闪烁/全屏菜单切换（diff >= 85.0）才算真实 spike 避让；
+        # 摸牌、打牌、手牌位移等常规对局动作（diff 5~60）必须全力即时识别，绝不阻断与丢弃
+        return diff >= 85.0
 
 
 class _FrameSkipper:
@@ -1030,6 +1026,10 @@ class Engine:
         # 牌河稳定性历史与牌池单调累加器（单局牌池只增不减、108张物理守恒）
         self._discard_history: deque = deque(maxlen=DISCARD_HISTORY_FRAMES)
         self._monotonic_discards: Counter = Counter()
+        self._match_started: bool = False
+        self._last_stable_counter: Counter = Counter()
+        self._last_stable_n: int = 0
+        self._prev_raw_n: int = 0
         # ===== 方向自检（旋转鲁棒性）=====
         # 真机截屏：竖屏手机 + 横屏麻将游戏时，MediaProjection 的 VirtualDisplay
         # 被强制成横屏缓冲，横屏游戏在里面被系统旋转 90° 塞入。结果所有牌都"横过来"，
@@ -1129,6 +1129,10 @@ class Engine:
         self._frame_skipper = _FrameSkipper()
         self._stable_hand_mpsz = ""
         self._stable_hand_count = 0
+        self._match_started = False
+        self._last_stable_counter = Counter()
+        self._last_stable_n = 0
+        self._prev_raw_n = 0
         self._partial_mpsz = ""
         self._partial_ttl = 0
         self._last_hand_y = None
@@ -2158,35 +2162,42 @@ class Engine:
                     fr.append((r, lab, c))
                 filtered.append(fr)
 
-            # 多帧投票：把所有牌（含牌河）按位置投入投票窗口，挡掉单帧抖动
-            # （尤其筒/索被误判成白板的刷屏）。跨行 y 差距大不会串。
-            flat = [(r, l, c) for row in filtered for (r, l, c) in row]
-            try:
-                self._tile_voter.push(flat)
-                voted = self._tile_voter.vote()
-            except Exception:
-                traceback.print_exc()
-                voted = flat
-            voted_rows = StructuralDetector._group_rows(voted)
-
-            # 区分手牌行与牌河行（用下标而非对象身份：下面会把手牌行整体
-            # 替换成"与稳定手牌对齐"后的新列表，身份比较会失效，进而把
-            # 整副手牌误当成牌河算进 discards —— 一个会让剩余牌数归零的坑）。
-            hand_row = self._pick_hand_row(voted_rows, image.shape[0])
-            hand_idx = None
-            for _i, _row in enumerate(voted_rows):
-                if _row is hand_row:
-                    hand_idx = _i
-                    break
+            # 若为主力 TencentGridDetector，手牌行直接提取，不经过针对乱序单框的 _tile_voter
+            is_grid_det = (getattr(detector, "__class__", None) and detector.__class__.__name__ == "TencentGridDetector")
+            if is_grid_det:
+                # TencentGridDetector 是基于整排切片的精密网格识别，手牌行直接提取，
+                # 绝不投入空间坐标投票窗口（避免 13/14 切换时空间错位聚合引入幽灵牌与延迟）
+                hand_row = filtered[0] if filtered else []
+                voted_rows = [hand_row]
+                hand_idx = 0 if hand_row else None
+            else:
+                flat = [(r, l, c) for row in filtered for (r, l, c) in row]
+                try:
+                    self._tile_voter.push(flat)
+                    voted = self._tile_voter.vote()
+                except Exception:
+                    traceback.print_exc()
+                    voted = flat
+                voted_rows = StructuralDetector._group_rows(voted)
+                hand_row = self._pick_hand_row(voted_rows, image.shape[0])
+                hand_idx = None
+                for _i, _row in enumerate(voted_rows):
+                    if _row is hand_row:
+                        hand_idx = _i
+                        break
 
             # ===== 手牌：本帧原始标签 → 多重集稳定器定夺 =====
-            # 稳定器一旦建立起稳定手牌，输出就**永不为空**：单帧抖动、手牌
-            # 重排、漏识别都不会让它变空。是否真的变了由"连续帧共识"决定。
-            # 这是"界面永远有内容、且不会闪"的根本保证。
             raw_labels: List[str] = []
             if hand_row is not None:
                 hand_row = sorted(hand_row, key=lambda d: d[0][0])
                 raw_labels = [d[1] for d in hand_row if d[1] is not None]
+
+            # 摸牌/出牌瞬间（张数切换），立刻清空空间投票历史与帧缓存，保证下一帧无任何幽灵残留
+            curr_raw_n = len(raw_labels)
+            if curr_raw_n > 0 and getattr(self, "_prev_raw_n", 0) > 0 and curr_raw_n != self._prev_raw_n:
+                self._tile_voter.reset()
+                self._frame_skipper = _FrameSkipper()
+            self._prev_raw_n = curr_raw_n
 
             # 新洗牌发牌 / 换三张判定：若当前帧原始手牌张数较完整（>=10张），且与旧稳定手牌重合度很低（<= 5 张相同），
             # 说明洗牌重新发牌或刚发生换三张！立即重置稳定器、帧跳跃缓存与牌池，绝不让旧牌反向覆盖新牌！
@@ -2202,6 +2213,9 @@ class Engine:
                     self._stable_hand_mpsz = ""
                     self._stable_hand_count = 0
                     self._last_hand_y = None
+                    self._match_started = False
+                    self._last_stable_counter = Counter()
+                    self._last_stable_n = 0
 
             hand_mpsz = self._hand_stab.observe(raw_labels, hsizes, avail)
 
@@ -2217,7 +2231,6 @@ class Engine:
                 if _i == hand_idx:
                     continue
                 # 牌河物理位置先验：牌河只能位于牌桌中央区域（0.20 <= yc <= 0.72）
-                # 画面顶部（yc < 0.20）为对家牌墙/手牌/顶栏，画面底部（yc > 0.72）为自家手牌区
                 ys = [d[0][1] for d in row]
                 yc = sum(ys) / len(ys) if ys else 0
                 if yc < 0.20 * ih or yc > 0.72 * ih:
@@ -2247,25 +2260,47 @@ class Engine:
                 except Exception:
                     pass
 
+            curr_cnt = _mpsz_to_counter(hand_mpsz) if hand_mpsz else Counter()
+            curr_n = sum(curr_cnt.values())
 
-            # ---- 摸牌独立判定 (基于物理间距 Physical Gap) ----
+            # ===== 瞬时出牌感知：手牌张数减少（例如 14->13，玩家刚打出一张牌）=====
+            # 零延迟直接从手牌集合差分 (prev_counter - curr_counter) 捕获刚打出的牌，
+            # 毫秒级写入单调牌池 _monotonic_discards，杜绝牌河视觉延迟导致活牌矩阵滞后
+            if getattr(self, "_last_stable_n", 0) in (14, 11, 8, 5, 2) and curr_n in (13, 10, 7, 4, 1):
+                missing_cnt = self._last_stable_counter - curr_cnt
+                for missing_tile, m_count in missing_cnt.items():
+                    if m_count > 0:
+                        self._monotonic_discards[missing_tile] += m_count
+                        self._match_started = True
+
+            # ===== 瞬时摸牌感知：手牌张数增加（例如 13->14，玩家刚摸到一张牌）=====
+            drawn_from_diff = None
+            if getattr(self, "_last_stable_n", 0) in (13, 10, 7, 4, 1) and curr_n in (14, 11, 8, 5, 2):
+                added_cnt = curr_cnt - self._last_stable_counter
+                for added_tile, a_count in added_cnt.items():
+                    if a_count > 0:
+                        drawn_from_diff = added_tile
+                        break
+
+            if curr_n > 0:
+                self._last_stable_counter = curr_cnt
+                self._last_stable_n = curr_n
+
+            # ---- 摸牌精确判定 (优先使用检测器独立摸牌检测或多重集差分) ----
             is_drawing = False
             drawing_tile = None
-            if hand_row and len(hand_row) >= 2:
-                sorted_hand = sorted(hand_row, key=lambda d: d[0][0])
-                n_tiles = len(sorted_hand)
-                if n_tiles in (14, 11, 8, 5, 2):
-                    gaps = [
-                        sorted_hand[i + 1][0][0] - (sorted_hand[i][0][0] + sorted_hand[i][0][2])
-                        for i in range(n_tiles - 1)
-                    ]
-                    last_gap = gaps[-1]
-                    avg_w = sum(d[0][2] for d in sorted_hand) / n_tiles
-                    normal_gaps = gaps[:-1]
-                    avg_normal_gap = sum(normal_gaps) / len(normal_gaps) if normal_gaps else 0.0
-                    if last_gap > max(8, avg_w * 0.25) or (len(gaps) > 1 and last_gap - avg_normal_gap > avg_w * 0.2):
-                        is_drawing = True
-                        drawing_tile = sorted_hand[-1][1]
+            grid_drawn_tile = getattr(detector, "last_drawn_tile", None)
+
+            if curr_n in (14, 11, 8, 5, 2):
+                is_drawing = True
+                if grid_drawn_tile is not None:
+                    drawing_tile = grid_drawn_tile
+                elif drawn_from_diff is not None:
+                    drawing_tile = drawn_from_diff
+                elif hand_row:
+                    # 兜底：取物理最右侧那张手牌的原始标签（而非排序后的标签！）
+                    sorted_hand_by_x = sorted(hand_row, key=lambda d: d[0][0])
+                    drawing_tile = sorted_hand_by_x[-1][1]
 
             # 牌池单调累加器：同局内牌池只增不减，防止由于动画/飞牌/气泡遮挡导致牌池牌数掉落
             for lab in discard_labels:
@@ -2308,10 +2343,12 @@ class Engine:
                 else:
                     dingque_suit, dingque_name = detect_dingque(full_for_preview)
 
-                # 2. 状态守卫互斥：若定缺已定、牌桌已有弃牌/副露或手牌张数已非完整手牌，对局必然已经进行中，绝不可能是定缺阶段
+                # 2. 状态守卫互斥：若定缺已定、对局已开始、牌桌已有弃牌/副露，对局必然已经进行中，绝不可能是定缺阶段
                 has_discards = bool(discard_labels or self._monotonic_discards)
-                cur_n = len(hand_mpsz) // 2 if hand_mpsz else (len(hand_row) if hand_row else 0)
-                game_already_started = (dingque_suit is not None) or has_discards or (cur_n > 0 and cur_n not in (13, 14))
+                if (dingque_suit is not None) or has_discards:
+                    self._match_started = True
+
+                game_already_started = getattr(self, "_match_started", False) or (dingque_suit is not None) or has_discards
 
                 if not game_already_started and hasattr(detector, "is_dingque_phase"):
                     is_dq_phase = detector.is_dingque_phase(full_for_preview)

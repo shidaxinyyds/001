@@ -24,6 +24,7 @@ class TencentGridDetector(Detector):
         self.meld_templates: Dict[str, np.ndarray] = {}
         self.last_top_score: float = 0.0
         self.last_screen: Tuple[int, int] = (0, 0)
+        self.last_drawn_tile: Optional[str] = None
         self._load_templates()
 
     def _load_templates(self):
@@ -269,6 +270,14 @@ class TencentGridDetector(Detector):
             if not valid:
                 return None
             c = max(valid, key=cv2.contourArea)
+            bx, by, bw, bh = cv2.boundingRect(c)
+            # 按钮正圆盘几何约束：真实定缺选门按钮为圆形 (0.75 <= bw/bh <= 1.30)，彻底排除长条形麻将牌 (bw/bh ~ 0.70)
+            aspect = bw / float(bh)
+            if not (0.75 <= aspect <= 1.30):
+                return None
+            # 实心度校验：圆盘面积与外接矩形比值应接近 pi/4 (~0.78)，排除中空噪点与牌河文字
+            if cv2.contourArea(c) / float(bw * bh) < 0.55:
+                return None
             M = cv2.moments(c)
             if M['m00'] == 0:
                 return None
@@ -397,6 +406,7 @@ class TencentGridDetector(Detector):
         all_dets = list(best_standing_dets)
 
         # 追加独立摸牌或换牌浮起选牌（必须具有足够置信度，过滤非麻将UI）
+        self.last_drawn_tile = None
         if drawn_box is not None:
             dbx, dby, dbw, dbh = drawn_box
             expected_h = int(dbw * 1.35)
@@ -407,6 +417,7 @@ class TencentGridDetector(Detector):
             if sc_d >= 0.48:
                 rect_d: Rect = (dbx, db_top, dbw, db_bot - db_top)
                 all_dets.append((rect_d, lbl_d, sc_d))
+                self.last_drawn_tile = lbl_d
 
         top_conf = max([d[2] for d in all_dets], default=0.0)
         self.last_top_score = top_conf
