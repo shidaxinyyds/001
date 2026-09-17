@@ -31,6 +31,7 @@ from modes import (
     hand_sizes,
     available_set,
     MODES,
+    DEFAULT_MODE,
     is_dingque_mode,
     is_sichuan_family,
     get_mode,
@@ -440,9 +441,23 @@ class _TileVoter:
         return out
 
 
+def parse_mpsz_tiles(mpsz: str) -> List[str]:
+    """解析 mpsz 字符串为单个牌标签列表，例如 '123m' -> ['1m', '2m', '3m']，'1m2m3m' -> ['1m', '2m', '3m']。"""
+    tiles = []
+    cur_nums = []
+    for ch in mpsz:
+        if ch.isdigit():
+            cur_nums.append(ch)
+        elif ch in "mpsz":
+            for n in cur_nums:
+                tiles.append(f"{n}{ch}")
+            cur_nums = []
+    return tiles
+
+
 def _mpsz_to_counter(mpsz: str) -> Counter:
     """mpsz 串 → 牌型计数（已是排序归一化的，可直接当字典键比较）。"""
-    return Counter([mpsz[i:i + 2] for i in range(0, len(mpsz) - 1, 2)])
+    return Counter(parse_mpsz_tiles(mpsz))
 
 
 def _counter_to_mpsz(cnt: Counter) -> str:
@@ -922,19 +937,20 @@ def detect_river_discards(image: np.ndarray, detector, mode: str = "4p") -> List
                         break
 
                 if best_l and best_c >= 0.48:
-                    if mode == "sc":
-                        if best_l.endswith(('m', 'p', 's')) or best_l == '7z':
+                    try:
+                        avail = available_set(mode)
+                        if mpsz_to_tile34_index(best_l) in avail:
                             discards.append(best_l)
-                    else:
+                    except Exception:
                         discards.append(best_l)
         return discards
     except Exception:
         return []
 
 
-def detect_player_melds(image: np.ndarray, detector, mode: str = "sc") -> List[str]:
+def detect_player_melds(image: np.ndarray, detector, mode: str = "sc_hz") -> List[str]:
     """精准检测右下角玩家副露区域（碰/杠）。
-    在四川麻将中，副露必为 3 张同字（碰）或 4 张同字（杠），准确计入已出牌与剩余活牌。"""
+    副露必为 3 张同字（碰）或 4 张同字（杠），准确计入已出牌与剩余活牌。"""
     if image is None or detector is None or image.size == 0:
         return []
     try:
@@ -949,7 +965,7 @@ def detect_player_melds(image: np.ndarray, detector, mode: str = "sc") -> List[s
         cnts, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         melds = []
-        valid_tiles = {f"{i}m" for i in range(1, 10)} | {f"{i}p" for i in range(1, 10)} | {f"{i}s" for i in range(1, 10)} | {"7z"}
+        avail = available_set(mode)
         for c in cnts:
             bx, by, bw, bh = cv2.boundingRect(c)
             if bw < 40 or bh < 20 or bw * bh < 800:
@@ -971,8 +987,11 @@ def detect_player_melds(image: np.ndarray, detector, mode: str = "sc") -> List[s
                     continue
                 f_norm = cv2.resize(face, (56, 88))
                 for lbl, tmpl in getattr(detector, "templates_bgr", {}).items():
-                    if mode == "sc" and lbl not in valid_tiles:
-                        continue
+                    try:
+                        if mpsz_to_tile34_index(lbl) not in avail:
+                            continue
+                    except Exception:
+                        pass
                     t_core = tmpl[16:104, 12:68]
                     res = cv2.matchTemplate(f_norm, t_core, cv2.TM_CCOEFF_NORMED)
                     sc = float(res.max())
@@ -1016,8 +1035,8 @@ class Engine:
         self._partial_mpsz: str = ""
         self._partial_ttl: int = 0
         # 当前模式（process() 每帧 reload，对比是否变了）
-        self.mode: str = "sc"
-        self._prev_mode: str = self.mode
+        self.mode: str = DEFAULT_MODE
+        self._prev_mode: str = ""
         # 给主界面"知道什么时候画面没动"的提示用
         self._consecutive_skips: int = 0
         # 启动帧计数：首 WARMUP_FRAMES 帧走保守策略（参见 WARMUP_FRAMES 注释），
@@ -1305,9 +1324,25 @@ class Engine:
                         items = [(t, u) for (t, u) in items if int(u) >= min_ukeire]
 
                     advice = []
-                    for (t, u) in items[:6]:
+                    for rank, (t, u) in enumerate(items[:6]):
                         t_str = str(t)
-                        entry = {"tile": t_str, "ukeire": int(u)}
+                        if shanten == 0:
+                            rsn = f"听牌 · 进张{u}张"
+                        elif shanten == 1:
+                            rsn = f"一向听 · 进张{u}张"
+                        elif shanten is not None and shanten >= 2:
+                            rsn = f"{shanten}向听 · 进张{u}张"
+                        else:
+                            rsn = f"进张{u}张"
+                        entry = {
+                            "tile": t_str,
+                            "ukeire": int(u),
+                            "shanten": shanten if shanten is not None else 2,
+                            "ev": float(10000 - rank * 100 + int(u) * 10),
+                            "reason": rsn,
+                            "ting_tiles": [],
+                            "is_dingque": False,
+                        }
                         advice.append(entry)
         except Exception:
             traceback.print_exc()
@@ -1789,13 +1824,13 @@ class Engine:
             return image
         return self._rotate_to(image, self._orient)
 
-    def _heuristic_discard_advice(self, hand_mpsz: str, mode: str = "sc", dingque_suit: Optional[int] = None, disc_counts=None, opponent_dingque_suits: Optional[List[int]] = None) -> List[Dict]:
+    def _heuristic_discard_advice(self, hand_mpsz: str, mode: str = "sc_hz", dingque_suit: Optional[int] = None, disc_counts=None, opponent_dingque_suits: Optional[List[int]] = None) -> List[Dict]:
         """启发式最优出牌推演：在任何张数、冷启动或非标手牌下，永远给出明确最优解。"""
         if not hand_mpsz or len(hand_mpsz) < 2:
             return []
 
-        # 0. 四川麻将模式：优先直通完整 SichuanAnalyzer 规则引擎
-        if mode == "sc":
+        # 0. 四川麻将全家族：优先直通完整 SichuanAnalyzer 规则引擎
+        if is_sichuan_family(mode):
             try:
                 from sichuan import SichuanAnalyzer
                 hand_indices = SichuanAnalyzer.parse_hand_mpsz(hand_mpsz)
@@ -1818,12 +1853,12 @@ class Engine:
             except Exception:
                 pass
 
-        tiles = [hand_mpsz[i:i+2] for i in range(0, len(hand_mpsz), 2)]
+        tiles = parse_mpsz_tiles(hand_mpsz)
         if not tiles:
             return []
 
-        # 1. 四川麻将：若有定缺门花色，100% 优先建议打定缺牌
-        if mode == "sc" and dingque_suit is not None and 0 <= dingque_suit <= 2:
+        # 1. 定缺模式：若有定缺门花色，100% 优先建议打定缺牌
+        if is_dingque_mode(mode) and dingque_suit is not None and 0 <= dingque_suit <= 2:
             dq_char = ['m', 'p', 's'][dingque_suit]
             dq_name = ['万', '筒', '条'][dingque_suit]
             dq_tiles = [t for t in tiles if t.endswith(dq_char)]
@@ -1844,14 +1879,19 @@ class Engine:
         # 2. 通用孤张 / 效用价值评分（分数越高代表越无用、越应优先打出）
         counts = {t: tiles.count(t) for t in set(tiles)}
         scored_tiles = []
+        laizi_idx = get_laizi(mode)
 
         for t in set(tiles):
             suit = t[1]
             val = int(t[0]) if t[0].isdigit() else 0
             score = 0
+            try:
+                t_idx = mpsz_to_tile34_index(t)
+            except Exception:
+                t_idx = -1
 
-            # 四川麻将/红中血流：7z (红中) 是万能赖子百搭牌，价值极高，绝不建议弃打！
-            if mode == "sc" and t == "7z":
+            # 万能赖子百搭牌（红中/白板等）：价值极高，绝不建议弃打！
+            if laizi_idx is not None and t_idx == laizi_idx:
                 score = -999999
             # 字牌（z）：无刻子/对子时价值极低，优先打出
             elif suit == 'z':
@@ -1894,24 +1934,23 @@ class Engine:
                     score -= 30  # 刻子/暗刻
 
             # 绝张感知：若全场已见4张，为绝张，毫无进张价值
-            if disc_counts and 0 <= mpsz_to_tile34_index(t) < 34:
-                idx = mpsz_to_tile34_index(t)
-                tot_seen = counts[t] + disc_counts[idx]
+            if disc_counts and 0 <= t_idx < 34:
+                tot_seen = counts[t] + disc_counts[t_idx]
                 if tot_seen >= 4:
                     score += 60
 
-            scored_tiles.append((t, score, counts[t]))
+            scored_tiles.append((t, score, counts[t], t_idx))
 
-        # 过滤掉保护牌（如红中赖子 score < -90000），仅在全是赖子时才保留
+        # 过滤掉保护牌（如赖子 score < -90000），仅在全是赖子时才保留
         valid_candidates = [x for x in scored_tiles if x[1] > -90000]
         if not valid_candidates:
             valid_candidates = scored_tiles
         valid_candidates.sort(key=lambda x: -x[1])
 
         advice = []
-        for rank, (t, sc, cnt) in enumerate(valid_candidates[:4]):
-            if mode == "sc" and t == "7z":
-                reason = "红中赖子(保留)"
+        for rank, (t, sc, cnt, t_idx) in enumerate(valid_candidates[:4]):
+            if laizi_idx is not None and t_idx == laizi_idx:
+                reason = "万能赖子(保留)"
             elif t.endswith('z'):
                 reason = "孤张字牌" if cnt == 1 else "多余字牌"
             elif sc >= 80:
@@ -2206,7 +2245,7 @@ class Engine:
             # 新洗牌发牌 / 换三张判定：若当前帧原始手牌张数较完整（>=10张），且与旧稳定手牌重合度很低（<= 5 张相同），
             # 说明洗牌重新发牌或刚发生换三张！立即重置稳定器、帧跳跃缓存与牌池，绝不让旧牌反向覆盖新牌！
             if self._hand_stab.stable_mpsz and len(raw_labels) >= 10:
-                old_set = [self._hand_stab.stable_mpsz[i:i+2] for i in range(0, len(self._hand_stab.stable_mpsz), 2)]
+                old_set = parse_mpsz_tiles(self._hand_stab.stable_mpsz)
                 raw_set = [l for l in raw_labels if l]
                 overlap = sum(min(old_set.count(t), raw_set.count(t)) for t in set(raw_set))
                 if overlap <= 5 and len(old_set) >= 10:

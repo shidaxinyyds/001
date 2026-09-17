@@ -5,7 +5,7 @@ from .objects.tile_collection import TileCollection
 from .utils.shanten import calculate_shanten
 from .utils.ukeire import calculate_ukeire_ex
 from .utils.convert import tile_to_chinese
-from modes import DEFAULT_MODE, available_set
+from modes import DEFAULT_MODE, available_set, is_sichuan_family, get_laizi
 
 class Trainer:
     def __init__(self, hand: TileCollection, mode: str = DEFAULT_MODE):
@@ -39,7 +39,7 @@ class Trainer:
             self.meld_counts = list(meld_counts)
 
     def get_shanten(self):
-        if self.mode == "sc":
+        if is_sichuan_family(self.mode):
             try:
                 from sichuan import SichuanAnalyzer
                 hand_indices = SichuanAnalyzer.parse_hand_mpsz(str(self.hand))
@@ -51,19 +51,26 @@ class Trainer:
 
     def calculate_discards(self) -> Dict[Tile, int]:
         """返回 {候选弃牌: 进张数}，进张已按绝张扣减（见 calculate_ukeire_ex）。"""
-        if self.mode == "sc":
+        if is_sichuan_family(self.mode):
             try:
                 from sichuan import SichuanAnalyzer
                 hand_indices = SichuanAnalyzer.parse_hand_mpsz(str(self.hand))
                 counts = SichuanAnalyzer.counts_from_tiles(hand_indices)
-                # 108 牌物理守恒：真实扣减全场公开可见牌
-                pool_remaining = [0] * 27
-                for i in range(27):
-                    vis = counts[i]
-                    if i < len(self.disc_counts):
-                        vis += self.disc_counts[i]
-                    if i < len(self.meld_counts):
-                        vis += self.meld_counts[i]
+                # 牌池物理守恒：真实扣减全场公开可见牌（支持 28 型，含 7z 红中）
+                pool_remaining = [0] * 28
+                for i in range(28):
+                    vis = counts[i] if i < len(counts) else 0
+                    if i < 27:
+                        if i < len(self.disc_counts):
+                            vis += self.disc_counts[i]
+                        if i < len(self.meld_counts):
+                            vis += self.meld_counts[i]
+                    elif i == 27:
+                        # 7z (红中) 在 34 索引系统下是 33
+                        if 33 < len(self.disc_counts):
+                            vis += self.disc_counts[33]
+                        if 33 < len(self.meld_counts):
+                            vis += self.meld_counts[33]
                     pool_remaining[i] = max(0, 4 - vis)
 
                 self.sichuan_results = SichuanAnalyzer.analyze_discards(

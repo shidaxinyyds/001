@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:auto_vision/config_store.dart';
+import 'package:auto_vision/mode_store.dart';
 import 'package:auto_vision/overlays/tile_labels.dart';
 import 'package:auto_vision/server.dart';
 
@@ -464,8 +465,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     DebugConfig.load().then((c) {
       if (mounted) setState(() => _antiBan = c.antiBan);
     });
-    // 加载用户自定义记忆弹窗尺寸
+    // 加载用户自定义记忆弹窗尺寸与物理位置
     _loadSavedSize();
+    _loadSavedPosition();
 
     // 监听原生层通过本地 socket 发来的每帧分析结果（端口 12345 与 ImageProcessor 发送端一致）。
     // 即便 socket 启动失败也不能让悬浮窗引擎崩溃（否则按钮永远不渲染），因此整体 try/catch 兜底。
@@ -649,6 +651,15 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     print('悬浮窗尺寸校正失败（w=$w, h=$h）');
   }
 
+  static const MethodChannel _overlayChannel = MethodChannel("x-slayer/overlay");
+  double _posX = 16.0;
+  double _posY = 48.0;
+  bool _isDraggingWindow = false;
+  double? _pendingMoveX;
+  double? _pendingMoveY;
+  DateTime? _lastMoveCallTime;
+  bool _moveInFlight = false;
+
   double? _pendingW;
   double? _pendingH;
   DateTime? _lastResizeCallTime;
@@ -677,12 +688,88 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     } catch (_) {}
   }
 
+  /// 读取用户在本地记忆的悬浮窗自定义物理位置
+  Future<void> _loadSavedPosition() async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      final double? sx = sp.getDouble('overlay_panel_x');
+      final double? sy = sp.getDouble('overlay_panel_y');
+      if (sx != null && sy != null && mounted) {
+        setState(() {
+          _posX = sx;
+          _posY = sy;
+        });
+      } else {
+        final pos = await FlutterOverlayWindow.getOverlayPosition();
+        if (mounted) {
+          setState(() {
+            _posX = pos.x;
+            _posY = pos.y;
+          });
+        }
+      }
+    } catch (_) {}
+  }
+
+  /// 持久化保存用户自定义悬浮窗物理位置
+  Future<void> _savePanelPosition(double x, double y) async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      await sp.setDouble('overlay_panel_x', x);
+      await sp.setDouble('overlay_panel_y', y);
+    } catch (_) {}
+  }
+
+  /// 拖动悬浮窗顶栏或把手时，以 60Hz 顺畅节流向原生下发绝对坐标位移。
+  /// 彻底摆脱原生 szWindow 限制，支持全屏幕横竖屏任意角落自由随心拖动。
+  void _moveLive(double x, double y) {
+    _pendingMoveX = x;
+    _pendingMoveY = y;
+    if (_moveInFlight) return;
+
+    final now = DateTime.now();
+    final elapsed = _lastMoveCallTime == null
+        ? 999
+        : now.difference(_lastMoveCallTime!).inMilliseconds;
+    if (elapsed < 16) {
+      Future.delayed(Duration(milliseconds: 16 - elapsed), () {
+        if (_pendingMoveX != null && _pendingMoveY != null && !_moveInFlight && mounted) {
+          final nx = _pendingMoveX!;
+          final ny = _pendingMoveY!;
+          _pendingMoveX = null;
+          _pendingMoveY = null;
+          _moveLive(nx, ny);
+        }
+      });
+      return;
+    }
+
+    _moveInFlight = true;
+    _lastMoveCallTime = now;
+    _overlayChannel.invokeMethod('updateOverlayPosition', {
+      'x': x.round(),
+      'y': y.round(),
+    }).catchError((Object _) => null).whenComplete(() {
+      _moveInFlight = false;
+      final double? nx = _pendingMoveX;
+      final double? ny = _pendingMoveY;
+      if (nx != null && ny != null) {
+        _pendingMoveX = null;
+        _pendingMoveY = null;
+        _moveLive(nx, ny);
+      }
+    });
+  }
+
   /// 拖动缩放把手时实时平滑更新原生窗口物理尺寸。
   ///
   /// 关键要点：
   /// 1. 传 false 彻底屏蔽原生拖动，防止原生 onTouch 将缩放手势识别为整窗位移。
   /// 2. 35ms 极速节流，既保证 60Hz 视觉丝滑缩放，又绝不造成 Android 消息通道阻塞。
+  /// 3. 生命期守卫：手指一旦松开（_isResizing == false），立即废弃后续延时任务，
+  ///    杜绝延时任务覆盖原生拖动状态！
   void _resizeLive(double w, double h) {
+    if (!_isResizing) return;
     _pendingW = w;
     _pendingH = h;
     if (_resizeInFlight) return;
@@ -693,6 +780,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         : now.difference(_lastResizeCallTime!).inMilliseconds;
     if (elapsed < 35) {
       Future.delayed(Duration(milliseconds: 35 - elapsed), () {
+        if (!_isResizing) return;
         if (_pendingW != null && _pendingH != null && !_resizeInFlight && mounted) {
           final nw = _pendingW!;
           final nh = _pendingH!;
@@ -710,6 +798,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         .catchError((Object _) => null)
         .whenComplete(() {
       _resizeInFlight = false;
+      if (!_isResizing) return;
       final double? nw = _pendingW;
       final double? nh = _pendingH;
       if (nw != null && nh != null) {
@@ -929,6 +1018,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         onPointerUp: (e) async {
           if (!_isResizing) return;
           _isResizing = false;
+          _pendingW = null;
+          _pendingH = null;
           setState(() => _draggingResize = false);
           // 释放手指，恢复原生顶栏拖动并固定精确尺寸
           await _ensureSize(panelW, panelH, drag: true);
@@ -937,6 +1028,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         onPointerCancel: (e) async {
           if (!_isResizing) return;
           _isResizing = false;
+          _pendingW = null;
+          _pendingH = null;
           setState(() => _draggingResize = false);
           await _ensureSize(panelW, panelH, drag: true);
           _savePanelSize(panelW, panelH);
@@ -1006,7 +1099,19 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   Widget _floatingButton({double size = collapsed}) {
     final shanten = result?['shanten'];
     return GestureDetector(
+      behavior: HitTestBehavior.opaque,
       onTap: _togglePanel,
+      onPanStart: (_) => setState(() => _isDraggingWindow = true),
+      onPanUpdate: (details) {
+        _posX += details.delta.dx;
+        _posY += details.delta.dy;
+        _moveLive(_posX, _posY);
+      },
+      onPanEnd: (_) {
+        setState(() => _isDraggingWindow = false);
+        _savePanelPosition(_posX, _posY);
+      },
+      onPanCancel: () => setState(() => _isDraggingWindow = false),
       child: Container(
         width: size,
         height: size,
@@ -1067,8 +1172,19 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final String? reason = (topAdvice != null && topAdvice['reason'] is String) ? topAdvice['reason'] as String : null;
 
     return GestureDetector(
-      onTap: _togglePanel,
       behavior: HitTestBehavior.opaque,
+      onTap: _togglePanel,
+      onPanStart: (_) => setState(() => _isDraggingWindow = true),
+      onPanUpdate: (details) {
+        _posX += details.delta.dx;
+        _posY += details.delta.dy;
+        _moveLive(_posX, _posY);
+      },
+      onPanEnd: (_) {
+        setState(() => _isDraggingWindow = false);
+        _savePanelPosition(_posX, _posY);
+      },
+      onPanCancel: () => setState(() => _isDraggingWindow = false),
       child: Container(
         height: _kCapsuleH,
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
@@ -2041,7 +2157,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // 顶部控制与拖动手柄区：由 Android 原生 onTouch 在 50dp 区域执行 120Hz 极速拖动
+                // 顶部控制与拖动手柄区：支持手指随心按住手柄或标题栏平滑拖动到屏幕任意位置
                 Container(
                   height: 42,
                   padding: const EdgeInsets.only(bottom: 2),
@@ -2049,15 +2165,31 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      // 居中拖动手柄 Pill（醒目提示可自由移动）
-                      Center(
-                        child: Container(
-                          width: 42,
-                          height: 4,
-                          margin: const EdgeInsets.only(bottom: 4),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withAlpha(75),
-                            borderRadius: BorderRadius.circular(2),
+                      // 居中拖动手柄 Pill（按住即可全屏任意位置平滑拖动）
+                      GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onPanStart: (_) => setState(() => _isDraggingWindow = true),
+                        onPanUpdate: (details) {
+                          _posX += details.delta.dx;
+                          _posY += details.delta.dy;
+                          _moveLive(_posX, _posY);
+                        },
+                        onPanEnd: (_) {
+                          setState(() => _isDraggingWindow = false);
+                          _savePanelPosition(_posX, _posY);
+                        },
+                        onPanCancel: () => setState(() => _isDraggingWindow = false),
+                        child: Center(
+                          child: Container(
+                            width: 52,
+                            height: 5,
+                            margin: const EdgeInsets.only(bottom: 4),
+                            decoration: BoxDecoration(
+                              color: _isDraggingWindow
+                                  ? const Color(0xFF64FFDA)
+                                  : Colors.white.withAlpha(90),
+                              borderRadius: BorderRadius.circular(3),
+                            ),
                           ),
                         ),
                       ),
@@ -2065,24 +2197,41 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                         child: Row(
                           children: [
                             Expanded(
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const MahjongTileIcon(size: 15),
-                                  const SizedBox(width: 5),
-                                  const Text(
-                                    '雀神助手',
-                                    style: TextStyle(
-                                      color: Colors.white,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 12,
-                                      letterSpacing: 0.3,
-                                      decoration: TextDecoration.none,
+                              child: GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onPanStart: (_) => setState(() => _isDraggingWindow = true),
+                                onPanUpdate: (details) {
+                                  _posX += details.delta.dx;
+                                  _posY += details.delta.dy;
+                                  _moveLive(_posX, _posY);
+                                },
+                                onPanEnd: (_) {
+                                  setState(() => _isDraggingWindow = false);
+                                  _savePanelPosition(_posX, _posY);
+                                },
+                                onPanCancel: () => setState(() => _isDraggingWindow = false),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const MahjongTileIcon(size: 15),
+                                    const SizedBox(width: 5),
+                                    Flexible(
+                                      child: Text(
+                                        '雀神 · ${GameMode.label(selectedMode)}',
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 11,
+                                          letterSpacing: 0.2,
+                                          decoration: TextDecoration.none,
+                                        ),
+                                      ),
                                     ),
-                                  ),
-                                  const SizedBox(width: 4),
-                                  _statusBanner(),
-                                ],
+                                    const SizedBox(width: 4),
+                                    _statusBanner(),
+                                  ],
+                                ),
                               ),
                             ),
                             const SizedBox(width: 5),
