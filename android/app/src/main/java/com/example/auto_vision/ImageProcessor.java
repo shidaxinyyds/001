@@ -226,18 +226,18 @@ public class ImageProcessor {
     private volatile int consecutiveSkips = 0;
 
     // 下一帧采集间隔：
-    // 静止态（连续跳帧 >= 2）：800~1000ms 巡检，极大降低 CPU 与发热；
-    // 活跃态（有摸牌/出牌动作）：350~450ms 高频跟帧；
+    // 静止态（连续跳帧 >= 3）：400~500ms 巡检，极大降低 CPU 与发热；
+    // 活跃态（有摸牌/出牌动作）：200ms 毫秒级极速跟帧，保证摸打建议瞬时呈现；
     // 防封号开启：在此基础上叠加随机拟人抖动。
     private long captureDelayMs() {
-        boolean isIdle = (consecutiveSkips >= 2);
+        boolean isIdle = (consecutiveSkips >= 3);
         if (isIdle) {
-            return 800 + (cfgAntiBan ? sRng.nextInt(200) : 0);
+            return 400 + (cfgAntiBan ? sRng.nextInt(100) : 0);
         }
         if (cfgAntiBan) {
-            return 350 + sRng.nextInt(151); // [350, 500]
+            return 220 + sRng.nextInt(81); // [220, 300]
         }
-        return 380;
+        return 200;
     }
 
     // 单帧采集 + 识别（原函数体从 TimerTask.run 抽出，便于自调度复用）。

@@ -409,8 +409,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // 收起态 = 悬浮按钮；展开态 = 分析面板（可自由缩放）
   bool panelVisible = false;
 
-  // 当前玩法：悬浮窗写入共享文件，Python 引擎每帧读取。默认四麻。
-  String selectedMode = '4p';
+  // 当前玩法：悬浮窗写入共享文件，Python 引擎每帧读取。默认川麻。
+  String selectedMode = 'sc';
 
   // 防封号：建议做人类式延迟显示。手牌/牌河随 result 立即刷新，
   // 仅「建议」段经 _shownAdvice/_shownBest 延迟（随机 180–420ms）呈现，
@@ -648,20 +648,63 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
   double? _pendingW;
   double? _pendingH;
+  DateTime? _lastResizeCallTime;
+
+  String _currentSizeLabel() {
+    if (panelW >= 280) return '大';
+    if (panelW >= 235) return '中';
+    return '小';
+  }
+
+  /// 一键预设尺寸切换：在 紧凑(小) / 标准(中) / 放大(大) 之间极速切换
+  Future<void> _cyclePresetSize() async {
+    setState(() {
+      if (panelW < 235) {
+        // 小 -> 中 (标准)
+        panelW = 250;
+        panelH = 225;
+      } else if (panelW < 280) {
+        // 中 -> 大 (放大)
+        panelW = 300;
+        panelH = 270;
+      } else {
+        // 大 -> 小 (紧凑)
+        panelW = 215;
+        panelH = 195;
+      }
+    });
+    await _ensureSize(panelW, panelH, drag: true);
+  }
 
   /// 拖动缩放把手时实时调整尺寸。
   ///
-  /// 关键：不能"忙时直接丢弃"。resizeOverlay 走 MethodChannel 到原生，一次来回要几十毫秒，
-  /// 手指快速拖动时绝大多数调用都会被丢弃，窗口只能零零散散地追上去 —— 表现就是剧烈抖动。
-  /// 改成"最后一次的尺寸一定会被应用"：忙时先记下来，空闲后立刻补上，
-  /// 这样窗口会平滑地收敛到手指停下的位置。
+  /// 节流防抖机制：
+  /// resizeOverlay 走 MethodChannel 到原生，高频调用会导致 Android 频繁重置 View 布局触发 Touch Cancel。
+  /// 此处加上 45ms 节流，既保证视觉尺寸丝滑收敛，又防止底层事件通道被冲垮。
   void _resizeLive(double w, double h) {
-    if (_resizeInFlight) {
-      _pendingW = w;
-      _pendingH = h;
+    _pendingW = w;
+    _pendingH = h;
+    if (_resizeInFlight) return;
+
+    final now = DateTime.now();
+    final elapsed = _lastResizeCallTime == null
+        ? 999
+        : now.difference(_lastResizeCallTime!).inMilliseconds;
+    if (elapsed < 45) {
+      Future.delayed(Duration(milliseconds: 45 - elapsed), () {
+        if (_pendingW != null && _pendingH != null && !_resizeInFlight && mounted) {
+          final nw = _pendingW!;
+          final nh = _pendingH!;
+          _pendingW = null;
+          _pendingH = null;
+          _resizeLive(nw, nh);
+        }
+      });
       return;
     }
+
     _resizeInFlight = true;
+    _lastResizeCallTime = now;
     FlutterOverlayWindow.resizeOverlay(w.toInt(), h.toInt(), true)
         .catchError((Object _) => null)
         .whenComplete(() {
@@ -849,34 +892,39 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     return Positioned(
       right: 0,
       bottom: 0,
-      child: Listener(
-        // 按下瞬间就关掉原生拖动，否则拖动把手时整个窗口会跟着移动
-        onPointerDown: (_) {
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onPanStart: (_) {
           setState(() => _draggingResize = true);
-          _resizeLive(panelW, panelH);
         },
-        onPointerMove: (PointerMoveEvent e) {
+        onPanUpdate: (DragUpdateDetails details) {
           setState(() {
             // 显式 toDouble()：旧版 Dart 的 clamp 返回 num，直接赋给 double 会报错
-            panelW = (panelW + e.delta.dx).clamp(minPanelW, maxPanelW).toDouble();
-            panelH = (panelH + e.delta.dy).clamp(_minPanelH(), maxPanelH).toDouble();
+            panelW = (panelW + details.delta.dx).clamp(minPanelW, maxPanelW).toDouble();
+            panelH = (panelH + details.delta.dy).clamp(_minPanelH(), maxPanelH).toDouble();
           });
           _resizeLive(panelW, panelH);
         },
-        onPointerUp: (_) async {
+        onPanEnd: (_) async {
           setState(() => _draggingResize = false);
-          // 缩放结束，面板保持打开，维持 Flutter 滚动生效（drag: false）
-          await _ensureSize(panelW, panelH, drag: false);
+          // 缩放结束，关键：必须保持 drag: true，确保顶栏原生 120Hz 极速拖动永远生效！
+          await _ensureSize(panelW, panelH, drag: true);
         },
-        child: SizedBox(
-          width: 28,
-          height: 28,
+        onPanCancel: () async {
+          setState(() => _draggingResize = false);
+          await _ensureSize(panelW, panelH, drag: true);
+        },
+        child: Container(
+          width: 36,
+          height: 36,
+          alignment: Alignment.bottomRight,
+          padding: const EdgeInsets.only(right: 3, bottom: 3),
           child: CustomPaint(
+            size: const Size(20, 20),
             painter: _GripPainter(
-              // 用中性浅灰替代琥珀 —— 拖动把手不应像"警告"。
               color: _draggingResize
-                  ? Colors.white
-                  : Colors.white.withAlpha(140),
+                  ? const Color(0xFF80CBC4)
+                  : Colors.white.withAlpha(150),
             ),
           ),
         ),
@@ -1925,7 +1973,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               children: [
                 // 顶部控制与拖动手柄区：由 Android 原生 onTouch 在 50dp 区域执行 120Hz 极速拖动
                 Container(
-                  height: 38,
+                  height: 42,
                   padding: const EdgeInsets.only(bottom: 2),
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
@@ -1987,6 +2035,35 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                                     Text(
                                       '新局',
                                       style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 9.5,
+                                        fontWeight: FontWeight.bold,
+                                        decoration: TextDecoration.none,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            GestureDetector(
+                              onTap: _cyclePresetSize,
+                              behavior: HitTestBehavior.opaque,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2.5),
+                                margin: const EdgeInsets.only(right: 5),
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withAlpha(20),
+                                  borderRadius: BorderRadius.circular(4),
+                                  border: Border.all(color: Colors.white12, width: 0.6),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(Icons.aspect_ratio_rounded, color: Colors.white70, size: 10),
+                                    const SizedBox(width: 2),
+                                    Text(
+                                      _currentSizeLabel(),
+                                      style: const TextStyle(
                                         color: Colors.white,
                                         fontSize: 9.5,
                                         fontWeight: FontWeight.bold,

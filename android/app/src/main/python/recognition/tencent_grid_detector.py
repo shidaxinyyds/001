@@ -179,35 +179,54 @@ class TencentGridDetector(Detector):
         best_lbl = sorted_candidates[0][0]
         best_sc = sorted_candidates[0][1]
 
-        # 1. 2万 vs 3万 物理笔画峰值严格判决（仅在最佳候选为 2m 或 3m 时生效）
-        if best_lbl in ["2m", "3m"]:
+        # 1. 2万 vs 3万 物理笔画峰值严格判决（当最高候选为 2m 或 3m，或 2m 与 3m 分数接近时生效）
+        c_2m = scores.get("2m", 0.0)
+        c_3m = scores.get("3m", 0.0)
+        if best_lbl in ["2m", "3m"] or (max(c_2m, c_3m) > 0.35 and abs(c_2m - c_3m) < 0.20):
             top_crop = face[20:58, 14:66]
             top_gray = cv2.cvtColor(top_crop, cv2.COLOR_BGR2GRAY)
-            row_dark = np.sum(top_gray < 140, axis=1)
-            num_peaks = self.count_peaks(row_dark, min_height=8, min_prominence=5)
-            if num_peaks == 2 and scores.get("2m", 0) > 0.35:
-                best_lbl = "2m"
-            elif num_peaks >= 3 and scores.get("3m", 0) > 0.35:
-                best_lbl = "3m"
+            # 自适应二值化 / 动态暗阈值，抵抗屏幕亮度变化
+            dark_thresh = min(150, max(100, int(np.mean(top_gray) * 0.78)))
+            row_dark = np.sum(top_gray < dark_thresh, axis=1)
+            num_peaks = self.count_peaks(row_dark, min_height=5, min_prominence=3)
+            # 中轴墨迹深度检测：2万两横之间是纯白底，3万中间有实体横画
+            h_crop = top_gray.shape[0]
+            mid_band = top_gray[int(h_crop * 0.38):int(h_crop * 0.62), :]
+            mid_ink_ratio = float(np.mean(mid_band < dark_thresh))
 
-        # 2. 2条 vs 3条 结构严格判决（仅在最佳候选为 2s 或 3s 时生效）
-        if best_lbl in ["2s", "3s"]:
+            if num_peaks == 2 or mid_ink_ratio < 0.07:
+                best_lbl = "2m"
+                best_sc = max(c_2m, best_sc)
+            elif num_peaks >= 3 or mid_ink_ratio >= 0.12:
+                best_lbl = "3m"
+                best_sc = max(c_3m, best_sc)
+
+        # 2. 2条 vs 3条 结构严格判决（当候选包含 2s/3s 且分数接近时生效）
+        c_2s = scores.get("2s", 0.0)
+        c_3s = scores.get("3s", 0.0)
+        if best_lbl in ["2s", "3s"] or (max(c_2s, c_3s) > 0.35 and abs(c_2s - c_3s) < 0.20):
             bot_center = face[75:105, 35:45]
             bot_center_g = cv2.cvtColor(bot_center, cv2.COLOR_BGR2GRAY)
             bot_dark = float(np.mean(bot_center_g < 140))
-            if bot_dark > 0.35 and scores.get("2s", 0) > 0.35:
+            if bot_dark > 0.30 and c_2s > 0.32:
                 best_lbl = "2s"
-            elif bot_dark <= 0.20 and scores.get("3s", 0) > 0.35:
+                best_sc = max(c_2s, best_sc)
+            elif bot_dark <= 0.22 and c_3s > 0.32:
                 best_lbl = "3s"
+                best_sc = max(c_3s, best_sc)
 
-        # 3. 2筒 vs 3筒 结构严格判决（仅在最佳候选为 2p 或 3p 时生效）
-        if best_lbl in ["2p", "3p"]:
+        # 3. 2筒 vs 3筒 结构严格判决（当候选包含 2p/3p 时生效）
+        c_2p = scores.get("2p", 0.0)
+        c_3p = scores.get("3p", 0.0)
+        if best_lbl in ["2p", "3p"] or (max(c_2p, c_3p) > 0.35 and abs(c_2p - c_3p) < 0.20):
             face_hsv = cv2.cvtColor(face[40:80, 20:60], cv2.COLOR_BGR2HSV)
-            red_cnt = int(np.sum(((face_hsv[:, :, 0] <= 10) | (face_hsv[:, :, 0] >= 170)) & (face_hsv[:, :, 1] >= 60) & (face_hsv[:, :, 2] >= 50)))
-            if red_cnt > 50 and scores.get("3p", 0) > 0.35:
+            red_cnt = int(np.sum(((face_hsv[:, :, 0] <= 10) | (face_hsv[:, :, 0] >= 170)) & (face_hsv[:, :, 1] >= 55) & (face_hsv[:, :, 2] >= 45)))
+            if red_cnt > 30 and c_3p > 0.32:
                 best_lbl = "3p"
-            elif red_cnt <= 20 and scores.get("2p", 0) > 0.35:
+                best_sc = max(c_3p, best_sc)
+            elif red_cnt <= 25 and c_2p > 0.32:
                 best_lbl = "2p"
+                best_sc = max(c_2p, best_sc)
 
         if best_lbl in ["4p", "5p"]:
             cy, cx = int(face.shape[0] * 0.5), int(face.shape[1] * 0.5)

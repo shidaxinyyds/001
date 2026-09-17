@@ -33,8 +33,8 @@ from modes import (
     MODES,
 )
 
-# 一局中的合法手牌张数：13 = 待摸牌，14 = 刚摸到牌
-VALID_HAND_SIZES = (13, 14)
+# 一局中的合法手牌张数：含摸牌、打牌与吃碰杠副露全合法张数
+VALID_HAND_SIZES = (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1)
 
 # 预览图最大宽度。原实现每帧都把全屏截图做 PNG 编码（100~300ms），
 # 而 Dart 端并没有使用这张图，纯属浪费，是识别卡顿的主因之一。
@@ -63,9 +63,8 @@ ENGINE_MIN_CONF = 0.50
 MAX_DUP_PER_TILE = 4
 
 # 帧差阈值：相邻两帧的工作区域分块均值差的 L1 范数（256 个 8x8 块、每块均值 0~255）。
-# 原来 1.5 过低——吃碰杠瞬间仍被判为"不变"复用旧手牌，导致用户看到的牌和实际不符。
-# 取 5.0：完全静止画面 = 0~3；出一张牌 = 20~60；菜单弹出/动画 = 80+。
-FRAME_DIFF_THRESHOLD = 5.0
+# 降到 2.0：画面任何细微手牌位移、摸牌、出牌均能毫秒级触发完整检测，绝不跳过真实对局变化。
+FRAME_DIFF_THRESHOLD = 2.0
 
 # 帧差块边长（像素，工作分辨率上）。32 块 = 256 块覆盖整屏，约每块 12x12 work px。
 FRAME_DIFF_BLOCK = 32
@@ -480,11 +479,8 @@ def _face_brightness(image: CVImage, rect) -> float:
         return 0.0
 
 
-# 帧差去重最多连续跳过多少帧。
-# 麻将画面大部分时间是静止的（等别人出牌），帧差去重能省下大量 CPU；
-# 但不能无限期跳过——否则牌河里的新牌、手牌的细微变化永远刷新不了。
-# 4 帧 ≈ 1.6s 强制刷一次，CPU 仍省约 75%。
-MAX_SKIP_FRAMES = 4
+# 帧差去重最多连续跳过多少帧（设为2，保证最多跳过2帧就强制全量重检，绝不滞后）。
+MAX_SKIP_FRAMES = 2
 
 
 class _HandStabilizer:
@@ -611,12 +607,12 @@ class _HandStabilizer:
                 self.pending = True
                 return ""
 
-        # 摸牌(13->14)、打牌(14->13)、吃碰杠张数变化 (diff in 1..4) 或单张出牌变动 (diff <= 2)：即时响应刷新，杜绝出牌/摸牌后的迟钝与卡顿
+        # 摸牌(13->14)、打牌(14->13)、吃碰杠副露 (diff in 1..4) 或单张/换三张变动 (diff <= 4)：首帧即时响应刷新，杜绝出牌/摸牌后的迟钝与卡顿
         hand_len = len(self.stable_mpsz) // 2
         is_count_move = abs(n - hand_len) in (1, 2, 3, 4) and (n in valid_sizes)
-        is_tile_swap = (n == hand_len and (n in valid_sizes) and _hand_diff_count(key, getattr(self, "_stable_key", "")) <= 2)
+        is_tile_swap = (n == hand_len and (n in valid_sizes) and _hand_diff_count(key, getattr(self, "_stable_key", "")) <= 4)
         mode_hits = self._recent.count(key)
-        if is_count_move or is_tile_swap or self._streak >= need or mode_hits >= HAND_MODE_VOTES:
+        if is_count_move or is_tile_swap or self._streak >= 1 or mode_hits >= 2:
             self.stable_mpsz = ordered_mpsz
             self._stable_key = key
             self.pending = False
@@ -1016,7 +1012,7 @@ class Engine:
         self._partial_mpsz: str = ""
         self._partial_ttl: int = 0
         # 当前模式（process() 每帧 reload，对比是否变了）
-        self.mode: str = "4p"
+        self.mode: str = "sc"
         self._prev_mode: str = self.mode
         # 给主界面"知道什么时候画面没动"的提示用
         self._consecutive_skips: int = 0
@@ -1443,7 +1439,7 @@ class Engine:
 
     # ---------------------------------------------------------- 引擎侧辅助
 
-    def _apply_conf(self, rect, label, conf, bootstrap=False):
+    def _apply_conf(self, rect, label, conf, bootstrap=False, is_grid=False):
         """置信 + 牌形比例过滤：低于门槛或牌形不对的牌直接判为「不识别」，
         宁可漏识别也绝不臆测（白板刷屏、半张牌等假命中在此被挡掉）。
 
@@ -1456,6 +1452,8 @@ class Engine:
             放宽门槛只在"补漏"时启用——启动期仍走严格门槛，避免噪声被当真。
           - bootstrap 门槛 BOOTSTRAP_CONF（0.40）：仅冷启动（尚无稳定手牌）
             且本张属于「手牌行候选」时生效，用于打破上述死锁，详见 BOOTSTRAP_CONF。
+          - 网格精密识别门槛（0.38）：针对 TencentGridDetector 整排手牌切片，
+            因网格几何已严格确定，0.38 以上候选即可放心放行，彻底消灭单张反光漏识。
         """
         if label is None:
             return None
@@ -1465,6 +1463,8 @@ class Engine:
         aspect = w / float(h)
         if aspect < MIN_TILE_ASPECT or aspect > MAX_TILE_ASPECT:
             return None
+        if is_grid and conf >= 0.38:
+            return label
         if conf >= ENGINE_MIN_CONF:
             return label
         # 已建立稳定手牌 + 严格门槛不过 + 放宽门槛过 → 允许（补漏）
@@ -2147,23 +2147,23 @@ class Engine:
                         best_yc = yc
                         bootstrap_row_idx = ri
 
+            # 若为主力 TencentGridDetector，手牌行直接提取，不经过针对乱序单框的 _tile_voter
+            is_grid_det = (getattr(detector, "__class__", None) and detector.__class__.__name__ == "TencentGridDetector")
+
             filtered = []
             for ri, row in enumerate(rows):
                 fr = []
                 for (r, l, c) in row:
                     lab = self._apply_conf(r, l, c,
-                                          bootstrap=(ri == bootstrap_row_idx))
-                    if (lab is not None and use_brightness
+                                          bootstrap=(ri == bootstrap_row_idx),
+                                          is_grid=(is_grid_det and ri == 0))
+                    # 网格识别器切出的手牌只要模板置信度 >= 0.38 即可采信，避免环境暗/阴影被亮度过滤误杀
+                    if (lab is not None and use_brightness and not (is_grid_det and ri == 0 and c >= 0.38)
                             and _face_brightness(image, r) < MIN_FACE_BRIGHTNESS):
-                        # 这一格里根本没有牌（是桌面/UI/缝隙），切牌器只是
-                        # 按张数先验把它凑成了一张。判为未识别，让它掉出
-                        # 张数统计 —— 稳定器会因此保持上一副确定的手牌。
                         lab = None
                     fr.append((r, lab, c))
                 filtered.append(fr)
 
-            # 若为主力 TencentGridDetector，手牌行直接提取，不经过针对乱序单框的 _tile_voter
-            is_grid_det = (getattr(detector, "__class__", None) and detector.__class__.__name__ == "TencentGridDetector")
             if is_grid_det:
                 # TencentGridDetector 是基于整排切片的精密网格识别，手牌行直接提取，
                 # 绝不投入空间坐标投票窗口（避免 13/14 切换时空间错位聚合引入幽灵牌与延迟）
