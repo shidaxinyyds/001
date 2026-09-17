@@ -370,29 +370,29 @@ public class MainActivity extends FlutterActivity {
   private String readModeFile() {
     try {
       File dir = getApplicationContext().getExternalFilesDir(null);
-      if (dir == null) return "4p";
+      if (dir == null) return "sc_hz";
       File f = new File(dir, "mahjong_mode.json");
-      if (!f.exists() || f.length() == 0 || f.length() > 256) return "4p";
+      if (!f.exists() || f.length() == 0 || f.length() > 256) return "sc_hz";
       byte[] buf = new byte[(int) f.length()];
       try (java.io.FileInputStream in = new java.io.FileInputStream(f)) {
         int n = in.read(buf);
-        if (n <= 0) return "sc";
+        if (n <= 0) return "sc_hz";
       }
       String s = new String(buf, 0, buf.length, "UTF-8").trim();
       java.util.regex.Matcher mc = java.util.regex.Pattern
-          .compile("\"mode\"\\s*:\\s*\"(sc|[234]p)\"").matcher(s);
-      return mc.find() ? mc.group(1) : "sc";
+          .compile("\"mode\"\\s*:\\s*\"([a-z0-9_]+)\"").matcher(s);
+      return mc.find() ? mc.group(1) : "sc_hz";
     } catch (Throwable t) {
       TimedLog.e(TAG, "readModeFile failed: " + t);
-      return "sc";
+      return "sc_hz";
     }
   }
 
-  // 把玩法写入共享文件，供 Python 引擎每帧读取。mode 接受 "sc"/"2p"/"3p"/"4p"。
+  // 把玩法写入共享文件，供 Python 引擎每帧读取。支持任意合法模式名。
   private int writeModeFile(String mode) {
-    if (mode == null) return -1;
+    if (mode == null || mode.trim().isEmpty()) return -1;
     String m = mode.trim().toLowerCase();
-    if (!Pattern.matches("(sc|[234]p)", m)) return -2;
+    if (!Pattern.matches("[a-z0-9_]+", m)) return -2;
     try {
       File dir = getApplicationContext().getExternalFilesDir(null);
       if (dir == null) return -3;

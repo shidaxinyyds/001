@@ -8,11 +8,14 @@ import 'package:auto_vision/channel.dart';
 import 'package:auto_vision/debug_page.dart';
 import 'package:auto_vision/mode_store.dart';
 
-/// 主色调：青绿。
-/// 全局禁用红/橙/琥珀系，避免用户把"强调色"误读为"错误提示"。
-/// 弹窗层（mahjong_overlay.dart）同样遵循此约定。
-const Color _kAccent = Color(0xFF00695C); // teal 800
-const Color _kAccentBg = Color(0xFFE0F2F1); // teal 50
+/// 极简现代配色
+const Color _kPrimary = Color(0xFF0F172A); // slate-900 沉稳黑灰
+const Color _kAccent = Color(0xFF0D9488); // teal-600 现代翡翠青
+const Color _kAccentBg = Color(0xFFF0FDFA); // teal-50 极淡青底色
+const Color _kTextMain = Color(0xFF0F172A);
+const Color _kTextMuted = Color(0xFF64748B);
+const Color _kBorder = Color(0xFFE2E8F0);
+const Color _kBg = Color(0xFFF8FAFC);
 
 class HomePage extends StatefulWidget {
   const HomePage({Key? key}) : super(key: key);
@@ -314,97 +317,64 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  IconData _getModeIcon(String key) {
-    switch (key) {
-      case 'sc_hz':
-        return Icons.local_fire_department_rounded;
-      case 'sc_xz':
-        return Icons.shield_rounded;
-      case 'sc_xl':
-        return Icons.water_drop_rounded;
-      case 'gy_zj':
-        return Icons.pets_rounded;
-      case 'std_tdh':
-        return Icons.grid_view_rounded;
-      case 'wh_kk':
-        return Icons.lock_open_rounded;
-      case 'db_qh':
-        return Icons.ac_unit_rounded;
-      case 'hz_bd':
-        return Icons.auto_awesome_rounded;
-      case 'gd_hz':
-        return Icons.stars_rounded;
-      case 'cs_zz':
-        return Icons.sync_rounded;
-      default:
-        return Icons.casino_rounded;
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final String mode = selectedMode ?? '';
     return Scaffold(
-      backgroundColor: const Color(0xFFF8FAFC), // slate 50
+      backgroundColor: _kBg,
       appBar: AppBar(
-        backgroundColor: const Color(0xFF004D40),
+        backgroundColor: Colors.white,
         elevation: 0,
+        scrolledUnderElevation: 0,
+        titleSpacing: 20,
+        systemOverlayStyle: SystemUiOverlayStyle.dark,
         title: Row(
           children: [
-            Container(
-              padding: const EdgeInsets.all(6),
-              decoration: BoxDecoration(
-                color: const Color(0x26FFFFFF),
-                borderRadius: BorderRadius.circular(8),
+            const Text(
+              "Ace Mahjong",
+              style: TextStyle(
+                fontSize: 19,
+                fontWeight: FontWeight.w700,
+                color: _kTextMain,
+                letterSpacing: -0.3,
               ),
-              child: const Icon(Icons.casino_rounded, color: Colors.white, size: 20),
             ),
-            const SizedBox(width: 10),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: const [
-                Text(
-                  "Ace Mahjong",
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
-                    letterSpacing: 0.5,
-                  ),
+            const Spacer(),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: isProcessing ? const Color(0xFFECFDF5) : const Color(0xFFF1F5F9),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(
+                  color: isProcessing ? const Color(0xFFA7F3D0) : const Color(0xFFE2E8F0),
+                  width: 0.8,
                 ),
-                Text(
-                  "商业专业版 · 智能向听推演引擎",
-                  style: TextStyle(
-                    fontSize: 10,
-                    color: Color(0xFF80CBC4),
-                    fontWeight: FontWeight.w400,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 6,
+                    height: 6,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: isProcessing ? const Color(0xFF10B981) : const Color(0xFF94A3B8),
+                    ),
                   ),
-                ),
-              ],
+                  const SizedBox(width: 6),
+                  Text(
+                    isProcessing ? "识别中" : "待命",
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                      color: isProcessing ? const Color(0xFF047857) : const Color(0xFF64748B),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ],
         ),
-        actions: [
-          Container(
-            margin: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-            decoration: BoxDecoration(
-              color: const Color(0x33FFFFFF),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: const Color(0x66FFFFFF), width: 0.8),
-            ),
-            alignment: Alignment.center,
-            child: const Text(
-              "PRO",
-              style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w900,
-                color: Color(0xFFFFD54F),
-                letterSpacing: 1.0,
-              ),
-            ),
-          ),
-        ],
       ),
       body: IndexedStack(
         index: _tab,
@@ -413,312 +383,44 @@ class _HomePageState extends State<HomePage> {
           const DebugPage(),
         ],
       ),
-      bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _tab,
-        onTap: (i) => setState(() => _tab = i),
-        selectedItemColor: _kAccent,
-        unselectedItemColor: const Color(0xFF94A3B8),
-        backgroundColor: Colors.white,
-        elevation: 8,
-        items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.home_rounded), label: '主页'),
-          BottomNavigationBarItem(icon: Icon(Icons.tune_rounded), label: '调试'),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildHomeBody(String mode) {
-    final bool canStart = !isProcessing && _modeReady && mode.isNotEmpty;
-    final currentInfo = GameMode.info(mode);
-    final categoryModes = GameMode.allModes
-        .where((m) => m.category == _selectedCategory)
-        .toList();
-
-    return SafeArea(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // 顶部当前生效玩法与平台兼容状态（暗绿沉浸式卡片）
-            Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                gradient: const LinearGradient(
-                  colors: [Color(0xFF004D40), Color(0xFF00695C)],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-                borderRadius: BorderRadius.circular(16),
-                boxShadow: const [
-                  BoxShadow(
-                    color: Color(0x26004D40),
-                    blurRadius: 10,
-                    offset: Offset(0, 4),
-                  ),
-                ],
+      bottomNavigationBar: Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          border: Border(
+            top: BorderSide(color: Color(0xFFE2E8F0), width: 0.8),
+          ),
+        ),
+        child: BottomNavigationBar(
+          currentIndex: _tab,
+          onTap: (i) => setState(() => _tab = i),
+          selectedItemColor: _kAccent,
+          unselectedItemColor: const Color(0xFF94A3B8),
+          backgroundColor: Colors.white,
+          elevation: 0,
+          selectedFontSize: 12,
+          unselectedFontSize: 12,
+          items: const [
+            BottomNavigationBarItem(
+              icon: Padding(
+                padding: EdgeInsets.only(bottom: 2),
+                child: Icon(Icons.home_outlined),
               ),
-              child: Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: const Color(0x26FFFFFF),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Icon(
-                      currentInfo != null
-                          ? _getModeIcon(currentInfo.key)
-                          : Icons.casino_rounded,
-                      color: const Color(0xFFFFD54F),
-                      size: 24,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Text(
-                              currentInfo != null ? currentInfo.name : '请选择玩法',
-                              style: const TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.white,
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 6, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: const Color(0x33FFFFFF),
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: Text(
-                                currentInfo != null
-                                    ? "${currentInfo.wall}张"
-                                    : "全牌",
-                                style: const TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w600,
-                                  color: Color(0xFFE0F2F1),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 3),
-                        Text(
-                          currentInfo != null
-                              ? currentInfo.subtitle
-                              : '支持腾讯欢乐麻将、微乐、指尖等主流平台自动感知',
-                          style: const TextStyle(
-                            fontSize: 11,
-                            color: Color(0xFFB2DFDB),
-                            height: 1.2,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-                    decoration: BoxDecoration(
-                      color: const Color(0x33000000),
-                      borderRadius: BorderRadius.circular(8),
-                      border:
-                          Border.all(color: const Color(0x4DFFFFFF), width: 0.8),
-                    ),
-                    child: Column(
-                      children: const [
-                        Icon(Icons.bolt_rounded,
-                            color: Color(0xFFFFD54F), size: 16),
-                        Text(
-                          "全适配",
-                          style: TextStyle(
-                            fontSize: 10,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.white,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
+              activeIcon: Padding(
+                padding: EdgeInsets.only(bottom: 2),
+                child: Icon(Icons.home_rounded),
               ),
+              label: '主页',
             ),
-            const SizedBox(height: 14),
-
-            // 分类切换栏
-            _buildCategorySelector(),
-
-            // 玩法卡片列表
-            ...categoryModes.map((info) {
-              final bool sel = info.key == mode;
-              return _buildModeCard(info, sel);
-            }),
-
-            const SizedBox(height: 12),
-
-            // 核心主操作按钮（大圆角立体按钮）
-            Container(
-              height: 54,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(14),
-                gradient: LinearGradient(
-                  colors: isProcessing
-                      ? [const Color(0xFFE11D48), const Color(0xFFBE123C)]
-                      : (canStart
-                          ? [const Color(0xFF00695C), const Color(0xFF00897B)]
-                          : [Colors.grey.shade400, Colors.grey.shade500]),
-                ),
-                boxShadow: canStart
-                    ? [
-                        BoxShadow(
-                          color: isProcessing
-                              ? const Color(0x55E11D48)
-                              : const Color(0x4D00695C),
-                          blurRadius: 10,
-                          offset: const Offset(0, 4),
-                        ),
-                      ]
-                    : null,
+            BottomNavigationBarItem(
+              icon: Padding(
+                padding: EdgeInsets.only(bottom: 2),
+                child: Icon(Icons.tune_outlined),
               ),
-              child: Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(14),
-                  onTap: canStart ? _toggleProcessing : null,
-                  child: Center(
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          isProcessing
-                              ? Icons.stop_circle_rounded
-                              : Icons.play_circle_fill_rounded,
-                          color: Colors.white,
-                          size: 24,
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          isProcessing
-                              ? '停止悬浮窗识别'
-                              : (mode.isEmpty ? '请先选择上方玩法' : '开启智能悬浮窗'),
-                          style: const TextStyle(
-                            fontSize: 17,
-                            fontWeight: FontWeight.w700,
-                            color: Colors.white,
-                            letterSpacing: 0.5,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
+              activeIcon: Padding(
+                padding: EdgeInsets.only(bottom: 2),
+                child: Icon(Icons.tune_rounded),
               ),
-            ),
-
-            // 终端监控控制台
-            Container(
-              margin: const EdgeInsets.only(top: 14),
-              decoration: BoxDecoration(
-                color: const Color(0xFF0F172A),
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: const Color(0xFF334155)),
-                boxShadow: const [
-                  BoxShadow(
-                    color: Color(0x1F000000),
-                    blurRadius: 8,
-                    offset: Offset(0, 3),
-                  ),
-                ],
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // 终端顶栏
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                    decoration: const BoxDecoration(
-                      color: Color(0xFF1E293B),
-                      borderRadius:
-                          BorderRadius.vertical(top: Radius.circular(13)),
-                    ),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 8,
-                          height: 8,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: isProcessing
-                                ? const Color(0xFF22C55E)
-                                : const Color(0xFF94A3B8),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          isProcessing ? "实时识别引擎在线 (5 FPS)" : "识别引擎待命",
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                            color: isProcessing
-                                ? const Color(0xFF4ADE80)
-                                : const Color(0xFF94A3B8),
-                          ),
-                        ),
-                        const Spacer(),
-                        Text(
-                          _recogStatus.isNotEmpty
-                              ? "状态: $_recogStatus"
-                              : "未启动",
-                          style: const TextStyle(
-                            fontSize: 11,
-                            color: Color(0xFF94A3B8),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  // 终端内容
-                  Padding(
-                    padding: const EdgeInsets.all(14),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          _status,
-                          style: const TextStyle(
-                            fontSize: 12,
-                            color: Color(0xFF94A3B8),
-                            fontFamily: 'monospace',
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          _recognitionText(),
-                          style: const TextStyle(
-                            fontSize: 13,
-                            color: Color(0xFFF8FAFC),
-                            fontWeight: FontWeight.w500,
-                            height: 1.4,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
+              label: '调试',
             ),
           ],
         ),
@@ -726,7 +428,44 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  // 开始/停止识别（主页按钮与调试页共用）
+  Widget _buildHomeBody(String mode) {
+    final bool canStart = !isProcessing && _modeReady && mode.isNotEmpty;
+    final categoryModes = GameMode.allModes
+        .where((m) => m.category == _selectedCategory)
+        .toList();
+
+    return SafeArea(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // 分类切换栏
+            _buildCategorySelector(),
+            const SizedBox(height: 12),
+
+            // 玩法卡片列表
+            ...categoryModes.map((info) {
+              final bool sel = info.key == mode;
+              return _buildModeCard(info, sel);
+            }),
+
+            const SizedBox(height: 14),
+
+            // 核心主操作按钮
+            _buildActionButton(canStart, mode),
+
+            const SizedBox(height: 14),
+
+            // 状态 / 提示卡片
+            _buildStatusCard(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // 开始/停止识别
   Future<void> _toggleProcessing() async {
     if (isProcessing) {
       setProcessingState(false);
@@ -739,13 +478,12 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  // 分类切换栏
+  // 分类切换栏（干净精炼分段器）
   Widget _buildCategorySelector() {
     return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(4),
+      padding: const EdgeInsets.all(3),
       decoration: BoxDecoration(
-        color: const Color(0xFFE2E8F0),
+        color: const Color(0xFFF1F5F9),
         borderRadius: BorderRadius.circular(10),
       ),
       child: Row(
@@ -759,14 +497,14 @@ class _HomePageState extends State<HomePage> {
                 }
               },
               child: Container(
-                padding: const EdgeInsets.symmetric(vertical: 8),
+                padding: const EdgeInsets.symmetric(vertical: 9),
                 decoration: BoxDecoration(
                   color: sel ? Colors.white : Colors.transparent,
                   borderRadius: BorderRadius.circular(8),
                   boxShadow: sel
                       ? const [
                           BoxShadow(
-                            color: Color(0x14000000),
+                            color: Color(0x0D000000),
                             blurRadius: 4,
                             offset: Offset(0, 1),
                           ),
@@ -778,8 +516,8 @@ class _HomePageState extends State<HomePage> {
                   cat,
                   style: TextStyle(
                     fontSize: 13,
-                    fontWeight: sel ? FontWeight.bold : FontWeight.w500,
-                    color: sel ? _kAccent : const Color(0xFF475569),
+                    fontWeight: sel ? FontWeight.w600 : FontWeight.w400,
+                    color: sel ? _kTextMain : _kTextMuted,
                   ),
                 ),
               ),
@@ -790,148 +528,205 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  // 玩法卡片
+  // 玩法卡片（极简大气，纯粹利落）
   Widget _buildModeCard(MahjongModeInfo info, bool isSelected) {
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
       decoration: BoxDecoration(
-        color: isSelected ? const Color(0xFFF0FDF4) : Colors.white,
-        borderRadius: BorderRadius.circular(14),
+        color: isSelected ? _kAccentBg : Colors.white,
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: isSelected
-              ? const Color(0xFF00695C)
-              : const Color(0xFFE2E8F0),
-          width: isSelected ? 2 : 1,
+          color: isSelected ? _kAccent : _kBorder,
+          width: isSelected ? 1.5 : 1.0,
         ),
-        boxShadow: [
-          BoxShadow(
-            color: isSelected
-                ? const Color(0x1F00695C)
-                : const Color(0x0A000000),
-            blurRadius: isSelected ? 8 : 4,
-            offset: const Offset(0, 2),
-          ),
-        ],
       ),
       child: Material(
         color: Colors.transparent,
         child: InkWell(
-          borderRadius: BorderRadius.circular(14),
+          borderRadius: BorderRadius.circular(12),
           onTap: () => _selectMode(info.key),
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            child: Row(
               children: [
-                Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(7),
-                      decoration: BoxDecoration(
-                        color: isSelected
-                            ? _kAccentBg
-                            : const Color(0xFFF1F5F9),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Icon(
-                        _getModeIcon(info.key),
-                        color: isSelected
-                            ? const Color(0xFF00695C)
-                            : const Color(0xFF64748B),
-                        size: 20,
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
                         info.name,
                         style: TextStyle(
                           fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: isSelected
-                              ? const Color(0xFF00695C)
-                              : const Color(0xFF1E293B),
+                          fontWeight: FontWeight.w600,
+                          color: isSelected ? _kAccent : _kTextMain,
                         ),
                       ),
-                    ),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 3),
-                      decoration: BoxDecoration(
-                        color: isSelected
-                            ? _kAccentBg
-                            : const Color(0xFFF1F5F9),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: Text(
-                        info.status,
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          color: isSelected
-                              ? const Color(0xFF00695C)
-                              : const Color(0xFF475569),
+                      const SizedBox(height: 4),
+                      Text(
+                        info.brief,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          color: _kTextMuted,
+                          height: 1.2,
                         ),
                       ),
-                    ),
-                    const SizedBox(width: 8),
-                    Icon(
-                      isSelected
-                          ? Icons.check_circle_rounded
-                          : Icons.radio_button_unchecked_rounded,
-                      color: isSelected
-                          ? const Color(0xFF00695C)
-                          : const Color(0xFF94A3B8),
-                      size: 22,
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  info.subtitle,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: Color(0xFF64748B),
-                    height: 1.3,
+                    ],
                   ),
                 ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 4,
-                  children: info.tags.map((tag) {
-                    return Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 7, vertical: 2.5),
-                      decoration: BoxDecoration(
-                        color: isSelected
-                            ? Colors.white
-                            : const Color(0xFFF8FAFC),
-                        borderRadius: BorderRadius.circular(5),
-                        border: Border.all(
-                          color: isSelected
-                              ? const Color(0x4D00695C)
-                              : const Color(0xFFE2E8F0),
-                          width: 0.8,
-                        ),
-                      ),
-                      child: Text(
-                        tag,
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w500,
-                          color: isSelected
-                              ? const Color(0xFF00695C)
-                              : const Color(0xFF475569),
-                        ),
-                      ),
-                    );
-                  }).toList(),
+                Icon(
+                  isSelected
+                      ? Icons.radio_button_checked_rounded
+                      : Icons.radio_button_unchecked_rounded,
+                  color: isSelected ? _kAccent : const Color(0xFFCBD5E1),
+                  size: 22,
                 ),
               ],
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  // 核心主操作按钮
+  Widget _buildActionButton(bool canStart, String mode) {
+    Color btnColor;
+    String btnText;
+
+    if (isProcessing) {
+      btnColor = const Color(0xFFDC2626);
+      btnText = '停止悬浮窗';
+    } else if (canStart) {
+      btnColor = _kPrimary;
+      btnText = '开启悬浮窗';
+    } else {
+      btnColor = const Color(0xFFCBD5E1);
+      btnText = mode.isEmpty ? '请先选择上方玩法' : '开启悬浮窗';
+    }
+
+    return SizedBox(
+      height: 50,
+      child: ElevatedButton(
+        onPressed: (canStart || isProcessing) ? _toggleProcessing : null,
+        style: ElevatedButton.styleFrom(
+          backgroundColor: btnColor,
+          disabledBackgroundColor: const Color(0xFFCBD5E1),
+          elevation: 0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
+        child: Text(
+          btnText,
+          style: const TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.w600,
+            color: Colors.white,
+            letterSpacing: 0.5,
+          ),
+        ),
+      ),
+    );
+  }
+
+  // 状态 / 提示卡片
+  Widget _buildStatusCard() {
+    if (!isProcessing) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: _kBorder, width: 0.8),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: const [
+            Padding(
+              padding: EdgeInsets.only(top: 2),
+              child: Icon(
+                Icons.info_outline_rounded,
+                size: 16,
+                color: Color(0xFF94A3B8),
+              ),
+            ),
+            SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                '选定玩法后点击开启，悬浮窗将自动浮于牌局之上实时推演向听与最优出牌。',
+                style: TextStyle(
+                  fontSize: 13,
+                  color: _kTextMuted,
+                  height: 1.4,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    // 运行态卡片：展示实时推演状态
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFA7F3D0), width: 1),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Color(0xFF10B981),
+                ),
+              ),
+              const SizedBox(width: 8),
+              const Text(
+                '实时推演中',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF047857),
+                ),
+              ),
+              const Spacer(),
+              if (_recogCount > 0)
+                Text(
+                  '识别手牌 $_recogCount 张',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: _kTextMuted,
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          if (_status.isNotEmpty && _status != '未开始') ...[
+            Text(
+              _status,
+              style: const TextStyle(
+                fontSize: 12,
+                color: _kTextMuted,
+              ),
+            ),
+            const SizedBox(height: 6),
+          ],
+          Text(
+            _recognitionText(),
+            style: const TextStyle(
+              fontSize: 13,
+              color: _kTextMain,
+              height: 1.4,
+            ),
+          ),
+        ],
       ),
     );
   }
