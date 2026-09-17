@@ -29,6 +29,7 @@ class _HomePageState extends State<HomePage> {
   bool isProcessing = false;
   // 当前选中的玩法，初始空：必须先选才能开始识别。
   String? selectedMode;
+  String _selectedCategory = '川麻血流';
   bool _modeReady = false;
 
   @override
@@ -38,8 +39,12 @@ class _HomePageState extends State<HomePage> {
     // 拉一次当前玩法（来自 Java 写的共享文件，Python 引擎也读这个文件）
     GameMode.current().then((m) {
       if (!mounted) return;
+      final info = GameMode.info(m);
       setState(() {
         selectedMode = m;
+        if (info != null) {
+          _selectedCategory = info.category;
+        }
         _modeReady = true;
       });
     });
@@ -300,8 +305,12 @@ class _HomePageState extends State<HomePage> {
       return;
     }
     if (!mounted) return;
+    final info = GameMode.info(mode);
     setState(() {
       selectedMode = mode;
+      if (info != null) {
+        _selectedCategory = info.category;
+      }
     });
   }
 
@@ -331,20 +340,86 @@ class _HomePageState extends State<HomePage> {
 
   Widget _buildHomeBody(String mode) {
     final bool canStart = !isProcessing && _modeReady && mode.isNotEmpty;
+    final currentInfo = GameMode.info(mode);
+    final categoryModes = GameMode.allModes
+        .where((m) => m.category == _selectedCategory)
+        .toList();
+
     return SafeArea(
       child: SingleChildScrollView(
-        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const SizedBox(height: 6),
-            const Text(
-              '选择玩法',
-              style: TextStyle(fontSize: 14, color: Colors.black54),
+            // 顶部当前生效玩法与平台兼容状态
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: _kAccentBg,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: _kAccent.withValues(alpha: 0.35)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.verified, color: _kAccent, size: 20),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          currentInfo != null
+                              ? '当前玩法：${currentInfo.name} (${currentInfo.wall}张)'
+                              : '请选择麻将玩法',
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                            color: _kAccent,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          '支持腾讯欢乐麻将、微乐、指尖等主流平台自适应',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: _kAccent.withValues(alpha: 0.85),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: _kAccent,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: const Text(
+                      '100%完美适配',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
-            const SizedBox(height: 8),
-            _modeRow(mode),
-            const SizedBox(height: 24),
+            const SizedBox(height: 14),
+
+            // 分类切换栏
+            _buildCategorySelector(),
+
+            // 玩法卡片列表
+            ...categoryModes.map((info) {
+              final bool sel = info.key == mode;
+              return _buildModeCard(info, sel);
+            }),
+
+            const SizedBox(height: 12),
+
+            // 开始/停止识别主按钮
             SizedBox(
               height: 52,
               child: ElevatedButton(
@@ -409,56 +484,173 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  // 玩法选择：3 个等宽 SegmentedButton 风格卡。当前选中项高亮 + 上边框加粗。
-  Widget _modeRow(String mode) {
-    Widget tile(String value) {
-      final bool sel = value == mode;
-      return Expanded(
-        child: GestureDetector(
-          onTap: () => _selectMode(value),
-          child: Container(
-            margin: const EdgeInsets.symmetric(horizontal: 4),
-            height: 64,
-            decoration: BoxDecoration(
-              color: sel ? _kAccentBg : Colors.white,
-              border: Border.all(
-                color: sel ? _kAccent : Colors.grey.shade400,
-                width: sel ? 2 : 1,
-              ),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            alignment: Alignment.center,
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  GameMode.label(value),
+  // 分类切换栏
+  Widget _buildCategorySelector() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade100,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.grey.shade300),
+      ),
+      child: Row(
+        children: GameMode.categories.map((cat) {
+          final bool sel = cat == _selectedCategory;
+          return Expanded(
+            child: GestureDetector(
+              onTap: () {
+                if (_selectedCategory != cat) {
+                  setState(() => _selectedCategory = cat);
+                }
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                decoration: BoxDecoration(
+                  color: sel ? Colors.white : Colors.transparent,
+                  borderRadius: BorderRadius.circular(8),
+                  boxShadow: sel
+                      ? [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.08),
+                            blurRadius: 4,
+                            offset: const Offset(0, 1),
+                          ),
+                        ]
+                      : null,
+                ),
+                alignment: Alignment.center,
+                child: Text(
+                  cat,
                   style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: sel ? FontWeight.w700 : FontWeight.w500,
+                    fontSize: 13,
+                    fontWeight: sel ? FontWeight.bold : FontWeight.w500,
                     color: sel ? _kAccent : Colors.black87,
                   ),
                 ),
-                const SizedBox(height: 2),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  // 玩法卡片
+  Widget _buildModeCard(MahjongModeInfo info, bool isSelected) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        color: isSelected ? _kAccentBg : Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: isSelected ? _kAccent : Colors.grey.shade300,
+          width: isSelected ? 2 : 1,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: isSelected
+                ? _kAccent.withValues(alpha: 0.12)
+                : Colors.black.withValues(alpha: 0.04),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: () => _selectMode(info.key),
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        info.name,
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                          color: isSelected ? _kAccent : Colors.black87,
+                        ),
+                      ),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 7, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: isSelected
+                            ? _kAccent.withValues(alpha: 0.15)
+                            : Colors.grey.shade100,
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(
+                        info.status,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: isSelected ? _kAccent : Colors.grey.shade700,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Icon(
+                      isSelected
+                          ? Icons.check_circle
+                          : Icons.radio_button_unchecked,
+                      color: isSelected ? _kAccent : Colors.grey.shade400,
+                      size: 20,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 5),
                 Text(
-                  value,
+                  info.subtitle,
                   style: TextStyle(
-                      fontSize: 11, color: Colors.grey.shade600),
+                    fontSize: 12,
+                    color: Colors.grey.shade700,
+                    height: 1.25,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  children: info.tags.map((tag) {
+                    return Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: isSelected
+                            ? Colors.white.withValues(alpha: 0.85)
+                            : Colors.grey.shade100,
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(
+                          color: isSelected
+                              ? _kAccent.withValues(alpha: 0.3)
+                              : Colors.grey.shade300,
+                          width: 0.8,
+                        ),
+                      ),
+                      child: Text(
+                        tag,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: isSelected ? _kAccent : Colors.black54,
+                        ),
+                      ),
+                    );
+                  }).toList(),
                 ),
               ],
             ),
           ),
         ),
-      );
-    }
-
-    return Row(
-      children: [
-        tile('sc'),
-        tile('4p'),
-        tile('3p'),
-        tile('2p'),
-      ],
+      ),
     );
   }
 }

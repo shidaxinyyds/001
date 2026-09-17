@@ -31,6 +31,10 @@ from modes import (
     hand_sizes,
     available_set,
     MODES,
+    is_dingque_mode,
+    is_sichuan_family,
+    get_mode,
+    get_laizi,
 )
 
 # 一局中的合法手牌张数：含摸牌、打牌与吃碰杠副露全合法张数
@@ -1278,7 +1282,7 @@ class Engine:
             if len(hand) in hand_sizes(self.mode):
                 raw = self.trainer.calculate_discards()
 
-                if self.mode == "sc" and getattr(self.trainer, "sichuan_results", None):
+                if is_sichuan_family(self.mode) and getattr(self.trainer, "sichuan_results", None):
                     advice = []
                     for sr in self.trainer.sichuan_results:
                         u = sr.get("ukeire", 0)
@@ -1989,7 +1993,7 @@ class Engine:
                             "commentary": None,
                             "discards": "",
                             "discard_count": 0,
-                            "remaining": 108 if self.mode == "sc" else 136,
+                            "remaining": get_mode(self.mode).get("wall", 108),
                             "dead": 0,
                             "remaining_matrix": {},
                             "is_drawing": False,
@@ -2334,7 +2338,7 @@ class Engine:
             # 定缺检测（四川麻将模式：支持手动覆盖与视觉自动感知双通道）
             dingque_suit, dingque_name = None, None
             is_dq_phase = False
-            if self.mode == "sc":
+            if is_dingque_mode(self.mode):
                 # 1. 优先读取手动覆盖或头像定缺门标
                 override = getattr(self, "_dingque_override", None)
                 if override is not None and 0 <= override <= 2:
@@ -2356,7 +2360,7 @@ class Engine:
             # 探测对手定缺徽章与根据弃牌反推对手攻防倾向（防点炮预警）
             opponent_dingque_suits: List[int] = []
             opponent_danger_suits: List[int] = []
-            if self.mode == "sc":
+            if is_dingque_mode(self.mode):
                 try:
                     op_dq = detect_opponents_dingque(full_for_preview)
                     disc_safe, disc_danger = infer_opponents_from_discards(disc_counts)
@@ -2403,7 +2407,7 @@ class Engine:
                 tile_count = len(hand)
                 status = "ok"
                 commentary = self.update_trainer(hand)
-                if self.mode == "sc" and self.trainer is not None:
+                if is_sichuan_family(self.mode) and self.trainer is not None:
                     if dingque_suit is not None:
                         self.trainer.set_dingque(dingque_suit)
                     if opponent_dingque_suits:
@@ -2457,7 +2461,7 @@ class Engine:
                                 advice = t_adv
                                 if t_shanten is not None:
                                     shanten = t_shanten
-                            elif self.mode == "sc" and dingque_suit is not None:
+                            elif is_dingque_mode(self.mode) and dingque_suit is not None:
                                 dq_char = ['m', 'p', 's'][dingque_suit]
                                 tiles_in_hand = [hand_mpsz[k:k+2] for k in range(0, len(hand_mpsz), 2)]
                                 dq_tiles = [t for t in tiles_in_hand if t.endswith(dq_char)]
@@ -2488,7 +2492,7 @@ class Engine:
 
             # 标记"最优"那张牌（最高 EV 或最高 ukeire），UI 上加"最优"角标
             if advice:
-                if self.mode == "sc":
+                if is_sichuan_family(self.mode):
                     best = str(advice[0].get("tile") or "")
                 else:
                     top_ukeire = max((a.get('ukeire') or 0) for a in advice)
@@ -2552,7 +2556,7 @@ class Engine:
                 disc_mpsz_out = ""
                 disc_counts_out = [0] * 34
                 discarded_labels_out = []
-                remaining = 108 if self.mode == "sc" else 136
+                remaining = get_mode(self.mode).get("wall", 108)
                 dead = 0
             else:
                 # 重新精准计算当前生效手牌的计数，杜绝 partial 或未归一态导致的 hand_counts 漏计全 4 bug
@@ -2579,7 +2583,7 @@ class Engine:
             hot_tiles = []
             dead_tiles = []
 
-            if self.mode == "sc" and tile_count > 0 and status not in ("waiting", "no_tiles") and hand_mpsz:
+            if is_sichuan_family(self.mode) and tile_count > 0 and status not in ("waiting", "no_tiles") and hand_mpsz:
                 try:
                     from sichuan import SichuanAnalyzer
                     pool_rem_27 = [

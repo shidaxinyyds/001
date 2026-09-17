@@ -26,13 +26,13 @@ from typing import Dict, List, Set
 # Java / Chaquopy-Python 与 Dart 都能读写，无需任何额外权限。
 MODE_PATH = "/storage/emulated/0/Android/data/com.example.auto_vision/files/mahjong_mode.json"
 
-DEFAULT_MODE = "sc"
+DEFAULT_MODE = "sc_hz"
 
 # 34 型索引约定（与 trainer/utils/convert.py 相同）：
 #   0-8   1m..9m
 #   9-17  1p..9p
 #   18-26 1s..9s
-#   27-33 1z..7z（东南西北白發中）
+#   27-33 1z..7z（东南西北白發中，31=5z白板，33=7z红中）
 ALL_34 = list(range(34))
 
 
@@ -47,40 +47,168 @@ _SANMA_REMOVED = [1, 7, 10, 16, 19, 25, 31]
 _TWOP_REMOVED = list(range(9, 27))
 
 MODES: Dict[str, Dict] = {
-    "sc": {
-        "name": "川麻血战",
+    # 1. 川麻血流系列 (占手游 60%+ 流量)
+    "sc_hz": {
+        "name": "血流红中",
         "players": 4,
-        "available": list(range(27)) + [33],  # 0-26 万筒条各9张共27种，+ 33(7z 红中/赖子)
+        "available": list(range(27)) + [33],  # 0-26 万筒条各9张 + 33 (7z 红中)
+        "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
+        "wall": 112,
+        "dingque": True,
+        "laizi": 33,  # 7z 红中
+    },
+    "sc_xz": {
+        "name": "川麻·血战到底",
+        "players": 4,
+        "available": list(range(27)),  # 0-26 纯万筒条108张
         "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
         "wall": 108,
+        "dingque": True,
+        "laizi": None,
     },
-    "4p": {
-        "name": "四麻",
+    "sc_xl": {
+        "name": "川麻·血流成河",
+        "players": 4,
+        "available": list(range(27)),
+        "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
+        "wall": 108,
+        "dingque": True,
+        "laizi": None,
+    },
+    "gy_zj": {
+        "name": "贵阳捉鸡",
+        "players": 4,
+        "available": list(range(27)),
+        "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
+        "wall": 108,
+        "dingque": True,
+        "laizi": None,
+    },
+
+    # 2. 经典大众系列
+    "std_tdh": {
+        "name": "大众推倒胡",
         "players": 4,
         "available": list(ALL_34),
         "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
         "wall": 136,
+        "dingque": False,
+        "laizi": None,
+    },
+    "wh_kk": {
+        "name": "武汉开口翻",
+        "players": 4,
+        "available": list(ALL_34),
+        "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
+        "wall": 136,
+        "dingque": False,
+        "laizi": None,
+    },
+    "db_qh": {
+        "name": "东北穷胡",
+        "players": 4,
+        "available": list(ALL_34),
+        "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
+        "wall": 136,
+        "dingque": False,
+        "laizi": None,
+    },
+    "hz_bd": {
+        "name": "杭州百搭",
+        "players": 4,
+        "available": list(ALL_34),
+        "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
+        "wall": 136,
+        "dingque": False,
+        "laizi": 31,  # 5z 白板
+    },
+
+    # 3. 地方顶流系列
+    "gd_hz": {
+        "name": "广东红中王",
+        "players": 4,
+        "available": list(range(27)) + [33],
+        "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
+        "wall": 100,
+        "dingque": False,
+        "laizi": 33,  # 7z 红中
+    },
+    "cs_zz": {
+        "name": "长沙转转麻将",
+        "players": 4,
+        "available": list(range(27)) + [33],
+        "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
+        "wall": 108,
+        "dingque": False,
+        "laizi": 33,  # 7z 红中
+    },
+
+    # 向下兼容历史别名
+    "sc": {
+        "name": "川麻·血战到底",
+        "players": 4,
+        "available": list(range(27)) + [33],
+        "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
+        "wall": 108,
+        "dingque": True,
+        "laizi": None,
+    },
+    "4p": {
+        "name": "大众推倒胡",
+        "players": 4,
+        "available": list(ALL_34),
+        "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
+        "wall": 136,
+        "dingque": False,
+        "laizi": None,
     },
     "3p": {
-        "name": "三麻",
+        "name": "三人竞技",
         "players": 3,
         "available": _removed_to_available(_SANMA_REMOVED),
         "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
         "wall": 108,
+        "dingque": False,
+        "laizi": None,
     },
     "2p": {
-        "name": "二麻",
+        "name": "二人雀神",
         "players": 2,
         "available": _removed_to_available(_TWOP_REMOVED),
         "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
         "wall": 64,
+        "dingque": False,
+        "laizi": None,
     },
 }
 
 
+ALIASES = {
+    "sc": "sc_xz",
+    "4p": "std_tdh",
+}
+
+
 def get_mode(key: str = DEFAULT_MODE) -> Dict:
-    """返回玩法配置 dict（含 name/players/available/hand_sizes/wall）。"""
+    """返回玩法配置 dict（含 name/players/available/hand_sizes/wall/dingque/laizi）。"""
+    key = ALIASES.get(key, key)
     return MODES.get(key, MODES[DEFAULT_MODE])
+
+
+def is_dingque_mode(key: str = DEFAULT_MODE) -> bool:
+    """返回该模式是否启用定缺门。"""
+    return bool(get_mode(key).get("dingque", False))
+
+
+def is_sichuan_family(key: str = DEFAULT_MODE) -> bool:
+    """返回该模式是否属于川麻血战血流家族（采用 sichuan_analyzer）。"""
+    key = ALIASES.get(key, key)
+    return key in ("sc_hz", "sc_xz", "sc_xl", "gy_zj", "sc")
+
+
+def get_laizi(key: str = DEFAULT_MODE) -> Optional[int]:
+    """返回该模式的万能赖子牌 34 型索引（33 为 7z 红中，31 为 5z 白板），None 表示无赖子。"""
+    return get_mode(key).get("laizi", None)
 
 
 def available_set(key: str = DEFAULT_MODE) -> Set[int]:
@@ -97,11 +225,13 @@ def mode_keys() -> List[str]:
 
 
 def load_mode() -> str:
-    """从共享文件读取当前玩法键，文件不存在或损坏时回退默认 4p。"""
+    """从共享文件读取当前玩法键，文件不存在或损坏时回退默认 sc_hz。"""
     try:
         with open(MODE_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
         m = data.get("mode", DEFAULT_MODE)
+        if m in ALIASES:
+            return ALIASES[m]
         if m in MODES:
             return m
     except (OSError, ValueError, TypeError):
