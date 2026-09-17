@@ -9,6 +9,7 @@
 合计 27 种牌型，每种 4 张，共 108 张。无字牌（东/南/西/北/中/发/白）。
 """
 from __future__ import annotations
+import itertools
 from typing import Dict, List, Optional, Set, Tuple
 
 
@@ -481,8 +482,9 @@ class SichuanAnalyzer:
         num_fixed_melds: int = 0,
         pool_remaining: Optional[List[int]] = None,
         dingque_suit: Optional[int] = None,
+        opponent_dingque_suits: Optional[List[int]] = None,
     ) -> List[Dict]:
-        """核心选叫与出牌分析器（EV 期望价值排序模型）。"""
+        """核心选叫与出牌分析器（EV 期望价值排序模型，含防点炮风险惩罚）。"""
         results = []
         suits = cls.get_suits_in_hand(counts)
 
@@ -614,6 +616,26 @@ class SichuanAnalyzer:
                             ev_score += 100.0
                             reason = "多余邻张"
 
+            # 防点炮与危险度综合扣分（EV 引擎升级）
+            danger_penalty = 0.0
+            discard_suit = tile_to_suit(discard)
+            discard_num = (discard % 9) + 1
+            rem_discard = pool_remaining[discard] if pool_remaining is not None else max(0, 4 - counts[discard])
+            seen_discard = 4 - rem_discard - counts[discard]
+
+            if not is_dingque_discard:
+                if opponent_dingque_suits and discard_suit in opponent_dingque_suits:
+                    # 对手定缺的花色，点炮率为 0，打出具有绝对安全性，给予安全奖励加分
+                    ev_score += 1500.0
+                elif seen_discard == 0 and discard_num in (4, 5, 6):
+                    # 中张纯生张（4/5/6 未见），后期点炮率极高，扣除危险减分
+                    danger_penalty = 2500.0
+                    ev_score -= danger_penalty
+                elif seen_discard == 0:
+                    # 一般生张
+                    danger_penalty = 1000.0
+                    ev_score -= danger_penalty
+
             if is_dingque_discard:
                 ev_score += 100000.0
 
@@ -626,6 +648,7 @@ class SichuanAnalyzer:
                 "ting_tiles": ting_mpsz_list,
                 "reason": reason,
                 "is_dingque": is_dingque_discard,
+                "danger_penalty": danger_penalty,
             })
 
             counts[discard] += 1
@@ -634,16 +657,106 @@ class SichuanAnalyzer:
         return results
 
     @classmethod
+    def check_tenpai_alert(
+        cls,
+        counts: List[int],
+        tiles_remaining_in_wall: int = 108,
+        dingque_suit: Optional[int] = None,
+        num_fixed_melds: int = 0,
+        pool_remaining: Optional[List[int]] = None,
+    ) -> Optional[Dict]:
+        """功能A：查大叫 / 查花猪 避坑雷达。
+        当牌墙剩余牌数 <= 16 时启动生死预警：
+        1. 查花猪预警：手牌若仍持有定缺花色，标红最高优先级必打牌。
+        2. 查大叫预警：手牌未听牌时，强提醒必须打出何牌以实现最快叫听。
+        """
+        if tiles_remaining_in_wall > 20:
+            return None
+
+        # 1. 查花猪生死警报检测
+        if dingque_suit is not None:
+            suit_start = dingque_suit * 9
+            dq_tiles_in_hand = [
+                suit_start + i for i in range(9) if counts[suit_start + i] > 0
+            ]
+            if dq_tiles_in_hand:
+                dq_names = [index27_to_chinese(t) for t in dq_tiles_in_hand]
+                return {
+                    "alert": True,
+                    "level": "CRITICAL",
+                    "type": "huazhu",
+                    "title": "🚨 查花猪生死警报",
+                    "message": f"牌墙仅剩 {tiles_remaining_in_wall} 张！手牌仍有定缺【{SUIT_NAMES[dingque_suit]}】({','.join(dq_names)})，必在流局前打光，否则全场顶格包赔！",
+                    "must_discard": [index27_to_mpsz(t) for t in dq_tiles_in_hand],
+                    "must_discard_cn": dq_names,
+                }
+
+        # 2. 查大叫叫听预警检测
+        waiting = cls.find_waiting_tiles(counts, num_fixed_melds, pool_remaining)
+        if waiting:
+            # 已经听牌，安全无忧
+            return {
+                "alert": False,
+                "level": "SAFE",
+                "type": "tenpai",
+                "title": "✅ 已叫听",
+                "message": f"当前已下叫听牌（余 {tiles_remaining_in_wall} 张），安心防守胡牌即可！",
+                "must_discard": [],
+                "must_discard_cn": [],
+            }
+
+        # 未听牌，必须找出能最快叫听的打法
+        shanten = cls.calculate_shanten(counts, num_fixed_melds)
+        best_discards = []
+        best_ukeire = -1
+        # 寻找打哪张能进入 1-向听或叫听
+        for d in range(27):
+            if counts[d] > 0:
+                counts[d] -= 1
+                w = cls.find_waiting_tiles(counts, num_fixed_melds, pool_remaining)
+                counts[d] += 1
+                if w:
+                    u = sum(w.values())
+                    if u > best_ukeire:
+                        best_ukeire = u
+                        best_discards = [d]
+                    elif u == best_ukeire:
+                        best_discards.append(d)
+
+        rec_mpsz = [index27_to_mpsz(d) for d in best_discards[:2]]
+        rec_cn = [index27_to_chinese(d) for d in best_discards[:2]]
+        rec_str = " 或 ".join(rec_cn) if rec_cn else "任意多余孤张"
+
+        return {
+            "alert": True,
+            "level": "WARNING" if tiles_remaining_in_wall > 10 else "CRITICAL",
+            "type": "daxiao",
+            "title": "⚠️ 查大叫避坑雷达",
+            "message": f"牌墙仅剩 {tiles_remaining_in_wall} 张且尚未叫听！打【{rec_str}】可最速叫听，避免流局巨额赔叫！",
+            "must_discard": rec_mpsz,
+            "must_discard_cn": rec_cn,
+        }
+
+    @classmethod
     def evaluate_defense_radar(
         cls,
         counts: List[int],
         pool_remaining: Optional[List[int]] = None,
         opponents_dingque: Optional[List[int]] = None,
+        opponents_danger_suits: Optional[List[int]] = None,
     ) -> List[Dict]:
-        """防点炮雷达评级 (SAFE / SUSPICIOUS / DANGER)"""
+        """防点炮雷达评级系统 (SAFE / SUSPICIOUS / DANGER)
+        全息追踪对手打牌习惯与弃牌特征：
+        - 绝对安全 (SAFE)：对手定缺门、绝张现物（已出4张或场上见3张）、或已被验证的现物。
+        - 疑牌 (SUSPICIOUS)：场上见 1~2 张的邻张或偏张。
+        - 极度危险 (DANGER)：对手清一色主攻门、中心中张(4/5/6)纯生张(0见)。
+        """
         ratings = []
         if opponents_dingque is None:
             opponents_dingque = []
+        if opponents_danger_suits is None:
+            opponents_danger_suits = []
+
         for t in range(27):
             if counts[t] <= 0:
                 continue
@@ -656,22 +769,25 @@ class SichuanAnalyzer:
 
             if s in opponents_dingque:
                 lvl = "SAFE"
-                reason = f"防点炮天条：场上有对手定缺【{SUIT_NAMES[s]}】，该门对其为绝对安全牌"
+                reason = f"绝对安全：场上有对手定缺【{SUIT_NAMES[s]}】，对其绝不点炮"
             elif rem == 0 or seen >= 3:
                 lvl = "SAFE"
-                reason = f"绝张现物：场上已见 {seen} 张，无人能以此牌胡牌"
-            elif is_edge and seen >= 1:
-                lvl = "SAFE"
-                reason = f"边张安全：1/9 偏张且场上已见 {seen} 张，点炮率极低"
+                reason = f"现物绝张：场上已见 {seen} 张，无人能以此牌胡牌"
+            elif s in opponents_danger_suits and seen == 0:
+                lvl = "DANGER"
+                reason = f"极度高危：对手主攻【{SUIT_NAMES[s]}】门，此牌为未见生张，点炮率极高！"
             elif is_middle and seen == 0:
                 lvl = "DANGER"
-                reason = f"极度高危：中心张 {index27_to_chinese(t)} 为纯生张(未见)，点炮率极高，切勿轻易打出！"
+                reason = f"高危生张：中心张 {index27_to_chinese(t)} 纯生张，切勿在深牌墙轻易打出"
+            elif is_edge and seen >= 1:
+                lvl = "SAFE"
+                reason = f"边张相对安全：1/9 偏张且已见 {seen} 张"
             elif seen == 0:
                 lvl = "SUSPICIOUS"
-                reason = f"疑牌生张：{index27_to_chinese(t)} 场上尚未出现，存在叫口风险"
+                reason = f"疑牌生张：{index27_to_chinese(t)} 尚未出现，存在暗叫风险"
             else:
                 lvl = "SUSPICIOUS"
-                reason = f"一般疑牌：场上已见 {seen} 张，注意防守"
+                reason = f"一般张：场上已见 {seen} 张，常规防守"
 
             ratings.append({
                 "tile": index27_to_mpsz(t),
@@ -685,7 +801,12 @@ class SichuanAnalyzer:
 
     @classmethod
     def recommend_huan_san_zhang(cls, counts: List[int]) -> Dict:
-        """开局换三张推荐：换顺不换对，拆孤张，防送清一色"""
+        """博弈级换三张算法（穷举 C(N, 3) 组合博弈最优解）。
+        核心博弈准则：
+        1. 留大做大：若手牌某一门特别长（>=7张），坚决保护该门做清一色。
+        2. 换顺不换对：优先换全孤单张，绝对严禁拆散已成刻子、顺子或将对。
+        3. 弃子防喂：尽量换出偏张/孤张（1/9/偏杂张），减少喂饱下家的概率。
+        """
         suit_tiles = {SUIT_M: [], SUIT_P: [], SUIT_S: []}
         for t in range(27):
             for _ in range(counts[t]):
@@ -693,43 +814,97 @@ class SichuanAnalyzer:
 
         suits_with_at_least_3 = [s for s, tiles in suit_tiles.items() if len(tiles) >= 3]
         if not suits_with_at_least_3:
-            return {"viable": False, "reason": "无满3张的花色可换"}
+            return {"viable": False, "reason": "手牌中无任意单门达到3张以上"}
 
-        def suit_cost(s):
-            tiles = suit_tiles[s]
-            total = len(tiles)
-            sub_c = [0] * 9
-            for t in tiles:
-                sub_c[t % 9] += 1
-            isolated = sum(1 for i in range(9) if sub_c[i] == 1 and (i == 0 or sub_c[i - 1] == 0) and (i == 8 or sub_c[i + 1] == 0))
-            return (total, -isolated)
+        # 评估各门花色手牌长度，判断是否有清一色潜在优势
+        suit_lengths = {s: len(suit_tiles[s]) for s in (SUIT_M, SUIT_P, SUIT_S)}
+        max_suit = max(suit_lengths, key=suit_lengths.get)
+        max_len = suit_lengths[max_suit]
 
-        best_suit = min(suits_with_at_least_3, key=suit_cost)
-        cand_tiles = suit_tiles[best_suit]
+        best_overall = None
+        best_score = -999999.0
 
-        def tile_priority(t):
-            num = (t % 9) + 1
-            c = counts[t]
-            is_edge = (num in (1, 9))
-            is_near_edge = (num in (2, 8))
-            is_mid = (num in (4, 5, 6))
-            p = 0
-            if c == 1: p += 10
-            elif c == 2: p += 50
-            else: p += 100
-            if is_edge: p += 1
-            elif is_near_edge: p += 3
-            elif is_mid: p += 8
-            return p
+        for suit in suits_with_at_least_3:
+            tiles_in_suit = suit_tiles[suit]
+            total_in_suit = len(tiles_in_suit)
 
-        cand_tiles.sort(key=tile_priority)
-        chosen = cand_tiles[:3]
+            # 若另一门达到 8+ 张，选择换出此门的意愿极高（推动清一色）
+            is_sacrificial_suit = (suit != max_suit and max_len >= 8)
+
+            # 枚举该花色下所有 3 张牌的组合 (C(N, 3))
+            unique_combos = set(itertools.combinations(tiles_in_suit, 3))
+
+            for combo in unique_combos:
+                score = 0.0
+                # 换出这 3 张牌后，评估本门剩余牌型损失
+                sub_c = [0] * 9
+                for t in tiles_in_suit:
+                    sub_c[t % 9] += 1
+
+                combo_c = [0] * 9
+                for t in combo:
+                    combo_c[t % 9] += 1
+
+                # 惩罚项：破坏对子 / 刻子
+                for i in range(9):
+                    if combo_c[i] > 0:
+                        orig = sub_c[i]
+                        if orig >= 3 and combo_c[i] >= 1:
+                            score -= 300.0 * combo_c[i]  # 拆刻子严重扣分
+                        elif orig == 2 and combo_c[i] == 1:
+                            score -= 150.0  # 拆对子扣分
+                        elif orig == 1:
+                            score += 80.0   # 成功甩掉孤张加分
+
+                # 惩罚项：破坏已成顺子
+                rem_c = [sub_c[i] - combo_c[i] for i in range(9)]
+                for i in range(7):
+                    if sub_c[i] >= 1 and sub_c[i+1] >= 1 and sub_c[i+2] >= 1:
+                        if not (rem_c[i] >= 1 and rem_c[i+1] >= 1 and rem_c[i+2] >= 1):
+                            score -= 120.0  # 拆顺子扣分
+
+                # 奖励项：换出偏张/孤张（减少给下家喂好搭子的风险）
+                for t in combo:
+                    num = (t % 9) + 1
+                    if num in (1, 9):
+                        score += 30.0
+                    elif num in (2, 8):
+                        score += 15.0
+                    elif num in (4, 5, 6):
+                        score -= 10.0  # 换中张容易送给下家成顺子
+
+                # 策略加分：若此花色张数本就最少，断门成本最低，换出全加分
+                score += (14 - total_in_suit) * 25.0
+                if is_sacrificial_suit:
+                    score += 250.0
+
+                if score > best_score:
+                    best_score = score
+                    best_overall = {
+                        "suit": suit,
+                        "combo": list(combo),
+                    }
+
+        if not best_overall:
+            return {"viable": False, "reason": "未找到可行换三张方案"}
+
+        chosen_suit = best_overall["suit"]
+        chosen_tiles = sorted(best_overall["combo"])
+        is_qing = (max_len >= 8 and chosen_suit != max_suit)
+        target_name = SUIT_NAMES[max_suit] if is_qing else None
+
+        reason_parts = [f"推荐换出【{SUIT_NAMES[chosen_suit]}】"]
+        if is_qing:
+            reason_parts.append(f"（留大做大：全力冲刺【{target_name}】清一色）")
+        else:
+            reason_parts.append(f"（仅持{suit_lengths[chosen_suit]}张，拆换成本最低，优先断门）")
+
         return {
             "viable": True,
-            "suit": SUIT_NAMES[best_suit],
-            "tiles": [index27_to_mpsz(t) for t in chosen],
-            "tiles_cn": [index27_to_chinese(t) for t in chosen],
-            "reason": f"【{SUIT_NAMES[best_suit]}】仅持 {len(cand_tiles)} 张，拆换成本最低，优先换出孤张偏张"
+            "suit": SUIT_NAMES[chosen_suit],
+            "tiles": [index27_to_mpsz(t) for t in chosen_tiles],
+            "tiles_cn": [index27_to_chinese(t) for t in chosen_tiles],
+            "reason": "".join(reason_parts),
         }
 
     @classmethod
@@ -758,8 +933,9 @@ class SichuanAnalyzer:
         disc_counts: Optional[List[int]] = None,
         meld_counts: Optional[List[int]] = None,
     ) -> Dict:
-        """生成 9x3 记牌器存活矩阵"""
+        """功能B：全场活牌厚度透视表（含 9x3 存活矩阵 + 活跃大张/绝张汇总透视）"""
         matrix = {}
+        all_rem_tiles = []
         for s in (SUIT_M, SUIT_P, SUIT_S):
             sname = SUIT_NAMES[s]
             row = []
@@ -771,12 +947,28 @@ class SichuanAnalyzer:
                 if meld_counts and t < len(meld_counts):
                     vis += meld_counts[t]
                 rem = max(0, 4 - vis)
-                row.append({
+                tile_info = {
                     "tile": index27_to_mpsz(t),
                     "name": f"{num}{sname}",
                     "remaining": rem,
                     "status": "绝张" if rem == 0 else f"{rem}张",
-                    "is_zero": (rem == 0)
-                })
+                    "is_zero": (rem == 0),
+                    "is_hot": (rem >= 3),
+                }
+                row.append(tile_info)
+                all_rem_tiles.append(tile_info)
             matrix[sname] = row
-        return matrix
+
+        # 全场活跃大张透视（剩余 3~4 张的未见/多存活牌，按存活张数降序）
+        hot_tiles = [t for t in all_rem_tiles if t["remaining"] >= 3]
+        hot_tiles.sort(key=lambda x: x["remaining"], reverse=True)
+
+        # 绝张死牌汇总
+        dead_tiles = [t for t in all_rem_tiles if t["remaining"] == 0]
+
+        return {
+            "matrix": matrix,
+            "hot_tiles": hot_tiles[:6],
+            "dead_tiles": dead_tiles,
+        }
+

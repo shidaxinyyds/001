@@ -1079,17 +1079,21 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                   final Color cellBg;
                   final Color borderColor;
                   if (cnt == 0) {
-                    numColor = Colors.white30;
-                    cellBg = const Color(0xFF1E2126);
+                    numColor = Colors.white24;
+                    cellBg = const Color(0xFF181B20);
                     borderColor = Colors.white10;
                   } else if (cnt == 1) {
                     numColor = const Color(0xFFFFB74D); // 明亮金橙（仅剩1张）
-                    cellBg = const Color(0xFF2D2013);   // 纯正暖深琥珀底（彻底告别半透明脏棕色）
+                    cellBg = const Color(0xFF2D2013);   // 纯正暖深琥珀底
                     borderColor = const Color(0xFFFF9800);
-                  } else {
-                    numColor = const Color(0xFF81C784); // 翡翠绿（2~4张充裕）
+                  } else if (cnt == 2) {
+                    numColor = const Color(0xFF81C784); // 翡翠绿（2张）
                     cellBg = const Color(0xFF142416);   // 纯正墨绿底
                     borderColor = const Color(0xFF2E7D32);
+                  } else {
+                    numColor = const Color(0xFF00E676); // 活跃热张（3~4张存活，荧光高亮）
+                    cellBg = const Color(0xFF0D331A);
+                    borderColor = const Color(0xFF00E676);
                   }
 
                   return Container(
@@ -1163,17 +1167,21 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                   final Color cellBg;
                   final Color borderColor;
                   if (cnt == 0) {
-                    numColor = Colors.white30;
-                    cellBg = const Color(0xFF1E2126);
+                    numColor = Colors.white24;
+                    cellBg = const Color(0xFF181B20);
                     borderColor = Colors.white10;
                   } else if (cnt == 1) {
                     numColor = const Color(0xFFFFB74D);
                     cellBg = const Color(0xFF2D2013);
                     borderColor = const Color(0xFFFF9800);
-                  } else {
+                  } else if (cnt == 2) {
                     numColor = const Color(0xFF81C784);
                     cellBg = const Color(0xFF142416);
                     borderColor = const Color(0xFF2E7D32);
+                  } else {
+                    numColor = const Color(0xFF00E676);
+                    cellBg = const Color(0xFF0D331A);
+                    borderColor = const Color(0xFF00E676);
                   }
 
                   return Padding(
@@ -1293,17 +1301,67 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           if (_matrixExpanded) ...[
             const SizedBox(height: 3),
             Padding(
-              padding: const EdgeInsets.only(bottom: 4, top: 1, left: 18),
+              padding: const EdgeInsets.only(bottom: 4, top: 1, left: 10),
               child: Row(
                 children: [
-                  _legendDot(const Color(0xFF81C784), '充裕(2-4)'),
-                  const SizedBox(width: 8),
-                  _legendDot(const Color(0xFFFFB74D), '仅剩1张'),
-                  const SizedBox(width: 8),
+                  _legendDot(const Color(0xFF00E676), '热张(3-4)'),
+                  const SizedBox(width: 7),
+                  _legendDot(const Color(0xFF81C784), '充裕(2)'),
+                  const SizedBox(width: 7),
+                  _legendDot(const Color(0xFFFFB74D), '仅1张'),
+                  const SizedBox(width: 7),
                   _legendDot(Colors.white38, '绝张(0)'),
                 ],
               ),
             ),
+            // 功能B：全场活跃大张快速透视行
+            if (result?['hot_tiles'] is List && (result!['hot_tiles'] as List).isNotEmpty) ...[
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4, left: 2),
+                child: Row(
+                  children: [
+                    const Text(
+                      '🔥热张: ',
+                      style: TextStyle(
+                        color: Color(0xFF69F0AE),
+                        fontSize: 8.5,
+                        fontWeight: FontWeight.bold,
+                        decoration: TextDecoration.none,
+                      ),
+                    ),
+                    Expanded(
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(
+                          children: [
+                            for (final ht in (result!['hot_tiles'] as List).take(6)) ...[
+                              Container(
+                                margin: const EdgeInsets.only(right: 4),
+                                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF0D331A),
+                                  borderRadius: BorderRadius.circular(3),
+                                  border: Border.all(color: const Color(0xFF00E676), width: 0.6),
+                                ),
+                                child: Text(
+                                  '${ht['name']}(${ht['remaining']})',
+                                  style: const TextStyle(
+                                    color: Color(0xFFB9F6CA),
+                                    fontSize: 8,
+                                    fontWeight: FontWeight.bold,
+                                    decoration: TextDecoration.none,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
             buildRow('万', const Color(0xFF1E6B7A), m),
             buildRow('筒', const Color(0xFF1E6B7A), p),
             buildRow('条', const Color(0xFF66BB6A), s),
@@ -1388,39 +1446,205 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     );
   }
 
-  Widget _adviceSection(List<dynamic> advice, String best, int count) {
-    final status = result?['status'] as String? ?? '';
-    final bool isDingquePhase = (result?['dingque_phase'] == true || status == 'dingque') && advice.isEmpty;
-    if (isDingquePhase) {
-      final msg = (result?['message'] as String?) ?? '正在推演最佳断门…';
-      return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
-        decoration: BoxDecoration(
-          color: const Color(0x33FFB300),
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: const Color(0xFFFFB300), width: 0.8),
+  Widget _buildSwapAdviceWidget(Map<String, dynamic> swap) {
+    final tiles = (swap['tiles'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? [];
+    final reason = swap['reason'] as String? ?? '开局最优换三张';
+    final suit = swap['suit'] as String? ?? '';
+    return Container(
+      margin: const EdgeInsets.only(bottom: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 6),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFF281547), Color(0xFF4A154B)],
         ),
-        child: Row(
-          children: [
-            const Icon(Icons.lightbulb, color: Color(0xFFFFD54F), size: 16),
-            const SizedBox(width: 6),
-            Expanded(
-              child: Text(
-                '【定缺阶段】$msg',
-                style: const TextStyle(
-                  color: Color(0xFFFFF9C4),
-                  fontSize: 10.5,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: const Color(0xFFCE93D8), width: 0.8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.swap_horiz_rounded, color: Color(0xFFEA80FC), size: 14),
+              const SizedBox(width: 4),
+              const Text(
+                '【换三张博弈】',
+                style: TextStyle(
+                  color: Color(0xFFEA80FC),
+                  fontSize: 10,
                   fontWeight: FontWeight.bold,
                   decoration: TextDecoration.none,
                 ),
               ),
+              const Spacer(),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                decoration: BoxDecoration(
+                  color: Colors.white.withAlpha(20),
+                  borderRadius: BorderRadius.circular(3),
+                ),
+                child: Text(
+                  '换【$suit】',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 8.5,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              const Text(
+                '首选换出: ',
+                style: TextStyle(color: Colors.white70, fontSize: 9.5),
+              ),
+              for (final t in tiles) ...[
+                TileChip(tile: t, size: 19),
+                const SizedBox(width: 3),
+              ],
+            ],
+          ),
+          const SizedBox(height: 2),
+          Text(
+            reason,
+            style: const TextStyle(
+              color: Color(0xFFE1BEE7),
+              fontSize: 8.5,
+              height: 1.1,
+              decoration: TextDecoration.none,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTenpaiAlertWidget(Map<String, dynamic> alert) {
+    final isHuazhu = alert['type'] == 'huazhu';
+    final title = alert['title'] as String? ?? '预警';
+    final msg = alert['message'] as String? ?? '';
+    final mustDiscards = (alert['must_discard'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? [];
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
+      decoration: BoxDecoration(
+        color: isHuazhu ? const Color(0xFF880E4F).withAlpha(190) : const Color(0xFFBF360C).withAlpha(190),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(
+          color: isHuazhu ? const Color(0xFFFF4081) : const Color(0xFFFF6D00),
+          width: 1.0,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                isHuazhu ? Icons.dangerous_rounded : Icons.warning_amber_rounded,
+                color: isHuazhu ? const Color(0xFFFF80AB) : const Color(0xFFFFD180),
+                size: 13,
+              ),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Text(
+                  title,
+                  style: TextStyle(
+                    color: isHuazhu ? const Color(0xFFFFEBEE) : const Color(0xFFFFF8E1),
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                    decoration: TextDecoration.none,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 2),
+          Text(
+            msg,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 8.5,
+              height: 1.15,
+              decoration: TextDecoration.none,
+            ),
+          ),
+          if (mustDiscards.isNotEmpty) ...[
+            const SizedBox(height: 3),
+            Row(
+              children: [
+                Text(
+                  isHuazhu ? '绝不能留: ' : '下叫必打: ',
+                  style: const TextStyle(color: Colors.white70, fontSize: 8.5),
+                ),
+                for (final t in mustDiscards) ...[
+                  TileChip(tile: t, size: 17),
+                  const SizedBox(width: 3),
+                ],
+              ],
             ),
           ],
-        ),
+        ],
+      ),
+    );
+  }
+
+  Widget _adviceSection(List<dynamic> advice, String best, int count) {
+    final status = result?['status'] as String? ?? '';
+    final bool isDingquePhase = (result?['dingque_phase'] == true || status == 'dingque') && advice.isEmpty;
+    final swapData = result?['swap_advice'] as Map<String, dynamic>?;
+    final alertData = result?['tenpai_alert'] as Map<String, dynamic>?;
+
+    final Widget? swapWidget = (swapData != null && swapData['viable'] == true)
+        ? _buildSwapAdviceWidget(swapData)
+        : null;
+    final Widget? alertWidget = (alertData != null && alertData['alert'] == true)
+        ? _buildTenpaiAlertWidget(alertData)
+        : null;
+
+    if (isDingquePhase) {
+      final msg = (result?['message'] as String?) ?? '正在推演最佳断门…';
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (swapWidget != null) swapWidget,
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+            decoration: BoxDecoration(
+              color: const Color(0x33FFB300),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: const Color(0xFFFFB300), width: 0.8),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.lightbulb, color: Color(0xFFFFD54F), size: 16),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    '【定缺阶段】$msg',
+                    style: const TextStyle(
+                      color: Color(0xFFFFF9C4),
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.bold,
+                      decoration: TextDecoration.none,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       );
     }
 
     if (advice.isEmpty) {
+      if (swapWidget != null) {
+        return swapWidget;
+      }
       final String hint;
       if (status == 'waiting') {
         hint = '等待牌局开始（进入游戏后自动识别）';
@@ -1465,117 +1689,191 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final topUkeire = (top['ukeire'] ?? 0) as int;
     final topReason = top['reason'] as String?;
     final bool isDingque = (top['is_dingque'] ?? false) as bool;
+    final String? defenseLevel = top['defense_level'] as String?;
+    final String? defenseReason = top['defense_reason'] as String?;
 
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
-      decoration: BoxDecoration(
-        color: const Color(0x33004D40), // 墨绿微底
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: const Color(0x6680CBC4), width: 0.8),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (alertWidget != null) alertWidget,
+        if (swapWidget != null) swapWidget,
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
+          decoration: BoxDecoration(
+            color: const Color(0x33004D40), // 墨绿微底
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: const Color(0x6680CBC4), width: 0.8),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
-                mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Text(
-                    '建议打',
-                    style: TextStyle(
-                      color: Colors.white70,
-                      fontSize: 11,
-                      decoration: TextDecoration.none,
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  TileChip(tile: topTile, size: 21),
-                  if (isDingque) ...[
-                    const SizedBox(width: 5),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF00695C),
-                        borderRadius: BorderRadius.circular(3),
-                      ),
-                      child: const Text(
-                        '定缺',
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text(
+                        '建议打',
                         style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 8.5,
+                          color: Colors.white70,
+                          fontSize: 11,
+                          decoration: TextDecoration.none,
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      TileChip(tile: topTile, size: 21),
+                      if (isDingque) ...[
+                        const SizedBox(width: 4),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF00695C),
+                            borderRadius: BorderRadius.circular(3),
+                          ),
+                          child: const Text(
+                            '定缺',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 8,
+                              fontWeight: FontWeight.bold,
+                              decoration: TextDecoration.none,
+                            ),
+                          ),
+                        ),
+                      ],
+                      if (defenseLevel == 'SAFE') ...[
+                        const SizedBox(width: 4),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF1B5E20),
+                            borderRadius: BorderRadius.circular(3),
+                            border: Border.all(color: const Color(0xFF81C784), width: 0.5),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.shield, color: Color(0xFFC8E6C9), size: 8),
+                              SizedBox(width: 1),
+                              Text(
+                                '安全',
+                                style: TextStyle(
+                                  color: Color(0xFFE8F5E9),
+                                  fontSize: 8,
+                                  fontWeight: FontWeight.bold,
+                                  decoration: TextDecoration.none,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ] else if (defenseLevel == 'DANGER') ...[
+                        const SizedBox(width: 4),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFB71C1C),
+                            borderRadius: BorderRadius.circular(3),
+                            border: Border.all(color: const Color(0xFFFF8A80), width: 0.5),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.warning, color: Color(0xFFFFCDD2), size: 8),
+                              SizedBox(width: 1),
+                              Text(
+                                '高危',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 8,
+                                  fontWeight: FontWeight.bold,
+                                  decoration: TextDecoration.none,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                  if (topUkeire > 0)
+                    Flexible(
+                      child: Text(
+                        '进张 $topUkeire 张',
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.lightGreenAccent,
+                          fontSize: 11,
                           fontWeight: FontWeight.bold,
                           decoration: TextDecoration.none,
                         ),
                       ),
                     ),
-                  ],
                 ],
               ),
-              if (topUkeire > 0)
-                Flexible(
-                  child: Text(
-                    '进张 $topUkeire 张',
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Colors.lightGreenAccent,
-                      fontSize: 11,
-                      fontWeight: FontWeight.bold,
-                      decoration: TextDecoration.none,
-                    ),
+              if (topReason != null && topReason.isNotEmpty) ...[
+                const SizedBox(height: 3),
+                Text(
+                  topReason,
+                  style: const TextStyle(
+                    color: Color(0xFF80CBC4),
+                    fontSize: 9.5,
+                    height: 1.15,
+                    decoration: TextDecoration.none,
                   ),
                 ),
+              ],
+              if (defenseReason != null && defenseReason.isNotEmpty && defenseLevel != 'SAFE') ...[
+                const SizedBox(height: 2),
+                Text(
+                  '防守: $defenseReason',
+                  style: TextStyle(
+                    color: defenseLevel == 'DANGER' ? const Color(0xFFFF8A80) : const Color(0xFFFFCC80),
+                    fontSize: 8.5,
+                    height: 1.1,
+                    decoration: TextDecoration.none,
+                  ),
+                ),
+              ],
+              if (sorted.length > 1) ...[
+                const SizedBox(height: 4),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 2,
+                  children: [
+                    for (int i = 1; i < sorted.length && i < 3; i++)
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            '次选:',
+                            style: TextStyle(
+                              color: Colors.white.withAlpha(140),
+                              fontSize: 9,
+                              decoration: TextDecoration.none,
+                            ),
+                          ),
+                          const SizedBox(width: 2),
+                          TileChip(tile: (sorted[i]['tile'] ?? '') as String, size: 16),
+                          const SizedBox(width: 2),
+                          Text(
+                            '${sorted[i]['ukeire'] ?? 0}张',
+                            style: TextStyle(
+                              color: Colors.white.withAlpha(160),
+                              fontSize: 9,
+                              decoration: TextDecoration.none,
+                            ),
+                          ),
+                        ],
+                      ),
+                  ],
+                ),
+              ],
             ],
           ),
-          if (topReason != null && topReason.isNotEmpty) ...[
-            const SizedBox(height: 3),
-            Text(
-              topReason,
-              style: const TextStyle(
-                color: Color(0xFF80CBC4),
-                fontSize: 9.5,
-                height: 1.15,
-                decoration: TextDecoration.none,
-              ),
-            ),
-          ],
-          if (sorted.length > 1) ...[
-            const SizedBox(height: 4),
-            Wrap(
-              spacing: 6,
-              runSpacing: 2,
-              children: [
-                for (int i = 1; i < sorted.length && i < 3; i++)
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        '次选:',
-                        style: TextStyle(
-                          color: Colors.white.withAlpha(140),
-                          fontSize: 9,
-                          decoration: TextDecoration.none,
-                        ),
-                      ),
-                      const SizedBox(width: 2),
-                      TileChip(tile: (sorted[i]['tile'] ?? '') as String, size: 16),
-                      const SizedBox(width: 2),
-                      Text(
-                        '${sorted[i]['ukeire'] ?? 0}张',
-                        style: TextStyle(
-                          color: Colors.white.withAlpha(160),
-                          fontSize: 9,
-                          decoration: TextDecoration.none,
-                        ),
-                      ),
-                    ],
-                  ),
-              ],
-            ),
-          ],
-        ],
-      ),
+        ),
+      ],
     );
   }
 

@@ -19,12 +19,17 @@ class Trainer:
         self.disc_counts: List[int] = [0] * 34
         self.meld_counts: List[int] = [0] * 34
         self.dingque_suit: Optional[int] = None
+        self.opponent_dingque_suits: List[int] = []
 
         self.sichuan_results: List[Dict] = []
 
     def set_dingque(self, suit: Optional[int]) -> None:
         """设置四川麻将定缺门（0=万, 1=筒, 2=条）。"""
         self.dingque_suit = suit
+
+    def set_opponent_dingque(self, suits: List[int]) -> None:
+        """设置对手定缺门列表，供防点炮雷达扣减危险与安全加分。"""
+        self.opponent_dingque_suits = list(suits) if suits else []
 
     def set_visible(self, disc_counts: List[int], meld_counts: List[int]) -> None:
         """引擎在每帧识别后调用：传入当前牌河 / 副露计数，供进张计算扣减绝张。"""
@@ -62,7 +67,10 @@ class Trainer:
                     pool_remaining[i] = max(0, 4 - vis)
 
                 self.sichuan_results = SichuanAnalyzer.analyze_discards(
-                    counts, pool_remaining=pool_remaining, dingque_suit=self.dingque_suit
+                    counts,
+                    pool_remaining=pool_remaining,
+                    dingque_suit=self.dingque_suit,
+                    opponent_dingque_suits=self.opponent_dingque_suits,
                 )
                 res = {}
                 for item in self.sichuan_results:

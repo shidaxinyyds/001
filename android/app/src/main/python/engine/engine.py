@@ -767,6 +767,74 @@ def detect_dingque(screen_img: np.ndarray) -> Tuple[Optional[int], Optional[str]
         return None, None
 
 
+def _detect_badge_suit(badge_crop: np.ndarray) -> Optional[int]:
+    if badge_crop is None or badge_crop.size == 0 or badge_crop.shape[0] < 8 or badge_crop.shape[1] < 8:
+        return None
+    hsv = cv2.cvtColor(badge_crop, cv2.COLOR_BGR2HSV)
+    green_mask = (hsv[:, :, 0] >= 35) & (hsv[:, :, 0] <= 85) & (hsv[:, :, 1] > 60) & (hsv[:, :, 2] > 60)
+    red_mask1 = (hsv[:, :, 0] >= 0) & (hsv[:, :, 0] <= 10) & (hsv[:, :, 1] > 60) & (hsv[:, :, 2] > 60)
+    red_mask2 = (hsv[:, :, 0] >= 170) & (hsv[:, :, 0] <= 180) & (hsv[:, :, 1] > 60) & (hsv[:, :, 2] > 60)
+    red_mask = red_mask1 | red_mask2
+    blue_mask = (hsv[:, :, 0] >= 95) & (hsv[:, :, 0] <= 135) & (hsv[:, :, 1] > 60) & (hsv[:, :, 2] > 60)
+    yellow_mask = (hsv[:, :, 0] >= 14) & (hsv[:, :, 0] <= 35) & (hsv[:, :, 1] > 80) & (hsv[:, :, 2] > 80)
+
+    g_cnt = int(np.sum(green_mask))
+    r_cnt = int(np.sum(red_mask))
+    b_cnt = int(np.sum(blue_mask))
+    y_cnt = int(np.sum(yellow_mask))
+    p_cnt = max(b_cnt, y_cnt)
+
+    if r_cnt > max(g_cnt, p_cnt) and r_cnt > 35:
+        return 0
+    elif g_cnt > max(r_cnt, p_cnt) and g_cnt > 35:
+        return 2
+    elif p_cnt > max(r_cnt, g_cnt) and p_cnt > 35:
+        return 1
+    return None
+
+
+def detect_opponents_dingque(screen_img: np.ndarray) -> List[int]:
+    """检测场上三位对手的定缺徽章（右家/对家/左家），返回对手定缺门列表 [suit_idx, ...]"""
+    try:
+        h, w = screen_img.shape[:2]
+        rois = [
+            (int(w * 0.86), int(w * 0.96), int(h * 0.32), int(h * 0.48)),
+            (int(w * 0.26), int(w * 0.40), int(h * 0.06), int(h * 0.20)),
+            (int(w * 0.60), int(w * 0.74), int(h * 0.06), int(h * 0.20)),
+            (int(w * 0.04), int(w * 0.14), int(h * 0.26), int(h * 0.40)),
+        ]
+        suits = []
+        for (sx, ex, sy, ey) in rois:
+            crop = screen_img[sy:ey, sx:ex]
+            s = _detect_badge_suit(crop)
+            if s is not None and s not in suits:
+                suits.append(s)
+        return suits
+    except Exception:
+        return []
+
+
+def infer_opponents_from_discards(disc_counts: List[int]) -> Tuple[List[int], List[int]]:
+    """根据牌桌弃牌分布反推对手定缺门（安全门）与主攻门（极度危险门）。"""
+    try:
+        wan_cnt = sum(disc_counts[0:9])
+        tong_cnt = sum(disc_counts[9:18])
+        tiao_cnt = sum(disc_counts[18:27])
+        total = wan_cnt + tong_cnt + tiao_cnt
+        safe_suits = []
+        danger_suits = []
+        if total >= 8:
+            suit_dict = {0: wan_cnt, 1: tong_cnt, 2: tiao_cnt}
+            for s, c in suit_dict.items():
+                if c >= 6:
+                    safe_suits.append(s)
+                elif c <= 1 and (total - c) >= 10:
+                    danger_suits.append(s)
+        return safe_suits, danger_suits
+    except Exception:
+        return [], []
+
+
 def detect_river_discards(image: np.ndarray, detector, mode: str = "4p") -> List[str]:
     """高精度牌桌弃牌检测：严格排除中央骰子盒、倒计时、房间名及头像，
     仅提取牌桌中央四方牌河内真实打出的麻将牌。"""
@@ -1713,7 +1781,7 @@ class Engine:
             return image
         return self._rotate_to(image, self._orient)
 
-    def _heuristic_discard_advice(self, hand_mpsz: str, mode: str = "sc", dingque_suit: Optional[int] = None, disc_counts=None) -> List[Dict]:
+    def _heuristic_discard_advice(self, hand_mpsz: str, mode: str = "sc", dingque_suit: Optional[int] = None, disc_counts=None, opponent_dingque_suits: Optional[List[int]] = None) -> List[Dict]:
         """启发式最优出牌推演：在任何张数、冷启动或非标手牌下，永远给出明确最优解。"""
         if not hand_mpsz or len(hand_mpsz) < 2:
             return []
@@ -1724,7 +1792,11 @@ class Engine:
                 from sichuan import SichuanAnalyzer
                 hand_indices = SichuanAnalyzer.parse_hand_mpsz(hand_mpsz)
                 c28 = SichuanAnalyzer.counts_from_tiles(hand_indices)
-                sc_res = SichuanAnalyzer.analyze_discards(c28, dingque_suit=dingque_suit)
+                sc_res = SichuanAnalyzer.analyze_discards(
+                    c28,
+                    dingque_suit=dingque_suit,
+                    opponent_dingque_suits=opponent_dingque_suits,
+                )
                 if sc_res:
                     return [{
                         "tile": r["tile"],
@@ -2244,6 +2316,18 @@ class Engine:
                 if not game_already_started and hasattr(detector, "is_dingque_phase"):
                     is_dq_phase = detector.is_dingque_phase(full_for_preview)
 
+            # 探测对手定缺徽章与根据弃牌反推对手攻防倾向（防点炮预警）
+            opponent_dingque_suits: List[int] = []
+            opponent_danger_suits: List[int] = []
+            if self.mode == "sc":
+                try:
+                    op_dq = detect_opponents_dingque(full_for_preview)
+                    disc_safe, disc_danger = infer_opponents_from_discards(disc_counts)
+                    opponent_dingque_suits = list(dict.fromkeys(op_dq + disc_safe))
+                    opponent_danger_suits = disc_danger
+                except Exception:
+                    pass
+
             status = "no_tiles"
             commentary: Optional[str] = None
             shanten: Optional[int] = None
@@ -2282,8 +2366,11 @@ class Engine:
                 tile_count = len(hand)
                 status = "ok"
                 commentary = self.update_trainer(hand)
-                if self.mode == "sc" and dingque_suit is not None and self.trainer is not None:
-                    self.trainer.set_dingque(dingque_suit)
+                if self.mode == "sc" and self.trainer is not None:
+                    if dingque_suit is not None:
+                        self.trainer.set_dingque(dingque_suit)
+                    if opponent_dingque_suits:
+                        self.trainer.set_opponent_dingque(opponent_dingque_suits)
                 shanten, advice = self.build_advice(hand, disc_counts)
                 self._stable_hand_mpsz = hand_mpsz
                 self._stable_hand_count = tile_count
@@ -2352,7 +2439,13 @@ class Engine:
 
             # 最终兜底：若手牌有内容但 advice 仍为空，启动全手牌启发式推演（永远保证建议非空）
             if not advice and hand_mpsz and tile_count >= 4:
-                advice = self._heuristic_discard_advice(hand_mpsz, mode=self.mode, dingque_suit=dingque_suit, disc_counts=disc_counts)
+                advice = self._heuristic_discard_advice(
+                    hand_mpsz,
+                    mode=self.mode,
+                    dingque_suit=dingque_suit,
+                    disc_counts=disc_counts,
+                    opponent_dingque_suits=opponent_dingque_suits,
+                )
                 if shanten is None:
                     shanten = 2
 
@@ -2441,6 +2534,58 @@ class Engine:
                 known = sum(hand_counts_final[i] for i in avail_list) + sum(disc_counts_out[i] for i in avail_list)
                 remaining = max(0, wall_total - known)
                 dead = sum(1 for i in avail_list if hand_counts_final[i] + disc_counts_out[i] >= 4)
+
+            # 扩展功能计算：查大叫/查花猪雷达(A)、活牌厚度透视(B)、防点炮雷达(1)、换三张(2)
+            tenpai_alert = None
+            swap_advice = None
+            defense_radar = []
+            hot_tiles = []
+            dead_tiles = []
+
+            if self.mode == "sc" and tile_count > 0 and status not in ("waiting", "no_tiles") and hand_mpsz:
+                try:
+                    from sichuan import SichuanAnalyzer
+                    pool_rem_27 = [
+                        max(0, 4 - (hand_counts_final[i] + disc_counts_out[i]))
+                        for i in range(27)
+                    ]
+                    # 功能A：查大叫 / 查花猪生死避坑雷达
+                    tenpai_alert = SichuanAnalyzer.check_tenpai_alert(
+                        hand_counts_final[:27],
+                        tiles_remaining_in_wall=remaining,
+                        dingque_suit=dingque_suit,
+                        pool_remaining=pool_rem_27,
+                    )
+                    # 功能B：活牌厚度透视表（活跃热张与绝张）
+                    matrix_data = SichuanAnalyzer.generate_tile_matrix(
+                        hand_counts_final[:27],
+                        disc_counts=disc_counts_out[:27],
+                    )
+                    hot_tiles = matrix_data.get("hot_tiles", [])
+                    dead_tiles = matrix_data.get("dead_tiles", [])
+
+                    # 功能1：防点炮雷达全息评级
+                    defense_radar = SichuanAnalyzer.evaluate_defense_radar(
+                        hand_counts_final[:27],
+                        pool_remaining=pool_rem_27,
+                        opponents_dingque=opponent_dingque_suits,
+                        opponents_danger_suits=opponent_danger_suits,
+                    )
+
+                    # 功能2：博弈级换三张推荐（开局阶段且未打出牌）
+                    if (not has_discards) and tile_count in (13, 14) and (dingque_suit is None):
+                        swap_advice = SichuanAnalyzer.recommend_huan_san_zhang(hand_counts_final[:27])
+
+                    # 附加大牌出牌决策安全评级
+                    if advice and defense_radar:
+                        radar_map = {r["tile"]: r for r in defense_radar}
+                        for adv in advice:
+                            t = adv.get("tile")
+                            if t in radar_map:
+                                adv["defense_level"] = radar_map[t]["level"]
+                                adv["defense_reason"] = radar_map[t]["reason"]
+                except Exception:
+                    pass
 
             # ===== 方向自愈：连续 3 帧整帧 0 牌 → 解锁重探方向 =====
             # 用户中途旋转手机/切后台再回来，VirtualDisplay 朝向可能变了，
@@ -2533,6 +2678,12 @@ class Engine:
                 "remaining": remaining,
                 "dead": dead,
                 "remaining_matrix": remaining_matrix,
+                "tenpai_alert": tenpai_alert,
+                "swap_advice": swap_advice,
+                "defense_radar": defense_radar,
+                "hot_tiles": hot_tiles,
+                "dead_tiles": dead_tiles,
+                "opponents_dingque": opponent_dingque_suits,
                 "is_drawing": is_drawing,
                 "drawing_tile": drawing_tile,
                 "tiles": all_tiles,
