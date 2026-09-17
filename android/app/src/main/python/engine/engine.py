@@ -603,10 +603,10 @@ class _HandStabilizer:
         need = HAND_CONFIRM_FRAMES
         # 冷启动：还没有任何稳定手牌时
         if not self.stable_mpsz:
-            if n < 7:
+            if n not in valid_sizes:
                 return ""
-            # 若识别到合法手牌张数（如 13 或 14 张满手），首帧立即可采信并进入稳定态，杜绝首帧延迟与"等待"提示卡顿
-            if n in (13, 14) or self._streak >= 2:
+            # 若识别到合法手牌张数，首帧立即可采信并进入稳定态，杜绝首帧延迟与"等待"提示卡顿
+            if n in valid_sizes or self._streak >= 2:
                 self.stable_mpsz = ordered_mpsz
                 self._stable_key = key
                 self.pending = False
@@ -615,10 +615,10 @@ class _HandStabilizer:
                 self.pending = True
                 return ""
 
-        # 摸牌(13->14)、打牌(14->13) 或单张出牌变动 (diff <= 2)：即时响应刷新，杜绝出牌/摸牌后的迟钝与卡顿
+        # 摸牌(13->14)、打牌(14->13)、吃碰杠张数变化 (diff in 1..4) 或单张出牌变动 (diff <= 2)：即时响应刷新，杜绝出牌/摸牌后的迟钝与卡顿
         hand_len = len(self.stable_mpsz) // 2
-        is_count_move = abs(n - hand_len) == 1 and n in (13, 14)
-        is_tile_swap = (n == hand_len and n in (13, 14) and _hand_diff_count(key, getattr(self, "_stable_key", "")) <= 2)
+        is_count_move = abs(n - hand_len) in (1, 2, 3, 4) and (n in valid_sizes)
+        is_tile_swap = (n == hand_len and (n in valid_sizes) and _hand_diff_count(key, getattr(self, "_stable_key", "")) <= 2)
         mode_hits = self._recent.count(key)
         if is_count_move or is_tile_swap or self._streak >= need or mode_hits >= HAND_MODE_VOTES:
             self.stable_mpsz = ordered_mpsz
@@ -809,21 +809,21 @@ def detect_river_discards(image: np.ndarray, detector, mode: str = "4p") -> List
             bx, by, bw, bh = cv2.boundingRect(cnt)
             area = bw * bh
             # 过滤过小噪声（文字笔画）与过大UI（面板）
-            if area < 800 or area > 18000:
+            if area < 250 or area > 18000:
                 continue
-            # 矩形度校验：真实麻将牌轮廓面积占比高 (solidity >= 0.65)，文字通常 < 0.45
+            # 矩形度校验：真实麻将牌轮廓面积占比 (solidity >= 0.40)
             solidity = cv2.contourArea(cnt) / float(area)
-            if solidity < 0.65:
+            if solidity < 0.40:
                 continue
             aspect = bw / float(bh)
             # 真实单张或连排麻将牌的长宽比
-            if not ((0.52 <= aspect <= 0.96) or (1.08 <= aspect <= 1.85)):
+            if not (0.45 <= aspect <= 6.0):
                 continue
 
             sub_boxes = []
-            if aspect > 1.35:
+            if aspect > 1.25:
                 # 横排相邻打出的牌
-                num_t = max(2, min(4, int(round(bw / float(bh * 0.75)))))
+                num_t = max(2, min(8, int(round(bw / float(bh * 0.75)))))
                 step = bw / float(num_t)
                 for i in range(num_t):
                     sub_boxes.append((int(bx + i * step), by, int(step), bh))
@@ -831,7 +831,7 @@ def detect_river_discards(image: np.ndarray, detector, mode: str = "4p") -> List
                 sub_boxes.append((bx, by, bw, bh))
 
             for (sx, sy, sbw, sbh) in sub_boxes:
-                if sbw < 16 or sbh < 16:
+                if sbw < 14 or sbh < 14:
                     continue
                 gx, gy = rx1 + sx, ry1 + sy
                 face = image[gy:gy+sbh, gx:gx+sbw]
@@ -854,16 +854,70 @@ def detect_river_discards(image: np.ndarray, detector, mode: str = "4p") -> List
                                 continue
                         best_c = conf
                         best_l = lbl
-                    if best_c >= 0.88:
+                    if best_c >= 0.85:
                         break
 
-                if best_l and best_c >= 0.82:
+                if best_l and best_c >= 0.48:
                     if mode == "sc":
                         if best_l.endswith(('m', 'p', 's')) or best_l == '7z':
                             discards.append(best_l)
                     else:
                         discards.append(best_l)
         return discards
+    except Exception:
+        return []
+
+
+def detect_player_melds(image: np.ndarray, detector, mode: str = "sc") -> List[str]:
+    """精准检测右下角玩家副露区域（碰/杠）。
+    在四川麻将中，副露必为 3 张同字（碰）或 4 张同字（杠），准确计入已出牌与剩余活牌。"""
+    if image is None or detector is None or image.size == 0:
+        return []
+    try:
+        ih, iw = image.shape[:2]
+        my1, my2 = int(ih * 0.72), int(ih * 0.98)
+        mx1, mx2 = int(iw * 0.64), int(iw * 0.96)
+        m_crop = image[my1:my2, mx1:mx2]
+        hsv = cv2.cvtColor(m_crop, cv2.COLOR_BGR2HSV)
+        white = ((hsv[:, :, 1] < 60) & (hsv[:, :, 2] > 140) & (m_crop[:, :, 0] > 100) & (m_crop[:, :, 1] > 100) & (m_crop[:, :, 2] > 100)).astype(np.uint8) * 255
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        closed = cv2.morphologyEx(white, cv2.MORPH_CLOSE, kernel)
+        cnts, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        melds = []
+        valid_tiles = {f"{i}m" for i in range(1, 10)} | {f"{i}p" for i in range(1, 10)} | {f"{i}s" for i in range(1, 10)} | {"7z"}
+        for c in cnts:
+            bx, by, bw, bh = cv2.boundingRect(c)
+            if bw < 40 or bh < 20 or bw * bh < 800:
+                continue
+            aspect = bw / float(bh)
+            if aspect < 1.4:
+                continue
+            num_t = 4 if aspect >= 3.2 else 3
+            tw = bw / float(num_t)
+
+            best_lbl = None
+            best_sc = -1.0
+            for i in range(num_t):
+                sub_x1 = int(round(bx + i * tw))
+                sub_x2 = int(round(bx + (i + 1) * tw))
+                sub = m_crop[by:by+bh, sub_x1:sub_x2]
+                face = sub[0:int(bh * 0.75), 2:max(3, sub.shape[1] - 2)]
+                if face.size == 0:
+                    continue
+                f_norm = cv2.resize(face, (56, 88))
+                for lbl, tmpl in getattr(detector, "templates_bgr", {}).items():
+                    if mode == "sc" and lbl not in valid_tiles:
+                        continue
+                    t_core = tmpl[16:104, 12:68]
+                    res = cv2.matchTemplate(f_norm, t_core, cv2.TM_CCOEFF_NORMED)
+                    sc = float(res.max())
+                    if sc > best_sc:
+                        best_sc = sc
+                        best_lbl = lbl
+            if best_lbl and best_sc >= 0.40:
+                melds.extend([best_lbl] * num_t)
+        return melds
     except Exception:
         return []
 
@@ -2113,6 +2167,13 @@ class Engine:
                             discard_labels.append(cd)
                 except Exception:
                     pass
+                try:
+                    melds = detect_player_melds(image, self._detector, mode=self.mode)
+                    for md in melds:
+                        if md and mpsz_to_tile34_index(md) in avail:
+                            discard_labels.append(md)
+                except Exception:
+                    pass
 
 
             # ---- 摸牌独立判定 (基于物理间距 Physical Gap) ----
@@ -2167,15 +2228,21 @@ class Engine:
             dingque_suit, dingque_name = None, None
             is_dq_phase = False
             if self.mode == "sc":
-                if hasattr(detector, "is_dingque_phase"):
+                # 1. 优先读取手动覆盖或头像定缺门标
+                override = getattr(self, "_dingque_override", None)
+                if override is not None and 0 <= override <= 2:
+                    dingque_suit = override
+                    dingque_name = ['万', '筒', '条'][dingque_suit]
+                else:
+                    dingque_suit, dingque_name = detect_dingque(full_for_preview)
+
+                # 2. 状态守卫互斥：若定缺已定、牌桌已有弃牌/副露或手牌张数已非完整手牌，对局必然已经进行中，绝不可能是定缺阶段
+                has_discards = bool(discard_labels or self._monotonic_discards)
+                cur_n = len(hand_mpsz) // 2 if hand_mpsz else (len(hand_row) if hand_row else 0)
+                game_already_started = (dingque_suit is not None) or has_discards or (cur_n > 0 and cur_n not in (13, 14))
+
+                if not game_already_started and hasattr(detector, "is_dingque_phase"):
                     is_dq_phase = detector.is_dingque_phase(full_for_preview)
-                if not is_dq_phase:
-                    override = getattr(self, "_dingque_override", None)
-                    if override is not None and 0 <= override <= 2:
-                        dingque_suit = override
-                        dingque_name = ['万', '筒', '条'][dingque_suit]
-                    else:
-                        dingque_suit, dingque_name = detect_dingque(full_for_preview)
 
             status = "no_tiles"
             commentary: Optional[str] = None

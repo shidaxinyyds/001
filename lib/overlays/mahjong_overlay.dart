@@ -431,6 +431,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   double panelW = 220;
   double panelH = 210;
 
+  // 展开态窗口拖动定位与独立垂直滚动控制器
+  OverlayPosition? _panelPos;
+  final ScrollController _panelScrollController = ScrollController();
+
   // ── 紧凑布局尺寸常量 ──
 
   static const double minPanelW = 190;
@@ -514,6 +518,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   @override
   void dispose() {
     _adviceTimer?.cancel();
+    _panelScrollController.dispose();
     super.dispose();
   }
 
@@ -680,10 +685,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       panelVisible = next;
     });
     if (next) {
-      // 展开分析面板时保持原生拖动开启，由原生 onTouch 分流：
-      // 顶部 55dp 自由拖动窗口（120Hz 原生平滑无延迟），55dp 以下响应内容列表滚动
+      // 展开分析面板时关闭原生全局拖动，把垂直触摸事件完全释放给 Flutter 的 SingleChildScrollView，
+      // 确保能顺畅自由地上下滑动到最顶部和最底部。窗口移动由顶部标题栏手势接管。
       panelH = panelH.clamp(minPanelH, maxPanelH);
-      await _ensureSize(panelW, panelH, drag: true);
+      await _ensureSize(panelW, panelH, drag: false);
     } else {
       final double w = _capsuleMode ? _kCapsuleW : collapsed;
       final double h = _capsuleMode ? _kCapsuleH : collapsed;
@@ -860,8 +865,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         },
         onPointerUp: (_) async {
           setState(() => _draggingResize = false);
-          // 缩放结束，面板保持打开，立即恢复原生拖动开启！彻底解决缩放后无法自由移动弹窗的问题
-          await _ensureSize(panelW, panelH, drag: true);
+          // 缩放结束，面板保持打开，维持 Flutter 滚动生效（drag: false）
+          await _ensureSize(panelW, panelH, drag: false);
         },
         child: SizedBox(
           width: 28,
@@ -1385,7 +1390,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
   Widget _adviceSection(List<dynamic> advice, String best, int count) {
     final status = result?['status'] as String? ?? '';
-    final bool isDingquePhase = result?['dingque_phase'] == true || status == 'dingque';
+    final bool isDingquePhase = (result?['dingque_phase'] == true || status == 'dingque') && advice.isEmpty;
     if (isDingquePhase) {
       final msg = (result?['message'] as String?) ?? '正在推演最佳断门…';
       return Container(
@@ -1643,26 +1648,44 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                       Expanded(
                         child: Row(
                           children: [
-                            const MahjongTileIcon(size: 15),
-                            const SizedBox(width: 5),
-                            const Expanded(
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(
-                                    '雀神助手',
-                                    style: TextStyle(
-                                      color: Colors.white,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 12,
-                                      letterSpacing: 0.3,
-                                      decoration: TextDecoration.none,
+                            Expanded(
+                              child: GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onPanStart: (_) async {
+                                  try {
+                                    _panelPos = await FlutterOverlayWindow.getOverlayPosition();
+                                  } catch (_) {}
+                                },
+                                onPanUpdate: (DragUpdateDetails details) {
+                                  if (_panelPos != null) {
+                                    _panelPos = OverlayPosition(
+                                      _panelPos!.x + details.delta.dx,
+                                      _panelPos!.y + details.delta.dy,
+                                    );
+                                    FlutterOverlayWindow.moveOverlay(_panelPos!).catchError((_) => null);
+                                  }
+                                },
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const MahjongTileIcon(size: 15),
+                                    const SizedBox(width: 5),
+                                    const Text(
+                                      '雀神助手',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 12,
+                                        letterSpacing: 0.3,
+                                        decoration: TextDecoration.none,
+                                      ),
                                     ),
-                                  ),
-                                ],
+                                    const SizedBox(width: 4),
+                                    _statusBanner(),
+                                  ],
+                                ),
                               ),
                             ),
-                            _statusBanner(),
                             const SizedBox(width: 5),
                             GestureDetector(
                               onTap: _requestResetMatch,
@@ -1731,8 +1754,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                 // 核心卡片滚动流：全包裹于 SingleChildScrollView，彻底杜绝 RenderFlex overflow
                 Expanded(
                   child: SingleChildScrollView(
-                    physics: const BouncingScrollPhysics(
-                      parent: AlwaysScrollableScrollPhysics(),
+                    controller: _panelScrollController,
+                    physics: const AlwaysScrollableScrollPhysics(
+                      parent: BouncingScrollPhysics(),
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1794,6 +1818,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                         if (inMatch) ...[
                           _remainingMatrixSection(result?['remaining_matrix'] as Map<String, dynamic>?),
                         ],
+                        // 底部安全留白：确保可以顺畅滑到最底部且不被右下角缩放手柄遮挡
+                        const SizedBox(height: 26),
                       ],
                     ),
                   ),

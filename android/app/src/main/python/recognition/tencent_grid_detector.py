@@ -254,17 +254,49 @@ class TencentGridDetector(Detector):
         if image_bgr is None or image_bgr.size == 0:
             return False
         ih, iw = image_bgr.shape[:2]
-        sub_center = image_bgr[int(ih * 0.50):int(ih * 0.72), int(iw * 0.35):int(iw * 0.65)]
-        if sub_center.shape[0] < 10 or sub_center.shape[1] < 10:
+        # 定缺选门三色盘按钮严格位于中央区域
+        sub = image_bgr[int(ih * 0.50):int(ih * 0.72), int(iw * 0.35):int(iw * 0.65)]
+        if sub.shape[0] < 20 or sub.shape[1] < 20:
             return False
-        hsv = cv2.cvtColor(sub_center, cv2.COLOR_BGR2HSV)
-        red_mask = ((hsv[:, :, 0] <= 10) | (hsv[:, :, 0] >= 170)) & (hsv[:, :, 1] >= 120) & (hsv[:, :, 2] >= 120)
-        green_mask = (hsv[:, :, 0] >= 40) & (hsv[:, :, 0] <= 85) & (hsv[:, :, 1] >= 100) & (hsv[:, :, 2] >= 100)
-        orange_mask = (hsv[:, :, 0] >= 12) & (hsv[:, :, 0] <= 25) & (hsv[:, :, 1] >= 120) & (hsv[:, :, 2] >= 120)
-        r_sum = int(np.sum(red_mask))
-        g_sum = int(np.sum(green_mask))
-        o_sum = int(np.sum(orange_mask))
-        return r_sum > 800 and g_sum > 800 and o_sum > 250
+        hsv = cv2.cvtColor(sub, cv2.COLOR_BGR2HSV)
+        red_mask = (((hsv[:, :, 0] <= 10) | (hsv[:, :, 0] >= 170)) & (hsv[:, :, 1] >= 120) & (hsv[:, :, 2] >= 120)).astype(np.uint8) * 255
+        green_mask = ((hsv[:, :, 0] >= 40) & (hsv[:, :, 0] <= 85) & (hsv[:, :, 1] >= 100) & (hsv[:, :, 2] >= 100)).astype(np.uint8) * 255
+        orange_mask = ((hsv[:, :, 0] >= 12) & (hsv[:, :, 0] <= 25) & (hsv[:, :, 1] >= 120) & (hsv[:, :, 2] >= 120)).astype(np.uint8) * 255
+
+        def get_main_center(mask):
+            cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            valid = [c for c in cnts if 200 <= cv2.contourArea(c) <= 6000]
+            if not valid:
+                return None
+            c = max(valid, key=cv2.contourArea)
+            M = cv2.moments(c)
+            if M['m00'] == 0:
+                return None
+            return int(M['m10'] / M['m00']), int(M['m01'] / M['m00'])
+
+        rc = get_main_center(red_mask)
+        gc = get_main_center(green_mask)
+        oc = get_main_center(orange_mask)
+
+        if not (rc and gc and oc):
+            return False
+
+        rcx, rcy = rc
+        gcx, gcy = gc
+        ocx, ocy = oc
+
+        # 水平必须自左向右依次为：万(红) -> 条(绿) -> 筒(黄/橙)
+        if not (rcx < gcx < ocx):
+            return False
+        # 三个圆盘中心必须处于同一水平线上
+        if abs(rcy - gcy) > 16 or abs(gcy - ocy) > 16 or abs(rcy - ocy) > 20:
+            return False
+        # 间距必须匀称
+        d1 = gcx - rcx
+        d2 = ocx - gcx
+        if not (25 <= d1 <= 140 and 25 <= d2 <= 140 and abs(d1 - d2) <= 40):
+            return False
+        return True
 
     def detect_dingque(self, image_bgr: np.ndarray) -> str:
         ih, iw = image_bgr.shape[:2]
@@ -320,8 +352,13 @@ class TencentGridDetector(Detector):
         std_bh = std_tw * 1.35
 
         drawn_box = None
-        if len(boxes) >= 2 and boxes[-1][2] <= std_tw * 1.5:
-            drawn_box = boxes[-1]
+        if len(boxes) >= 2:
+            last = boxes[-1]
+            gap = last[0] - (bx + bw)
+            bot_diff = abs((last[1] + last[3]) - (by + bh))
+            # 摸牌判定：必须紧邻主手牌右侧 (间隙 <= 1.2倍牌宽)、底部 y 坐标对齐 (偏差 < 20px)、宽度与牌宽相当
+            if 0 <= gap <= std_tw * 1.2 and bot_diff < 20 and last[2] <= std_tw * 1.5:
+                drawn_box = last
 
         raw_est = bw / std_tw
         legal_standing = [1, 4, 7, 10, 13] if drawn_box else [1, 2, 4, 5, 7, 8, 10, 11, 13, 14]
@@ -359,7 +396,7 @@ class TencentGridDetector(Detector):
 
         all_dets = list(best_standing_dets)
 
-        # 追加独立摸牌或换牌浮起选牌
+        # 追加独立摸牌或换牌浮起选牌（必须具有足够置信度，过滤非麻将UI）
         if drawn_box is not None:
             dbx, dby, dbw, dbh = drawn_box
             expected_h = int(dbw * 1.35)
@@ -367,8 +404,9 @@ class TencentGridDetector(Detector):
             db_top = max(0, db_bot - expected_h)
             col_strip = image_bgr[db_top:db_bot, dbx:dbx + dbw]
             lbl_d, sc_d = self.classify_tile(col_strip)
-            rect_d: Rect = (dbx, db_top, dbw, db_bot - db_top)
-            all_dets.append((rect_d, lbl_d, sc_d))
+            if sc_d >= 0.48:
+                rect_d: Rect = (dbx, db_top, dbw, db_bot - db_top)
+                all_dets.append((rect_d, lbl_d, sc_d))
 
         top_conf = max([d[2] for d in all_dets], default=0.0)
         self.last_top_score = top_conf
