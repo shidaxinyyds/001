@@ -852,162 +852,162 @@ def infer_opponents_from_discards(disc_counts: List[int]) -> Tuple[List[int], Li
         return [], []
 
 
-def detect_river_discards(image: np.ndarray, detector, mode: str = "4p") -> List[str]:
+def detect_river_discards(image: np.ndarray, detector, mode: str = "4p", hand_row=None) -> List[str]:
     """高精度牌桌弃牌检测：严格排除中央骰子盒、倒计时、房间名及头像，
     仅提取牌桌中央四方牌河内真实打出的麻将牌。"""
     if image is None or detector is None or image.size == 0:
         return []
     try:
         ih, iw = image.shape[:2]
-        ry1, ry2 = int(ih * 0.20), int(ih * 0.72)
-        rx1, rx2 = int(iw * 0.20), int(iw * 0.80)
-        if rx2 <= rx1 or ry2 <= ry1:
-            return []
-        river_crop = image[ry1:ry2, rx1:rx2]
-        hsv = cv2.cvtColor(river_crop, cv2.COLOR_BGR2HSV)
+        avail = available_set(mode)
+        raw_discards = []
 
-        # 实体麻将白/象牙色牌面：低饱和度 (S < 55) 且 高明度 (V > 175)
-        white_mask = ((hsv[:, :, 1] < 55) & (hsv[:, :, 2] > 175)).astype(np.uint8) * 255
+        # 四方牌河扫描区（围绕中央指南针/骰子盒）：
+        # 上方（南家）、右方（东家）、下方（自家）、左方（西家）
+        zones = [
+            ('top', int(iw * 0.35), int(ih * 0.18), int(iw * 0.65), int(ih * 0.38)),
+            ('right', int(iw * 0.56), int(ih * 0.32), int(iw * 0.72), int(ih * 0.64)),
+            ('bottom', int(iw * 0.35), int(ih * 0.54), int(iw * 0.65), int(ih * 0.72)),
+            ('left', int(iw * 0.28), int(ih * 0.32), int(iw * 0.44), int(ih * 0.64)),
+        ]
 
-        # 严格排除盲区（按相对原图归一化坐标）：
-        # 1. 牌桌居中顶部区域（玩法标题，如"排位·红中血流"）
-        # 2. 牌桌中央盲区（骰子盒、风向标、倒计时数字 07/67）
-        # 3. 牌桌居中底部区域（底分文本）
-        def mask_rect(x1_norm, y1_norm, x2_norm, y2_norm):
-            bx1 = max(0, int(iw * x1_norm) - rx1)
-            bx2 = min(river_crop.shape[1], int(iw * x2_norm) - rx1)
-            by1 = max(0, int(ih * y1_norm) - ry1)
-            by2 = min(river_crop.shape[0], int(ih * y2_norm) - ry1)
-            white_mask[by1:by2, bx1:bx2] = 0
+        for zname, x1, y1, x2, y2 in zones:
+            crop = image[y1:y2, x1:x2]
+            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+            white = (hsv[:, :, 1] < 65) & (hsv[:, :, 2] > 130) & (crop[:, :, 0] > 75) & (crop[:, :, 1] > 75) & (crop[:, :, 2] > 75)
+            # 过滤高亮黄光指示标
+            is_beacon = (hsv[:, :, 0] >= 10) & (hsv[:, :, 0] <= 30) & (hsv[:, :, 1] > 100)
+            white[is_beacon] = 0
 
-        mask_rect(0.42, 0.20, 0.58, 0.36)   # 居中顶部玩法标题
-        mask_rect(0.435, 0.365, 0.535, 0.540) # 居中正方形骰子盒/倒计时
-        mask_rect(0.44, 0.58, 0.56, 0.70)   # 居中底部底分等文本
-        mask_rect(0.56, 0.52, 0.82, 0.78)   # 右侧玩家操作按钮区(换牌/过/碰/杠/胡)
-        mask_rect(0.30, 0.46, 0.70, 0.74)   # 中央定缺选门按钮区
-
-        # 形态学闭运算填平牌面缝隙
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-        closed = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel)
-        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        discards = []
-        for cnt in contours:
-            bx, by, bw, bh = cv2.boundingRect(cnt)
-            area = bw * bh
-            # 过滤过小噪声（文字笔画）与过大UI（面板）
-            if area < 250 or area > 18000:
-                continue
-            # 矩形度校验：真实麻将牌轮廓面积占比 (solidity >= 0.40)
-            solidity = cv2.contourArea(cnt) / float(area)
-            if solidity < 0.40:
-                continue
-            aspect = bw / float(bh)
-            # 真实单张或连排麻将牌的长宽比
-            if not (0.45 <= aspect <= 6.0):
-                continue
-
-            sub_boxes = []
-            if aspect > 1.25:
-                # 横排相邻打出的牌
-                num_t = max(2, min(8, int(round(bw / float(bh * 0.75)))))
-                step = bw / float(num_t)
-                for i in range(num_t):
-                    sub_boxes.append((int(bx + i * step), by, int(step), bh))
-            else:
-                sub_boxes.append((bx, by, bw, bh))
-
-            for (sx, sy, sbw, sbh) in sub_boxes:
-                if sbw < 14 or sbh < 14:
+            cnts, _ = cv2.findContours(white.astype('uint8'), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for c in cnts:
+                bx, by, bw, bh = cv2.boundingRect(c)
+                area = bw * bh
+                if area < 300 or area > 4500:
                     continue
-                gx, gy = rx1 + sx, ry1 + sy
-                face = image[gy:gy+sbh, gx:gx+sbw]
-                if face.size == 0 or face.std() < 12.0:
+                gx, gy = x1 + bx, y1 + by
+                if gy + bh >= int(ih * 0.78):
                     continue
 
-                best_l, best_c = None, 0.0
-                rots = [None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_180, cv2.ROTATE_90_COUNTERCLOCKWISE]
-
-                for rot in rots:
-                    cur = face if rot is None else cv2.rotate(face, rot)
-                    fh, fw = cur.shape[:2]
-                    lbl, conf = detector._classify_face_retry(cur, (0, 0, fw, fh), allow_retry=False)
-                    if conf > best_c:
-                        # 颜色约束：筒子 (p) 牌面圆圈为蓝/红，绝对不可能为纯绿墨迹
-                        if lbl and lbl.endswith('p') and not lbl.startswith('8'):
-                            chsv = cv2.cvtColor(cur, cv2.COLOR_BGR2HSV)
-                            green_ink = (chsv[:, :, 0] >= 35) & (chsv[:, :, 0] <= 85) & (chsv[:, :, 1] >= 60)
-                            if float(np.mean(green_ink)) > 0.06:
+                tile_crop = crop[by:by + max(12, int(bh * 0.80)), bx:bx + bw]
+                rots = [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE] if bw > bh * 1.15 else [None, cv2.ROTATE_90_CLOCKWISE]
+                best_lbl, best_sc = None, 0.0
+                for r in rots:
+                    cur = tile_crop if r is None else cv2.rotate(tile_crop, r)
+                    face = detector.extract_face(cur) if hasattr(detector, "extract_face") else cur
+                    for lbl, tmpl in getattr(detector, "templates_bgr", {}).items():
+                        try:
+                            if mpsz_to_tile34_index(lbl) not in avail:
                                 continue
-                        best_c = conf
-                        best_l = lbl
-                    if best_c >= 0.85:
-                        break
+                        except Exception:
+                            pass
+                        t_core = tmpl[16:104, 12:68]
+                        res = cv2.matchTemplate(face, t_core, cv2.TM_CCOEFF_NORMED)
+                        mx = float(res.max())
+                        if mx > best_sc:
+                            best_sc, best_lbl = mx, lbl
+                if best_lbl and best_sc >= 0.50:
+                    raw_discards.append((gx, gy, bw, bh, best_lbl, best_sc))
 
-                if best_l and best_c >= 0.75:
-                    try:
-                        avail = available_set(mode)
-                        if mpsz_to_tile34_index(best_l) in avail:
-                            discards.append(best_l)
-                    except Exception:
-                        discards.append(best_l)
-        return discards
+        # 空间非极大值抑制（NMS）：消除相邻分区重叠区域的同一张牌多重匹配
+        raw_discards.sort(key=lambda d: d[5], reverse=True)
+        final_discards = []
+        for d in raw_discards:
+            gx, gy, bw, bh, lbl, sc = d
+            overlap = False
+            cx1, cy1 = gx + bw / 2, gy + bh / 2
+            for ex in final_discards:
+                egx, egy, ebw, ebh, elbl, esc = ex
+                cx2, cy2 = egx + ebw / 2, egy + ebh / 2
+                if abs(cx1 - cx2) < 30 and abs(cy1 - cy2) < 25:
+                    overlap = True
+                    break
+            if not overlap:
+                final_discards.append(d)
+
+        return [d[4] for d in final_discards]
     except Exception:
         return []
 
 
-def detect_player_melds(image: np.ndarray, detector, mode: str = "sc_hz") -> List[str]:
-    """精准检测右下角玩家副露区域（碰/杠）。
-    副露必为 3 张同字（碰）或 4 张同字（杠），准确计入已出牌与剩余活牌。"""
+def detect_player_melds(image: np.ndarray, detector, mode: str = "sc_hz", hand_row=None) -> List[str]:
+    """精准检测全部玩家的副露区域（碰/杠）。
+    涵盖左侧、右侧、上方及本家副露，副露必为 3 张同字（碰）或 4 张同字（杠），准确计入已出牌与剩余活牌。"""
     if image is None or detector is None or image.size == 0:
         return []
     try:
         ih, iw = image.shape[:2]
-        my1, my2 = int(ih * 0.72), int(ih * 0.98)
-        mx1, mx2 = int(iw * 0.64), int(iw * 0.96)
-        m_crop = image[my1:my2, mx1:mx2]
-        hsv = cv2.cvtColor(m_crop, cv2.COLOR_BGR2HSV)
-        white = ((hsv[:, :, 1] < 60) & (hsv[:, :, 2] > 140) & (m_crop[:, :, 0] > 100) & (m_crop[:, :, 1] > 100) & (m_crop[:, :, 2] > 100)).astype(np.uint8) * 255
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        closed = cv2.morphologyEx(white, cv2.MORPH_CLOSE, kernel)
-        cnts, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        melds = []
         avail = available_set(mode)
-        for c in cnts:
-            bx, by, bw, bh = cv2.boundingRect(c)
-            if bw < 40 or bh < 20 or bw * bh < 800:
-                continue
-            aspect = bw / float(bh)
-            if aspect < 1.4:
-                continue
-            num_t = 4 if aspect >= 3.2 else 3
-            tw = bw / float(num_t)
+        melds = []
 
-            best_lbl = None
-            best_sc = -1.0
-            for i in range(num_t):
-                sub_x1 = int(round(bx + i * tw))
-                sub_x2 = int(round(bx + (i + 1) * tw))
-                sub = m_crop[by:by+bh, sub_x1:sub_x2]
-                face = sub[0:int(bh * 0.75), 2:max(3, sub.shape[1] - 2)]
-                if face.size == 0:
+        hand_min_x, hand_max_x, hand_min_y = iw, 0, ih
+        if hand_row:
+            hand_boxes = [d[0] for d in hand_row if len(d) > 0 and len(d[0]) == 4]
+            if hand_boxes:
+                hand_min_x = min(b[0] for b in hand_boxes)
+                hand_max_x = max(b[0] + b[2] for b in hand_boxes)
+                hand_min_y = min(b[1] for b in hand_boxes)
+
+        regions = [
+            ('left', int(iw * 0.14), int(ih * 0.58), int(iw * 0.26), int(ih * 0.86), cv2.ROTATE_90_COUNTERCLOCKWISE, True),
+            ('right', int(iw * 0.74), int(ih * 0.18), int(iw * 0.86), int(ih * 0.48), cv2.ROTATE_90_CLOCKWISE, True),
+            ('top', int(iw * 0.60), int(ih * 0.06), int(iw * 0.85), int(ih * 0.22), None, False),
+        ]
+        if hand_max_x < iw * 0.94:
+            regions.append(('bottom', int(max(iw * 0.64, hand_max_x + 8)), int(ih * 0.72), int(iw * 0.98), int(ih * 0.98), None, False))
+
+        for name, x1, y1, x2, y2, rot, is_vert in regions:
+            crop = image[y1:y2, x1:x2]
+            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+            white = (hsv[:, :, 1] < 60) & (hsv[:, :, 2] > 130) & (crop[:, :, 0] > 75) & (crop[:, :, 1] > 75) & (crop[:, :, 2] > 75)
+            cnts, _ = cv2.findContours(white.astype('uint8'), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for c in cnts:
+                bx, by, bw, bh = cv2.boundingRect(c)
+                area = bw * bh
+                if area < 600:
                     continue
-                f_norm = cv2.resize(face, (56, 88))
-                for lbl, tmpl in getattr(detector, "templates_bgr", {}).items():
-                    try:
-                        if mpsz_to_tile34_index(lbl) not in avail:
-                            continue
-                    except Exception:
-                        pass
-                    t_core = tmpl[16:104, 12:68]
-                    res = cv2.matchTemplate(f_norm, t_core, cv2.TM_CCOEFF_NORMED)
-                    sc = float(res.max())
-                    if sc > best_sc:
-                        best_sc = sc
-                        best_lbl = lbl
-            if best_lbl and best_sc >= 0.40:
-                melds.extend([best_lbl] * num_t)
+                gx, gy = x1 + bx, y1 + by
+                if gy + bh >= hand_min_y and not (gx + bw < hand_min_x or gx > hand_max_x):
+                    continue
+
+                if is_vert:
+                    if bh < bw * 0.9:
+                        continue
+                    num_t = 4 if bh > bw * 1.8 else 3
+                    step = bh / float(num_t)
+                else:
+                    if bw < bh * 1.1:
+                        continue
+                    num_t = 4 if bw > bh * 3.2 else 3
+                    step = bw / float(num_t)
+
+                cand_scores = []
+                for i in range(num_t):
+                    if is_vert:
+                        t = crop[int(by + i * step):int(by + (i + 1) * step), bx:bx + bw]
+                    else:
+                        t = crop[by:by + bh, int(bx + i * step):int(bx + (i + 1) * step)]
+                    if rot is not None:
+                        t = cv2.rotate(t, rot)
+                    face = detector.extract_face(t) if hasattr(detector, "extract_face") else t
+                    best_lbl, best_sc = None, -1.0
+                    for lbl, tmpl in getattr(detector, "templates_bgr", {}).items():
+                        try:
+                            if mpsz_to_tile34_index(lbl) not in avail:
+                                continue
+                        except Exception:
+                            pass
+                        t_core = tmpl[16:104, 12:68]
+                        res = cv2.matchTemplate(face, t_core, cv2.TM_CCOEFF_NORMED)
+                        mx = float(res.max())
+                        if mx > best_sc:
+                            best_sc, best_lbl = mx, lbl
+                    if best_lbl and best_sc >= 0.40:
+                        cand_scores.append((best_lbl, best_sc))
+
+                if cand_scores:
+                    cand_scores.sort(key=lambda x: x[1], reverse=True)
+                    melds.extend([cand_scores[0][0]] * num_t)
         return melds
     except Exception:
         return []
@@ -2375,6 +2375,9 @@ class Engine:
                 if is_dq_phase:
                     self._monotonic_discards.clear()
 
+            if not is_dq_phase and len(raw_labels) >= 10:
+                self._match_started = True
+
             discard_labels = []
             ih, _ = image.shape[:2]
             # 仅在非定缺阶段且进入正式对局后扫描牌河
@@ -2400,14 +2403,14 @@ class Engine:
                 # 融合牌桌中央区域四方牌河的多角度弃牌检测（仅在已识别出有效手牌时提取，杜绝非对局/大厅/未开局误报）
                 if hand_row and (len(hand_row) >= 4 or len(hand_mpsz) >= 4):
                     try:
-                        central_discards = detect_river_discards(image, self._detector, mode=self.mode)
+                        central_discards = detect_river_discards(image, self._detector, mode=self.mode, hand_row=hand_row)
                         for cd in central_discards:
                             if cd and mpsz_to_tile34_index(cd) in avail:
                                 discard_labels.append(cd)
                     except Exception:
                         pass
                     try:
-                        melds = detect_player_melds(image, self._detector, mode=self.mode)
+                        melds = detect_player_melds(image, self._detector, mode=self.mode, hand_row=hand_row)
                         for md in melds:
                             if md and mpsz_to_tile34_index(md) in avail:
                                 discard_labels.append(md)
@@ -2503,8 +2506,11 @@ class Engine:
                     pass
 
             status = "waiting" if not getattr(self, "_match_started", False) else "no_tiles"
-            if status == "waiting":
-                message = "等待牌局开始"
+            message: str = "等待牌局开始" if status == "waiting" else ""
+            if hand is not None:
+                message = "手牌已就绪"
+            elif is_dq_phase:
+                message = "定缺推演中"
             commentary: Optional[str] = None
             shanten: Optional[int] = None
             advice: List[Dict] = []
