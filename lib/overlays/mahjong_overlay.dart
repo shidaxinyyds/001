@@ -841,43 +841,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                       : Colors.white.withAlpha(150),
                 ),
               ),
-              // 拖拽缩放时，在右上角浮现精确实时像素与临界点提示
-              if (_draggingResize)
-                Positioned(
-                  right: 20,
-                  bottom: 20,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: const Color(0xF20F172A),
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(
-                        color: _hitLimitFeedback
-                            ? const Color(0xFFFFB74D)
-                            : const Color(0xFF64FFDA),
-                        width: 0.8,
-                      ),
-                      boxShadow: const [
-                        BoxShadow(
-                          color: Color(0x33000000),
-                          blurRadius: 4,
-                          offset: Offset(0, 1),
-                        ),
-                      ],
-                    ),
-                    child: Text(
-                      '${panelW.toInt()} × ${panelH.toInt()}${_hitLimitFeedback ? " (临界)" : ""}',
-                      style: TextStyle(
-                        fontSize: 10,
-                        fontWeight: FontWeight.w600,
-                        color: _hitLimitFeedback
-                            ? const Color(0xFFFFB74D)
-                            : Colors.white,
-                        decoration: TextDecoration.none,
-                      ),
-                    ),
-                  ),
-                ),
             ],
           ),
         ),
@@ -1865,6 +1828,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   Widget _adviceSection(List<dynamic> advice, String best, int count) {
     final status = result?['status'] as String? ?? '';
     final bool isDingquePhase = (result?['dingque_phase'] == true || status == 'dingque');
+    final bool inMatch = status != 'waiting' && status != 'no_tiles' && count >= 4;
+    final List<dynamic> activeAdvice = (inMatch || isDingquePhase) ? advice : const [];
     final swapData = result?['swap_advice'] as Map<String, dynamic>?;
     final alertData = result?['tenpai_alert'] as Map<String, dynamic>?;
     final fastAdvice = result?['fast_advice'] as Map<String, dynamic>?;
@@ -1922,7 +1887,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       );
     }
 
-    if (advice.isEmpty) {
+    if (activeAdvice.isEmpty) {
       if (swapWidget != null) {
         return swapWidget;
       }
@@ -1965,7 +1930,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       );
     }
 
-    final sorted = [...advice];
+    final sorted = [...activeAdvice];
     if (sorted.isNotEmpty && best.isNotEmpty) {
       final bestIdx = sorted.indexWhere((a) => a['tile'] == best);
       if (bestIdx > 0) {
@@ -2183,6 +2148,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       final List<dynamic> advice = _shownAdvice;
       final String best = _shownBest;
       final String status = (result?['status'] as String?) ?? '';
+      final bool isDingquePhase = (result?['dingque_phase'] == true || status == 'dingque');
       final bool inMatch = status != 'waiting' &&
           status != 'no_tiles' &&
           count >= 4 &&
@@ -2355,8 +2321,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                         // 1. 核心建议（出牌决策）
                         _adviceSection(advice, best, count),
                         const SizedBox(height: 5),
-                        // 2. 当前手牌（仅在确认对局内才显示，杜绝大厅与非对局干扰）
-                        if (hand.isNotEmpty && count > 0 && inMatch) ...[
+                        // 2. 当前手牌（仅在确认对局内或定缺阶段才显示，杜绝大厅与非对局干扰）
+                        if (hand.isNotEmpty && count > 0 && (inMatch || isDingquePhase)) ...[
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
                             decoration: BoxDecoration(

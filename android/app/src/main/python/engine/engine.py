@@ -568,17 +568,21 @@ class _HandStabilizer:
         n = sum(cnt.values())
         ordered_mpsz = "".join(ordered_list)
 
+        if n == 0:
+            self.reset()
+            return ""
+
         if n < 5:
             self._empty_streak = getattr(self, "_empty_streak", 0) + 1
-            if self._empty_streak >= 8:
-                # 连续 8 帧手牌区无有效手牌（对局结束/未开局/大厅）：彻底重置稳定手牌，绝不跨局残留
+            if self._empty_streak >= 2:
+                # 连续 2 帧手牌区无有效手牌（对局结束/未开局/大厅）：彻底重置稳定手牌，绝不跨局残留
                 self.stable_mpsz = ""
                 self._stable_key = ""
                 self._streak = 0
                 self._last_key = ""
                 self.pending = False
                 return ""
-            # 未达 8 帧（玩家出牌手指遮挡或摸打过渡）：平滑维持前序稳定手牌，杜绝闪烁空白
+            # 未达 2 帧（玩家出牌手指遮挡或摸打过渡）：平滑维持前序稳定手牌，杜绝闪烁空白
             return self.stable_mpsz
         else:
             self._empty_streak = 0
@@ -1162,6 +1166,8 @@ class Engine:
         self._orient = 0
         self._orient_zerocount = 0
         self._non_table_frames = 0
+        self._advice_key = None
+        self._advice = []
         self.trainer = None
 
     def reset_match(self) -> None:
@@ -1287,8 +1293,8 @@ class Engine:
         warn_deal_in = bool(cfg.get("warn_deal_in", False))
         warn_pon_kong = bool(cfg.get("warn_pon_kong", False))
 
-        if not show_advice:
-            return shanten, []
+        if not show_advice or len(hand) == 0:
+            return None, []
 
         # 不完整手牌：复用缓存。返回一个浅拷贝防止上游改 self._advice。
         if len(hand) not in hand_sizes(self.mode):
@@ -2058,8 +2064,8 @@ class Engine:
             # ===== 牌桌场景校验（过滤大厅/菜单/结算，加入防抖）=====
             if not self._is_mahjong_table(image):
                 self._non_table_frames += 1
-                # 只有连续 12 帧非牌桌（约 2~3 秒，明确离开牌局回到大厅或结算完成），才重置整局状态
-                if self._non_table_frames >= 12:
+                # 若尚未开局，一旦检测到非牌桌画面立即重置并返回等待；若在局中，连续 4 帧非牌桌判定为离开对局
+                if not getattr(self, "_match_started", False) or self._non_table_frames >= 4:
                     self._reset_game_state()
                     return EngineResult(
                         image=_make_preview(image),
@@ -2091,7 +2097,7 @@ class Engine:
                         }, ensure_ascii=False),
                         stage=None,
                     )
-                # 连续非桌布帧数不足 12 帧（局中半透明遮罩/出牌动画/弹窗）：若有缓存或稳定手牌则继续平滑输出，绝不中断
+                # 连续非桌布帧数不足 4 帧（局中半透明遮罩/出牌动画/弹窗）：若有缓存或稳定手牌则继续平滑输出，绝不中断
                 if self._frame_skipper.cached is not None:
                     return self._build_skip_result(image, self._frame_skipper.cached)
             else:
@@ -2287,13 +2293,13 @@ class Engine:
                 self._frame_skipper = _FrameSkipper()
             self._prev_raw_n = curr_raw_n
 
-            # 新洗牌发牌 / 换三张判定：若当前帧原始手牌张数较完整（>=10张），且与旧稳定手牌重合度很低（<= 8 张相同），
-            # 说明洗牌重新发牌或刚发生换三张！立即重置稳定器、帧跳跃缓存与牌池，绝不让旧牌反向覆盖新牌！
-            if self._hand_stab.stable_mpsz and len(raw_labels) >= 10:
-                old_set = parse_mpsz_tiles(self._hand_stab.stable_mpsz)
-                raw_set = [l for l in raw_labels if l]
-                overlap = sum(min(old_set.count(t), raw_set.count(t)) for t in set(raw_set))
-                if overlap <= 8 and len(old_set) >= 10:
+            # 新洗牌发牌 / 换三张判定：若当前帧原始手牌张数较完整（>=10张），
+            # 且旧稳定手牌小于10张（残缺/空手牌/非牌局残留）或重合度很低（<= 8 张相同），
+            # 说明新开局发牌或换三张！立即彻底重置，绝不让旧牌残留或阻塞新手牌！
+            if len(raw_labels) >= 10:
+                old_mpsz = getattr(self._hand_stab, "stable_mpsz", "")
+                old_set = parse_mpsz_tiles(old_mpsz) if old_mpsz else []
+                if len(old_set) < 10:
                     self._monotonic_discards.clear()
                     self._hand_stab.reset()
                     self._tile_voter.reset()
@@ -2304,13 +2310,35 @@ class Engine:
                     self._match_started = False
                     self._last_stable_counter = Counter()
                     self._last_stable_n = 0
+                    self._advice_key = None
+                    self._advice = []
+                else:
+                    raw_set = [l for l in raw_labels if l]
+                    overlap = sum(min(old_set.count(t), raw_set.count(t)) for t in set(raw_set))
+                    if overlap <= 8:
+                        self._monotonic_discards.clear()
+                        self._hand_stab.reset()
+                        self._tile_voter.reset()
+                        self._frame_skipper = _FrameSkipper()
+                        self._stable_hand_mpsz = ""
+                        self._stable_hand_count = 0
+                        self._last_hand_y = None
+                        self._match_started = False
+                        self._last_stable_counter = Counter()
+                        self._last_stable_n = 0
+                        self._advice_key = None
+                        self._advice = []
 
             # TencentGridDetector 直接采信高精度网格整排切片结果，0 帧延迟
-            if is_grid_det and len(raw_labels) in hsizes:
-                hand_mpsz = "".join(raw_labels)
-                self._hand_stab.stable_mpsz = hand_mpsz
-                self._hand_stab._stable_key = _counter_to_mpsz(Counter(raw_labels))
-                self._hand_stab.pending = False
+            if is_grid_det:
+                valid_sizes_now = hsizes if getattr(self, "_match_started", False) else (14, 13, 12, 11, 10)
+                if len(raw_labels) in valid_sizes_now:
+                    hand_mpsz = "".join(raw_labels)
+                    self._hand_stab.stable_mpsz = hand_mpsz
+                    self._hand_stab._stable_key = _counter_to_mpsz(Counter(raw_labels))
+                    self._hand_stab.pending = False
+                else:
+                    hand_mpsz = self._hand_stab.observe(raw_labels, valid_sizes_now, avail)
             else:
                 hand_mpsz = self._hand_stab.observe(raw_labels, hsizes, avail)
 
@@ -2325,23 +2353,26 @@ class Engine:
             dingque_suit, dingque_name = None, None
             is_dq_phase = False
             if is_dingque_mode(self.mode):
-                # 1. 优先读取手动覆盖或头像定缺门标
-                override = getattr(self, "_dingque_override", None)
-                if override is not None and 0 <= override <= 2:
-                    dingque_suit = override
-                    dingque_name = ['万', '筒', '条'][dingque_suit]
+                # 1. 优先检测中央定缺选门按钮（万/条/筒色盘）
+                if hasattr(detector, "is_dingque_phase") and detector.is_dingque_phase(full_for_preview):
+                    is_dq_phase = True
+                    dingque_suit = None
+                    dingque_name = None
+                    self._match_started = False
+                    self._monotonic_discards.clear()
                 else:
-                    dingque_suit, dingque_name = detect_dingque(full_for_preview)
+                    override = getattr(self, "_dingque_override", None)
+                    if override is not None and 0 <= override <= 2:
+                        dingque_suit = override
+                        dingque_name = ['万', '筒', '条'][dingque_suit]
+                        self._match_started = True
+                    elif len(raw_labels) >= 4 or getattr(self, "_match_started", False):
+                        dingque_suit, dingque_name = detect_dingque(full_for_preview)
+                        if dingque_suit is not None:
+                            self._match_started = True
 
-                if dingque_suit is not None:
-                    self._match_started = True
-
-                # 未确认头像定缺门标且未进入打牌阶段时，检测中央定缺色盘
-                if not getattr(self, "_match_started", False) and hasattr(detector, "is_dingque_phase"):
-                    is_dq_phase = detector.is_dingque_phase(full_for_preview)
-
-                # 开局前阶段（换三张/定缺中）：牌桌绝对没有打出的牌，彻底重置单调牌池
-                if is_dq_phase or (dingque_suit is None and not getattr(self, "_match_started", False)):
+                # 开局前阶段（定缺中）：牌桌绝对没有打出的牌，彻底重置单调牌池
+                if is_dq_phase:
                     self._monotonic_discards.clear()
 
             discard_labels = []
@@ -2471,13 +2502,14 @@ class Engine:
                 except Exception:
                     pass
 
-            status = "no_tiles"
+            status = "waiting" if not getattr(self, "_match_started", False) else "no_tiles"
+            if status == "waiting":
+                message = "等待牌局开始"
             commentary: Optional[str] = None
             shanten: Optional[int] = None
             advice: List[Dict] = []
             best: str = ""
             tile_count = 0
-            message = ""
             rec_suit_name = None
 
             if is_dq_phase:
@@ -2520,68 +2552,53 @@ class Engine:
                 self._partial_mpsz = ""
                 self._partial_ttl = 0
             else:
-                # 还没建立起任何稳定手牌（冷启动 / 画面里确实没有牌）。
-                # 仍然尽量把上一次算好的建议带回去：build_advice 内部对
-                # "张数不合法"走复用缓存分支，UI 不会因此空掉。
-                if self.trainer is not None:
-                    shanten, advice = self.build_advice(
-                        TileCollection.from_mpsz(""), disc_counts)
-
-                # ===== 部分识别兜底：消灭"少 1 张 → 整屏空白"的断崖 =====
-                # 稳定器只接受张数完全合法（13/14）的帧，真机几乎每帧掉 1 张，
-                # 于是永远输出空。这里把本帧手牌行"已经认出来的牌"照实输出。
-                # 只做展示：不写 _stable_hand_mpsz、不喂 trainer，不污染建议逻辑。
-                try:
-                    partial_now = self._labels_to_mpsz(raw_labels, avail)
-                except Exception:
-                    partial_now = ""
-                partial_n = len(partial_now) // 2
-                if len(raw_labels) < 4:
+                # 尚未建立起完整合法手牌（冷启动/空手牌/非对局/过渡帧）
+                if not getattr(self, "_match_started", False) or len(raw_labels) < PARTIAL_MIN_TILES:
+                    # 未在对局中或手牌张数过少，绝不产生任何虚假建议与残余手牌
+                    self._advice = []
+                    self._advice_key = None
                     self._partial_mpsz = ""
                     self._partial_ttl = 0
-                elif partial_n >= PARTIAL_MIN_TILES:
-                    self._partial_mpsz = partial_now
-                    self._partial_ttl = PARTIAL_TTL_FRAMES
-                elif self._partial_ttl > 0:
-                    # 本帧没认出足够的牌，但滞后窗口内 —— 继续显示上一次的部分结果，
-                    # 避免 partial 逐帧闪进闪出（那比空白更难看）。
-                    self._partial_ttl -= 1
+                    advice = []
+                    best = ""
+                    shanten = None
+                    if not getattr(self, "_match_started", False):
+                        status = "waiting"
+                        message = "等待牌局开始"
+                    else:
+                        status = "no_tiles"
                 else:
-                    self._partial_mpsz = ""
+                    # 局中部分识别兜底（手牌数 >= 6 张）：抵抗出牌瞬间少1张掉空
+                    try:
+                        partial_now = self._labels_to_mpsz(raw_labels, avail)
+                    except Exception:
+                        partial_now = ""
+                    partial_n = len(partial_now) // 2
+                    if partial_n >= PARTIAL_MIN_TILES:
+                        self._partial_mpsz = partial_now
+                        self._partial_ttl = PARTIAL_TTL_FRAMES
+                    elif self._partial_ttl > 0:
+                        self._partial_ttl -= 1
+                    else:
+                        self._partial_mpsz = ""
 
-                if self._partial_mpsz:
-                    status = "partial"
-                    tile_count = len(self._partial_mpsz) // 2
-                    hand_mpsz = self._partial_mpsz
+                    if self._partial_mpsz:
+                        status = "partial"
+                        tile_count = len(self._partial_mpsz) // 2
+                        hand_mpsz = self._partial_mpsz
+                        if not advice and tile_count >= PARTIAL_MIN_TILES:
+                            try:
+                                tentative_hand = TileCollection.from_mpsz(hand_mpsz)
+                                t_shanten, t_adv = self.build_advice(tentative_hand, disc_counts)
+                                if t_adv:
+                                    advice = t_adv
+                                    if t_shanten is not None:
+                                        shanten = t_shanten
+                            except Exception:
+                                pass
 
-                    # 当处于 partial 或冷启动，只要有效牌数 >= 4，即刻推演实时出牌建议（杜绝界面空等）
-                    if not advice and tile_count >= 4:
-                        try:
-                            tentative_hand = TileCollection.from_mpsz(hand_mpsz)
-                            t_shanten, t_adv = self.build_advice(tentative_hand, disc_counts)
-                            if t_adv:
-                                advice = t_adv
-                                if t_shanten is not None:
-                                    shanten = t_shanten
-                            elif is_dingque_mode(self.mode) and dingque_suit is not None:
-                                dq_char = ['m', 'p', 's'][dingque_suit]
-                                tiles_in_hand = [hand_mpsz[k:k+2] for k in range(0, len(hand_mpsz), 2)]
-                                dq_tiles = [t for t in tiles_in_hand if t.endswith(dq_char)]
-                                if dq_tiles:
-                                    advice = [{
-                                        "tile": t,
-                                        "ukeire": 0,
-                                        "shanten": shanten or 2,
-                                        "ev": 99000.0,
-                                        "reason": f"定缺必打{dingque_name}",
-                                        "ting_tiles": [],
-                                        "is_dingque": True
-                                    } for t in sorted(set(dq_tiles))]
-                        except Exception:
-                            pass
-
-            # 最终兜底：若手牌有内容但 advice 仍为空，启动全手牌启发式推演（永远保证建议非空）
-            if not advice and hand_mpsz and tile_count >= 4:
+            # 最终兜底：仅在对局中且手牌合法时推演
+            if getattr(self, "_match_started", False) and not advice and hand_mpsz and tile_count >= 4:
                 advice = self._heuristic_discard_advice(
                     hand_mpsz,
                     mode=self.mode,

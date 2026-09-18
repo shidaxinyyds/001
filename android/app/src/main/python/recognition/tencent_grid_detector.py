@@ -456,6 +456,15 @@ class TencentGridDetector(Detector):
 
         top_conf = max([d[2] for d in all_dets], default=0.0)
         self.last_top_score = top_conf
+
+        # 核心防伪与非牌局拦截：
+        # 真实麻将手牌匹配时，最高置信度必 >= 0.72，均值必 >= 0.60。
+        # 在大厅、载入中、结算界面、非牌局场景下，背景噪点或装饰画匹配分通常仅 0.3~0.5，
+        # 此时必须直接判定为无手牌，杜绝任何幽灵牌与错误显示！
+        if best_standing_mean < 0.60 or top_conf < 0.72:
+            self.last_drawn_tile = None
+            return []
+
         return all_dets
 
     def detect_all_rows(
