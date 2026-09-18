@@ -17,10 +17,7 @@ class EngineResult:
     stage: Stage[Any]
 
     def to_bytes(self) -> bytes:
-        image_bytes: bytes = cv2.imencode('.png', self.image)[1].tobytes()
-        return (self.result.encode() +
-            ("\n").encode() +
-        image_bytes)
+        return (self.result + "\n").encode('utf-8')
 
     def dumps(self) -> bytes:
         stage = self.stage

@@ -268,24 +268,7 @@ List<String> _mpszToTiles(String mpsz) {
   return out;
 }
 
-/// 切分手牌为 m/p/s/z 各一组、组内按数字排序（人眼好读）。
-Map<String, List<String>> _groupHand(String hand) {
-  final tiles = _mpszToTiles(hand);
-  final groups = <String, List<String>>{
-    'm': <String>[],
-    'p': <String>[],
-    's': <String>[],
-    'z': <String>[],
-  };
-  for (final t in tiles) {
-    final s = t[1];
-    if (groups.containsKey(s)) groups[s]!.add(t);
-  }
-  for (final k in groups.keys) {
-    groups[k]!.sort((a, b) => int.parse(a[0]).compareTo(int.parse(b[0])));
-  }
-  return groups;
-}
+
 
 /// 危险牌预警小标：防点炮 / 防杠 的等级提示。
 /// 配色遵守全局约束（禁红 / 橙 / 琥珀）：安全 = 青绿、中等 = 蓝灰、危险 = 深蓝灰 + 白字描边。
@@ -503,11 +486,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
 
 
-  // 牌河折叠态。常驻可见（默认 true），但用户可手动折叠/展开以释放空间。
-  // 状态在弹窗生命周期内持久化：用户收起 → 重新展开会保持上一次选择，
-  // 不强制每次都重置为展开。
-  // 牌河折叠态：常驻显示在弹窗，常规是收起状态（释放空间，点击展开）
-  bool _discardExpanded = false;
+
 
   @override
   void initState() {
@@ -612,37 +591,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // 不再切「等待画面 / x.xs 无更新」。原因不只是观感：
   // 悬浮窗每几百毫秒就收到一帧，3 秒超时判据本身就在临界值附近抖，
   // 状态条会忽而「实时」忽而「无更新」，用户据此以为识别在断断续续地挂。
-  // 引擎侧已经保证 hand 一旦建立永不为空（多重集稳定器），界面上有没有
-  // 内容才是用户真正关心的，这条状态条只需要传达"本窗在实时工作"。
-  //
-  // 同时移除了原本每秒一次的「连接心跳」定时器：它唯一的作用就是驱动这条
-  // 状态条重绘，而每秒 setState 会把整个悬浮窗 Widget 树重建一遍，在
-  // 覆盖层里是实打实的额外开销。状态条恒定为常量后它就没有任何意义了。
-  Widget _statusBanner() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-      decoration: BoxDecoration(
-        color: const Color(0xFF004D40).withAlpha(140),
-        borderRadius: BorderRadius.circular(3),
-        border: Border.all(color: const Color(0xFF00BFA5), width: 0.5),
-      ),
-      child: const Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.verified_user_rounded, color: Color(0xFF64FFDA), size: 8),
-          SizedBox(width: 2),
-          Text(
-            '纯视觉沙盒 · 免封',
-            style: TextStyle(
-              color: Color(0xFF64FFDA),
-              fontSize: 7.5,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+
 
 
   // 诊断行：恒定显示识别链路关键指标，便于"识别不出来"时一眼定位断在哪：
@@ -816,148 +765,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
 
 
-  // 牌河段容器：展开时占弹性高度（Expanded），折叠时收回成一行标题、
-  // 不占弹性高度，把纵向空间让给「建议 / 手牌」两段 —— 与识别区域收起行为一致。
-  Widget _discardBlock({
-    required String discards,
-    required int discardCount,
-    required String hand,
-  }) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 2),
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-      decoration: BoxDecoration(
-        color: Colors.white.withAlpha(6),
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: Colors.white10, width: 0.5),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              Text(
-                '牌河 ($discardCount张)',
-                style: const TextStyle(
-                  color: Colors.white70,
-                  fontSize: 9.5,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.3,
-                ),
-              ),
-              const Spacer(),
-              GestureDetector(
-                onTap: () => setState(() => _discardExpanded = !_discardExpanded),
-                behavior: HitTestBehavior.opaque,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                  child: Text(
-                    _discardExpanded ? '收起 ▾' : '展开 ▸',
-                    style: const TextStyle(
-                      color: Color(0xFF80CBC4),
-                      fontSize: 9.5,
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          if (_discardExpanded) ...[
-            const SizedBox(height: 3),
-            _discardSection(discards, discardCount, hand: hand),
-          ],
-        ],
-      ),
-    );
-  }
 
-  // 牌河内容：按花色分组的 chip 列表，绝张牌自动标灰底+青绿描边+"绝"标。
-  // 牌河（所有玩家打出的牌）展示，按花色分组，与手牌同款 chip
-  Widget _discardSection(
-    String discards,
-    int discardCount, {
-    required String hand,
-  }) {
-    if (discards.isEmpty || discardCount == 0) {
-      // 空状态占位：让用户知道"按钮没坏，是因为还没识别到牌河"。
-      // 用中性灰文字 + 字号 10，绝不引红/橙/琥珀色。
-      return Padding(
-        padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
-        child: Text(
-          '等识别到各家打出的牌后在这里展示…',
-          style: TextStyle(
-            color: Colors.white.withAlpha(85),
-            fontSize: 10,
-            fontStyle: FontStyle.italic,
-          ),
-        ),
-      );
-    }
-    final grouped = _groupHand(discards);
-    final tilesAll = grouped.values.fold<int>(0, (s, l) => s + l.length);
-    if (tilesAll == 0) return const SizedBox.shrink();
-    // 计算绝张：手牌 + 牌河 累计 ≥ 4 张的牌型（这是 App 自动算出来的、肉眼看不出来的高价值信息）。
-    final dead = _computeDeadTiles(hand, discards);
-    final order = ['m', 'p', 's', 'z'];
-    return Container(
-      padding: const EdgeInsets.fromLTRB(8, 2, 8, 8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          for (final k in order)
-            if (grouped[k]!.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 4),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    SizedBox(
-                      width: 14,
-                      child: Text(
-                        k == 'z'
-                            ? '字'
-                            : (k == 'm' ? '万' : (k == 'p' ? '筒' : '条')),
-                        style: TextStyle(
-                          color: k == 'z'
-                              ? const Color(0xFFB0BEC5)
-                              : (k == 'm'
-                                  ? const Color(0xFF1E6B7A)
-                                  : (k == 'p'
-                                      ? const Color(0xFF1E6B7A)
-                                      : const Color(0xFF66BB6A))),
-                          fontSize: 10,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                    Expanded(
-                      child: HandChipRow(
-                        hand: grouped[k]!.join(),
-                        chipSize: 18,
-                        deadTiles: dead,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-        ],
-      ),
-    );
-  }
-
-  // 绝张计算：手牌 + 牌河 累计 ≥ 4 张的牌型（mpsz 形式）视为"绝张"。
-  // 绝张 = 该牌型 4 张全部可见（手牌里 + 牌河里），任何人都凑不出该牌。
-  // 对自己的意义：① 该牌不可能凑成对子/刻子，可作为优先弃牌；② 别人也几乎不可能拿它和牌 → 安全牌。
-  Set<String> _computeDeadTiles(String hand, String discards) {
-    final counts = <String, int>{};
-    for (final t in _mpszToTiles(hand)) {
-      counts[t] = (counts[t] ?? 0) + 1;
-    }
-    for (final t in _mpszToTiles(discards)) {
-      counts[t] = (counts[t] ?? 0) + 1;
-    }
-    return counts.entries.where((e) => e.value >= 4).map((e) => e.key).toSet();
-  }
 
   // 自由缩放把手：右下角，支持手指任意平滑拖动，实时自由缩放，带有边界临界点与触感反馈
   Widget _resizeHandle() {
@@ -2056,7 +1864,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
   Widget _adviceSection(List<dynamic> advice, String best, int count) {
     final status = result?['status'] as String? ?? '';
-    final bool isDingquePhase = (result?['dingque_phase'] == true || status == 'dingque') && advice.isEmpty;
+    final bool isDingquePhase = (result?['dingque_phase'] == true || status == 'dingque');
     final swapData = result?['swap_advice'] as Map<String, dynamic>?;
     final alertData = result?['tenpai_alert'] as Map<String, dynamic>?;
     final fastAdvice = result?['fast_advice'] as Map<String, dynamic>?;
@@ -2374,8 +2182,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       final int count = (result?['count'] ?? 0) as int;
       final List<dynamic> advice = _shownAdvice;
       final String best = _shownBest;
-      final String discards = (result?['discards'] ?? '') as String;
-      final int discardCount = (result?['discard_count'] ?? 0) as int;
       final String status = (result?['status'] as String?) ?? '';
       final bool inMatch = status != 'waiting' &&
           status != 'no_tiles' &&
@@ -2468,9 +2274,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                                       ),
                                     ),
                                   ),
-                                  const SizedBox(width: 4),
-                                  _statusBanner(),
-
                                 ],
                               ),
                             ),
@@ -2605,10 +2408,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                         // 3. 全场记牌器（对局开始后显示，实时统揽全场 108/136 张活牌剩余数）
                         if (inMatch) ...[
                           _remainingMatrixSection(result?['remaining_matrix'] as Map<String, dynamic>?),
-                          if (discards.isNotEmpty && discardCount > 0) ...[
-                            const SizedBox(height: 5),
-                            _discardBlock(discards: discards, discardCount: discardCount, hand: hand),
-                          ],
                         ],
                         // 底部安全留白：确保可以顺畅滑到最底部且不被右下角缩放手柄遮挡
                         const SizedBox(height: 26),

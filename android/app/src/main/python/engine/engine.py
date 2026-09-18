@@ -879,6 +879,8 @@ def detect_river_discards(image: np.ndarray, detector, mode: str = "4p") -> List
         mask_rect(0.42, 0.20, 0.58, 0.36)   # 居中顶部玩法标题
         mask_rect(0.435, 0.365, 0.535, 0.540) # 居中正方形骰子盒/倒计时
         mask_rect(0.44, 0.58, 0.56, 0.70)   # 居中底部底分等文本
+        mask_rect(0.56, 0.52, 0.82, 0.78)   # 右侧玩家操作按钮区(换牌/过/碰/杠/胡)
+        mask_rect(0.30, 0.46, 0.70, 0.74)   # 中央定缺选门按钮区
 
         # 形态学闭运算填平牌面缝隙
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
@@ -938,7 +940,7 @@ def detect_river_discards(image: np.ndarray, detector, mode: str = "4p") -> List
                     if best_c >= 0.85:
                         break
 
-                if best_l and best_c >= 0.48:
+                if best_l and best_c >= 0.75:
                     try:
                         avail = available_set(mode)
                         if mpsz_to_tile34_index(best_l) in avail:
@@ -2285,13 +2287,13 @@ class Engine:
                 self._frame_skipper = _FrameSkipper()
             self._prev_raw_n = curr_raw_n
 
-            # 新洗牌发牌 / 换三张判定：若当前帧原始手牌张数较完整（>=10张），且与旧稳定手牌重合度很低（<= 5 张相同），
+            # 新洗牌发牌 / 换三张判定：若当前帧原始手牌张数较完整（>=10张），且与旧稳定手牌重合度很低（<= 8 张相同），
             # 说明洗牌重新发牌或刚发生换三张！立即重置稳定器、帧跳跃缓存与牌池，绝不让旧牌反向覆盖新牌！
             if self._hand_stab.stable_mpsz and len(raw_labels) >= 10:
                 old_set = parse_mpsz_tiles(self._hand_stab.stable_mpsz)
                 raw_set = [l for l in raw_labels if l]
                 overlap = sum(min(old_set.count(t), raw_set.count(t)) for t in set(raw_set))
-                if overlap <= 5 and len(old_set) >= 10:
+                if overlap <= 8 and len(old_set) >= 10:
                     self._monotonic_discards.clear()
                     self._hand_stab.reset()
                     self._tile_voter.reset()
@@ -2303,7 +2305,14 @@ class Engine:
                     self._last_stable_counter = Counter()
                     self._last_stable_n = 0
 
-            hand_mpsz = self._hand_stab.observe(raw_labels, hsizes, avail)
+            # TencentGridDetector 直接采信高精度网格整排切片结果，0 帧延迟
+            if is_grid_det and len(raw_labels) in hsizes:
+                hand_mpsz = "".join(raw_labels)
+                self._hand_stab.stable_mpsz = hand_mpsz
+                self._hand_stab._stable_key = _counter_to_mpsz(Counter(raw_labels))
+                self._hand_stab.pending = False
+            else:
+                hand_mpsz = self._hand_stab.observe(raw_labels, hsizes, avail)
 
             # 手牌行的逐张标签与稳定手牌对齐（避免"显示的牌"和"建议打的牌"对不上）
             if hand_idx is not None and hand_mpsz:
@@ -2311,40 +2320,68 @@ class Engine:
                     voted_rows[hand_idx], hand_mpsz)
                 hand_row = voted_rows[hand_idx]
 
+            # 定缺检测（四川麻将模式：支持手动覆盖与视觉自动感知双通道）
+            # 必须在扫描弃牌前判定阶段，彻底杜绝换牌/定缺阶段中央UI被误认为弃牌
+            dingque_suit, dingque_name = None, None
+            is_dq_phase = False
+            if is_dingque_mode(self.mode):
+                # 1. 优先读取手动覆盖或头像定缺门标
+                override = getattr(self, "_dingque_override", None)
+                if override is not None and 0 <= override <= 2:
+                    dingque_suit = override
+                    dingque_name = ['万', '筒', '条'][dingque_suit]
+                else:
+                    dingque_suit, dingque_name = detect_dingque(full_for_preview)
+
+                if dingque_suit is not None:
+                    self._match_started = True
+
+                # 未确认头像定缺门标且未进入打牌阶段时，检测中央定缺色盘
+                if not getattr(self, "_match_started", False) and hasattr(detector, "is_dingque_phase"):
+                    is_dq_phase = detector.is_dingque_phase(full_for_preview)
+
+                # 开局前阶段（换三张/定缺中）：牌桌绝对没有打出的牌，彻底重置单调牌池
+                if is_dq_phase or (dingque_suit is None and not getattr(self, "_match_started", False)):
+                    self._monotonic_discards.clear()
+
             discard_labels = []
             ih, _ = image.shape[:2]
-            for _i, row in enumerate(voted_rows):
-                if _i == hand_idx:
-                    continue
-                # 牌河物理位置先验：牌河只能位于牌桌中央区域（0.20 <= yc <= 0.72）
-                ys = [d[0][1] for d in row]
-                yc = sum(ys) / len(ys) if ys else 0
-                if yc < 0.20 * ih or yc > 0.72 * ih:
-                    continue
-                for (rect, label, conf) in row:
-                    if label is not None and conf >= 0.78:
-                        try:
-                            if mpsz_to_tile34_index(label) in avail:
-                                discard_labels.append(label)
-                        except Exception:
-                            pass
+            # 仅在非定缺阶段且进入正式对局后扫描牌河
+            allow_river_scan = not is_dq_phase and (not is_dingque_mode(self.mode) or getattr(self, "_match_started", False) or dingque_suit is not None)
 
-            # 融合牌桌中央区域四方牌河的多角度弃牌检测（仅在已识别出有效手牌时提取，杜绝非对局/大厅/未开局误报）
-            if hand_row and (len(hand_row) >= 4 or len(hand_mpsz) >= 4):
-                try:
-                    central_discards = detect_river_discards(image, self._detector, mode=self.mode)
-                    for cd in central_discards:
-                        if cd and mpsz_to_tile34_index(cd) in avail:
-                            discard_labels.append(cd)
-                except Exception:
-                    pass
-                try:
-                    melds = detect_player_melds(image, self._detector, mode=self.mode)
-                    for md in melds:
-                        if md and mpsz_to_tile34_index(md) in avail:
-                            discard_labels.append(md)
-                except Exception:
-                    pass
+            if allow_river_scan:
+                for _i, row in enumerate(voted_rows):
+                    if _i == hand_idx:
+                        continue
+                    # 牌河物理位置先验：牌河只能位于牌桌中央区域（0.20 <= yc <= 0.72）
+                    ys = [d[0][1] for d in row]
+                    yc = sum(ys) / len(ys) if ys else 0
+                    if yc < 0.20 * ih or yc > 0.72 * ih:
+                        continue
+                    for (rect, label, conf) in row:
+                        if label is not None and conf >= 0.78:
+                            try:
+                                if mpsz_to_tile34_index(label) in avail:
+                                    discard_labels.append(label)
+                            except Exception:
+                                pass
+
+                # 融合牌桌中央区域四方牌河的多角度弃牌检测（仅在已识别出有效手牌时提取，杜绝非对局/大厅/未开局误报）
+                if hand_row and (len(hand_row) >= 4 or len(hand_mpsz) >= 4):
+                    try:
+                        central_discards = detect_river_discards(image, self._detector, mode=self.mode)
+                        for cd in central_discards:
+                            if cd and mpsz_to_tile34_index(cd) in avail:
+                                discard_labels.append(cd)
+                    except Exception:
+                        pass
+                    try:
+                        melds = detect_player_melds(image, self._detector, mode=self.mode)
+                        for md in melds:
+                            if md and mpsz_to_tile34_index(md) in avail:
+                                discard_labels.append(md)
+                    except Exception:
+                        pass
 
             curr_cnt = _mpsz_to_counter(hand_mpsz) if hand_mpsz else Counter()
             curr_n = sum(curr_cnt.values())
@@ -2367,6 +2404,10 @@ class Engine:
                     if a_count > 0:
                         drawn_from_diff = added_tile
                         break
+                self._match_started = True
+
+            if curr_n in (14, 11, 8, 5, 2):
+                self._match_started = True
 
             if curr_n > 0:
                 self._last_stable_counter = curr_cnt
@@ -2389,11 +2430,12 @@ class Engine:
                     drawing_tile = sorted_hand_by_x[-1][1]
 
             # 牌池单调累加器：同局内牌池只增不减，防止由于动画/飞牌/气泡遮挡导致牌池牌数掉落
-            for lab in discard_labels:
-                if lab:
-                    cnt = discard_labels.count(lab)
-                    if cnt > self._monotonic_discards[lab]:
-                        self._monotonic_discards[lab] = cnt
+            if allow_river_scan:
+                for lab in discard_labels:
+                    if lab:
+                        cnt = discard_labels.count(lab)
+                        if cnt > self._monotonic_discards[lab]:
+                            self._monotonic_discards[lab] = cnt
 
             # 计算手牌各牌计数
             hand_counts = [0] * 34
@@ -2416,28 +2458,6 @@ class Engine:
             disc_mpsz = self._labels_to_mpsz([lab for lab, cnt in self._monotonic_discards.items() for _ in range(cnt)], avail)
 
             hand = TileCollection.from_mpsz(hand_mpsz) if hand_mpsz else None
-
-            # 定缺检测（四川麻将模式：支持手动覆盖与视觉自动感知双通道）
-            dingque_suit, dingque_name = None, None
-            is_dq_phase = False
-            if is_dingque_mode(self.mode):
-                # 1. 优先读取手动覆盖或头像定缺门标
-                override = getattr(self, "_dingque_override", None)
-                if override is not None and 0 <= override <= 2:
-                    dingque_suit = override
-                    dingque_name = ['万', '筒', '条'][dingque_suit]
-                else:
-                    dingque_suit, dingque_name = detect_dingque(full_for_preview)
-
-                # 2. 状态守卫互斥：若定缺已定、对局已开始、牌桌已有弃牌/副露，对局必然已经进行中，绝不可能是定缺阶段
-                has_discards = bool(discard_labels or self._monotonic_discards)
-                if (dingque_suit is not None) or has_discards:
-                    self._match_started = True
-
-                game_already_started = getattr(self, "_match_started", False) or (dingque_suit is not None) or has_discards
-
-                if not game_already_started and hasattr(detector, "is_dingque_phase"):
-                    is_dq_phase = detector.is_dingque_phase(full_for_preview)
 
             # 探测对手定缺徽章与根据弃牌反推对手攻防倾向（防点炮预警）
             opponent_dingque_suits: List[int] = []

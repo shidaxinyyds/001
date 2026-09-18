@@ -274,57 +274,63 @@ class TencentGridDetector(Detector):
         if image_bgr is None or image_bgr.size == 0:
             return False
         ih, iw = image_bgr.shape[:2]
-        # 定缺选门三色盘按钮严格位于中央区域
-        sub = image_bgr[int(ih * 0.50):int(ih * 0.72), int(iw * 0.35):int(iw * 0.65)]
+        # 定缺选门色盘按钮位于中央区域 (y: 40%~75%, x: 25%~75%)
+        sub = image_bgr[int(ih * 0.40):int(ih * 0.75), int(iw * 0.25):int(iw * 0.75)]
         if sub.shape[0] < 20 or sub.shape[1] < 20:
             return False
         hsv = cv2.cvtColor(sub, cv2.COLOR_BGR2HSV)
-        red_mask = (((hsv[:, :, 0] <= 10) | (hsv[:, :, 0] >= 170)) & (hsv[:, :, 1] >= 120) & (hsv[:, :, 2] >= 120)).astype(np.uint8) * 255
-        green_mask = ((hsv[:, :, 0] >= 40) & (hsv[:, :, 0] <= 85) & (hsv[:, :, 1] >= 100) & (hsv[:, :, 2] >= 100)).astype(np.uint8) * 255
-        orange_mask = ((hsv[:, :, 0] >= 12) & (hsv[:, :, 0] <= 25) & (hsv[:, :, 1] >= 120) & (hsv[:, :, 2] >= 120)).astype(np.uint8) * 255
+        red_mask = (((hsv[:, :, 0] <= 10) | (hsv[:, :, 0] >= 170)) & (hsv[:, :, 1] >= 100) & (hsv[:, :, 2] >= 100)).astype(np.uint8) * 255
+        green_mask = ((hsv[:, :, 0] >= 35) & (hsv[:, :, 0] <= 85) & (hsv[:, :, 1] >= 80) & (hsv[:, :, 2] >= 80)).astype(np.uint8) * 255
+        orange_mask = ((hsv[:, :, 0] >= 8) & (hsv[:, :, 0] <= 32) & (hsv[:, :, 1] >= 75) & (hsv[:, :, 2] >= 90)).astype(np.uint8) * 255
 
         def get_main_center(mask):
             cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            valid = [c for c in cnts if 200 <= cv2.contourArea(c) <= 6000]
+            valid = []
+            for c in cnts:
+                area = cv2.contourArea(c)
+                if not (400 <= area <= 10000):
+                    continue
+                bx, by, bw, bh = cv2.boundingRect(c)
+                aspect = bw / float(bh)
+                if not (0.65 <= aspect <= 1.45):
+                    continue
+                hull = cv2.convexHull(c)
+                if cv2.contourArea(hull) / float(bw * bh) < 0.58:
+                    continue
+                M = cv2.moments(c)
+                if M['m00'] > 0:
+                    valid.append(((int(M['m10'] / M['m00']), int(M['m01'] / M['m00'])), area))
             if not valid:
                 return None
-            c = max(valid, key=cv2.contourArea)
-            bx, by, bw, bh = cv2.boundingRect(c)
-            # 按钮正圆盘几何约束：真实定缺选门按钮为圆形 (0.75 <= bw/bh <= 1.30)，彻底排除长条形麻将牌 (bw/bh ~ 0.70)
-            aspect = bw / float(bh)
-            if not (0.75 <= aspect <= 1.30):
-                return None
-            # 实心度校验：圆盘面积与外接矩形比值应接近 pi/4 (~0.78)，排除中空噪点与牌河文字
-            if cv2.contourArea(c) / float(bw * bh) < 0.55:
-                return None
-            M = cv2.moments(c)
-            if M['m00'] == 0:
-                return None
-            return int(M['m10'] / M['m00']), int(M['m01'] / M['m00'])
+            return max(valid, key=lambda x: x[1])[0]
 
         rc = get_main_center(red_mask)
         gc = get_main_center(green_mask)
         oc = get_main_center(orange_mask)
 
-        if not (rc and gc and oc):
-            return False
+        # 1. 三个按钮全在：万(红) -> 条(绿) -> 筒(黄/橙)
+        if rc and gc and oc:
+            rcx, rcy = rc
+            gcx, gcy = gc
+            ocx, ocy = oc
+            if rcx < gcx < ocx and max(abs(rcy - gcy), abs(gcy - ocy), abs(rcy - ocy)) <= 25:
+                return True
 
-        rcx, rcy = rc
-        gcx, gcy = gc
-        ocx, ocy = oc
+        # 2. 悬浮窗遮挡最左侧'万'（或0万断门）：绿(条) -> 橙(筒)
+        if gc and oc:
+            gcx, gcy = gc
+            ocx, ocy = oc
+            if gcx < ocx and abs(gcy - ocy) <= 25 and (ocx - gcx) < sub.shape[1] * 0.40:
+                return True
 
-        # 水平必须自左向右依次为：万(红) -> 条(绿) -> 筒(黄/橙)
-        if not (rcx < gcx < ocx):
-            return False
-        # 三个圆盘中心必须处于同一水平线上
-        if abs(rcy - gcy) > 16 or abs(gcy - ocy) > 16 or abs(rcy - ocy) > 20:
-            return False
-        # 间距必须匀称
-        d1 = gcx - rcx
-        d2 = ocx - gcx
-        if not (25 <= d1 <= 140 and 25 <= d2 <= 140 and abs(d1 - d2) <= 40):
-            return False
-        return True
+        # 3. 遮挡最右侧'筒'（或0筒断门）：红(万) -> 绿(条)
+        if rc and gc:
+            rcx, rcy = rc
+            gcx, gcy = gc
+            if rcx < gcx and abs(rcy - gcy) <= 25 and (gcx - rcx) < sub.shape[1] * 0.40:
+                return True
+
+        return False
 
     def detect_dingque(self, image_bgr: np.ndarray) -> str:
         ih, iw = image_bgr.shape[:2]
