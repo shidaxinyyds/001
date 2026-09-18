@@ -24,7 +24,7 @@ from utils.stubs import CVImage
 from trainer.trainer import Trainer
 from trainer.objects.tile_collection import TileCollection
 from trainer.objects.tile import Tile
-from trainer.utils.convert import mpsz_to_tile34_index, tiles34_index_to_mpsz
+from trainer.utils.convert import mpsz_to_tile34_index, tiles34_index_to_mpsz, tile_to_chinese
 from modes import (
     load_mode,
     load_advice_config,
@@ -1314,8 +1314,46 @@ class Engine:
                             "ev": sr.get("ev", 0.0),
                             "reason": sr.get("reason", ""),
                             "ting_tiles": sr.get("ting_tiles", []),
+                            "ting_details": sr.get("ting_details", []),
                             "is_dingque": sr.get("is_dingque", False),
                         })
+                        if len(advice) >= 6:
+                            break
+                elif getattr(self.trainer, "general_results", None):
+                    advice = []
+                    for rank, gr in enumerate(self.trainer.general_results):
+                        u = gr.get("ukeire", 0)
+                        if min_ukeire > 0 and u < min_ukeire:
+                            continue
+                        sh = gr.get("shanten", shanten if shanten is not None else 2)
+                        t_str = gr.get("tile_str", str(gr.get("tile", "")))
+                        ting_details = gr.get("ting_details", [])
+                        ting_tiles = gr.get("ting_tiles", [])
+                        if sh == 0 and ting_details:
+                            wait_names = [td["name"] for td in ting_details]
+                            if u > 0:
+                                rsn = f"听 {'/'.join(wait_names[:3])} · 余 {u} 张"
+                            else:
+                                rsn = f"听 {'/'.join(wait_names[:3])}（绝张）"
+                        elif sh == 0:
+                            rsn = f"听牌 · 进张{u}张"
+                        elif sh == 1:
+                            rsn = f"一向听 · 进张{u}张"
+                        elif sh is not None and sh >= 2:
+                            rsn = f"{sh}向听 · 进张{u}张"
+                        else:
+                            rsn = f"进张{u}张"
+                        entry = {
+                            "tile": t_str,
+                            "ukeire": int(u),
+                            "shanten": sh,
+                            "ev": float(10000 - rank * 100 + int(u) * 10),
+                            "reason": rsn,
+                            "ting_tiles": ting_tiles,
+                            "ting_details": ting_details,
+                            "is_dingque": False,
+                        }
+                        advice.append(entry)
                         if len(advice) >= 6:
                             break
                 else:
@@ -1341,9 +1379,11 @@ class Engine:
                             "ev": float(10000 - rank * 100 + int(u) * 10),
                             "reason": rsn,
                             "ting_tiles": [],
+                            "ting_details": [],
                             "is_dingque": False,
                         }
                         advice.append(entry)
+
         except Exception:
             traceback.print_exc()
 
@@ -1848,6 +1888,7 @@ class Engine:
                         "ev": r["ev"],
                         "reason": r["reason"],
                         "ting_tiles": r["ting_tiles"],
+                        "ting_details": r.get("ting_details", []),
                         "is_dingque": r["is_dingque"],
                     } for r in sc_res[:6]]
             except Exception:
@@ -2666,6 +2707,143 @@ class Engine:
                                 adv["defense_reason"] = radar_map[t]["reason"]
                 except Exception:
                     pass
+            elif tile_count > 0 and status not in ("waiting", "no_tiles") and hand_mpsz:
+                # 针对非川麻模式（国标、日麻、大众、武汉、长沙、二人麻将等）的全息防点炮雷达
+                try:
+                    ratings = []
+                    for t in range(34):
+                        if hand_counts_final[t] <= 0:
+                            continue
+                        rem = max(0, 4 - (hand_counts_final[t] + disc_counts_out[t]))
+                        seen = 4 - rem - hand_counts_final[t]
+                        num = (t % 9) + 1 if t < 27 else 0
+                        is_edge = (t < 27 and num in (1, 9)) or (t >= 27)
+                        is_middle = (t < 27 and num in (4, 5, 6))
+
+                        if rem == 0 or seen >= 3:
+                            lvl = "SAFE"
+                            reason = f"现物绝张：场上已见 {seen} 张，绝不点炮"
+                        elif seen >= 2:
+                            lvl = "SAFE"
+                            reason = f"安全熟张：场上已见 {seen} 张，常规防守"
+                        elif is_middle and seen == 0:
+                            lvl = "DANGER"
+                            reason = f"高危生张：中心张纯生张(0见)，点炮率高！"
+                        elif is_edge and seen >= 1:
+                            lvl = "SAFE"
+                            reason = f"偏张已见：见 {seen} 张，相对安全"
+                        elif seen == 0:
+                            lvl = "DANGER" if t < 27 else "SUSPICIOUS"
+                            reason = f"生张：尚未出现过，存在暗叫风险"
+                        else:
+                            lvl = "SUSPICIOUS"
+                            reason = f"一般生熟张：场上已见 {seen} 张"
+
+                        t_mpsz = tiles34_index_to_mpsz(t)
+                        ratings.append({
+                            "tile": t_mpsz,
+                            "tile_cn": tile_to_chinese(t_mpsz),
+                            "level": lvl,
+                            "reason": reason,
+                            "seen": seen,
+                            "remaining": rem,
+                        })
+                    defense_radar = ratings
+                except Exception:
+                    pass
+
+            # 附加出牌决策安全评级
+            if advice and defense_radar:
+                radar_map = {r["tile"]: r for r in defense_radar}
+                for adv in advice:
+                    t = adv.get("tile")
+                    if t in radar_map:
+                        adv["defense_level"] = radar_map[t]["level"]
+                        adv["defense_reason"] = radar_map[t]["reason"]
+
+            defense_map = {r["tile"]: r["level"] for r in defense_radar} if defense_radar else {}
+
+            # ===== 听牌·绝张雷达详情推演 =====
+            ting_details = []
+            if advice and advice[0].get("ting_details"):
+                ting_details = advice[0].get("ting_details", [])
+            elif shanten == 0 and hand_mpsz and tile_count > 0:
+                if is_sichuan_family(self.mode):
+                    try:
+                        from sichuan import SichuanAnalyzer
+                        pool_rem_27 = [
+                            max(0, 4 - (hand_counts_final[i] + disc_counts_out[i]))
+                            for i in range(27)
+                        ]
+                        w_dict = SichuanAnalyzer.find_waiting_tiles(hand_counts_final[:27], 0, pool_rem_27)
+                        for w_t, rem in w_dict.items():
+                            w_str = tiles34_index_to_mpsz(w_t)
+                            w_fan = SichuanAnalyzer.calculate_fan(hand_counts_final[:27], w_t, 0)
+                            ting_details.append({
+                                "tile": w_str,
+                                "name": tile_to_chinese(w_str),
+                                "remaining": rem,
+                                "is_dead": (rem == 0),
+                                "fan": w_fan,
+                            })
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        from trainer.objects.tile_collection import TileCollection
+                        from trainer.utils.shanten import calculate_shanten
+                        h_tc = TileCollection.from_mpsz(hand_mpsz)
+                        own_34 = h_tc.tiles34
+                        for d in avail:
+                            if own_34[d] >= 4:
+                                continue
+                            drawn_34 = own_34[:]
+                            drawn_34[d] += 1
+                            if calculate_shanten(TileCollection(drawn_34)) == -1:
+                                rem = max(0, 4 - (own_34[d] + disc_counts_out[d]))
+                                w_str = tiles34_index_to_mpsz(d)
+                                ting_details.append({
+                                    "tile": w_str,
+                                    "name": tile_to_chinese(w_str),
+                                    "remaining": rem,
+                                    "is_dead": (rem == 0),
+                                })
+                    except Exception:
+                        pass
+
+            # ===== 双策略路线推演（稳胡极速流 vs 大番收益流）=====
+            fast_advice = None
+            big_advice = None
+            if advice:
+                # 稳胡极速流：向听数最小、进张最多
+                sorted_by_speed = sorted(advice, key=lambda a: (a.get("shanten", 2), -a.get("ukeire", 0)))
+                fast_top = sorted_by_speed[0]
+                fast_advice = {
+                    "tile": fast_top.get("tile"),
+                    "name": tile_to_chinese(fast_top.get("tile", "")),
+                    "ukeire": fast_top.get("ukeire", 0),
+                    "shanten": fast_top.get("shanten", 0),
+                    "tag": "稳胡极速流",
+                    "desc": f"最快叫听 · 进张{fast_top.get('ukeire', 0)}张",
+                    "defense_level": fast_top.get("defense_level", "SAFE"),
+                    "defense_reason": fast_top.get("defense_reason", ""),
+                }
+
+                # 大番收益流：预期 EV / 番数最高
+                sorted_by_ev = sorted(advice, key=lambda a: -a.get("ev", 0.0))
+                big_top = sorted_by_ev[0]
+                if big_top.get("tile") != fast_top.get("tile"):
+                    big_advice = {
+                        "tile": big_top.get("tile"),
+                        "name": tile_to_chinese(big_top.get("tile", "")),
+                        "ukeire": big_top.get("ukeire", 0),
+                        "shanten": big_top.get("shanten", 0),
+                        "tag": "大番收益流",
+                        "desc": f"博大牌 · 翻倍收益 ({big_top.get('reason', '')})",
+                        "defense_level": big_top.get("defense_level", "SAFE"),
+                        "defense_reason": big_top.get("defense_reason", ""),
+                    }
+
 
             # ===== 方向自愈：连续 3 帧整帧 0 牌 → 解锁重探方向 =====
             # 用户中途旋转手机/切后台再回来，VirtualDisplay 朝向可能变了，
@@ -2761,6 +2939,10 @@ class Engine:
                 "tenpai_alert": tenpai_alert,
                 "swap_advice": swap_advice,
                 "defense_radar": defense_radar,
+                "defense_map": defense_map,
+                "ting_details": ting_details,
+                "fast_advice": fast_advice,
+                "big_advice": big_advice,
                 "hot_tiles": hot_tiles,
                 "dead_tiles": dead_tiles,
                 "opponents_dingque": opponent_dingque_suits,

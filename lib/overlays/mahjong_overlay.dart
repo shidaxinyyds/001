@@ -38,6 +38,7 @@ class TileChip extends StatelessWidget {
   // 配色：灰底 + 青绿描边 + 「绝」白底青字标，绝对不用红/橙/琥珀。
   final bool dead;
   final bool isDrawing;
+  final String? defenseLevel;
 
   const TileChip({
     super.key,
@@ -46,7 +47,9 @@ class TileChip extends StatelessWidget {
     this.dim = false,
     this.dead = false,
     this.isDrawing = false,
+    this.defenseLevel,
   });
+
 
   @override
   Widget build(BuildContext context) {
@@ -155,6 +158,50 @@ class TileChip extends StatelessWidget {
                   ),
                 ),
               ),
+            if (defenseLevel == 'SAFE' && !isDrawing && !dead)
+              Positioned(
+                left: -4,
+                top: -4,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 2.5, vertical: 0.5),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1B5E20),
+                    borderRadius: BorderRadius.circular(2.5),
+                    border: Border.all(color: const Color(0xFF81C784), width: 0.5),
+                  ),
+                  child: const Text(
+                    '安',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 6.5,
+                      fontWeight: FontWeight.bold,
+                      height: 1.0,
+                    ),
+                  ),
+                ),
+              ),
+            if (defenseLevel == 'DANGER' && !isDrawing && !dead)
+              Positioned(
+                left: -4,
+                top: -4,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 2.5, vertical: 0.5),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFB71C1C),
+                    borderRadius: BorderRadius.circular(2.5),
+                    border: Border.all(color: const Color(0xFFFF8A80), width: 0.5),
+                  ),
+                  child: const Text(
+                    '危',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 6.5,
+                      fontWeight: FontWeight.bold,
+                      height: 1.0,
+                    ),
+                  ),
+                ),
+              ),
           ],
         ),
       ),
@@ -169,12 +216,15 @@ class HandChipRow extends StatelessWidget {
   final double chipSize;
   final Set<String>? deadTiles;
   final String? drawingTile;
+  final Map<String, dynamic>? defenseMap;
+
   const HandChipRow({
     super.key,
     required this.hand,
     this.chipSize = 24,
     this.deadTiles,
     this.drawingTile,
+    this.defenseMap,
   });
 
   @override
@@ -193,11 +243,13 @@ class HandChipRow extends StatelessWidget {
                 size: chipSize,
                 dead: deadTiles?.contains(entry.value) ?? false,
                 isDrawing: entry.key == drawingIndex,
+                defenseLevel: defenseMap?[entry.value]?.toString(),
               ))
           .toList(),
     );
   }
 }
+
 
 /// 把 "1m2m3p4p5z" 拆成 ["1m","2m","3p","4p","5z"]。
 List<String> _mpszToTiles(String mpsz) {
@@ -567,18 +619,31 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // 状态条重绘，而每秒 setState 会把整个悬浮窗 Widget 树重建一遍，在
   // 覆盖层里是实打实的额外开销。状态条恒定为常量后它就没有任何意义了。
   Widget _statusBanner() {
-    return const Padding(
-      padding: EdgeInsets.only(left: 4),
-      child: Text(
-        '● 实时',
-        style: TextStyle(
-          color: Color(0xFF80CBC4), // 青绿 200
-          fontSize: 9,
-          letterSpacing: 0.3,
-        ),
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+      decoration: BoxDecoration(
+        color: const Color(0xFF004D40).withAlpha(140),
+        borderRadius: BorderRadius.circular(3),
+        border: Border.all(color: const Color(0xFF00BFA5), width: 0.5),
+      ),
+      child: const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.verified_user_rounded, color: Color(0xFF64FFDA), size: 8),
+          SizedBox(width: 2),
+          Text(
+            '纯视觉沙盒 · 免封',
+            style: TextStyle(
+              color: Color(0xFF64FFDA),
+              fontSize: 7.5,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
       ),
     );
   }
+
 
   // 诊断行：恒定显示识别链路关键指标，便于"识别不出来"时一眼定位断在哪：
   //   状态  引擎最终状态（ok / no_tiles / 各种错误）
@@ -1569,7 +1634,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             drawingTile: result?['is_drawing'] == true
                 ? (result?['drawing_tile'] as String?)
                 : null,
+            defenseMap: result?['defense_map'] as Map<String, dynamic>?,
           ),
+
         ],
       ),
     );
@@ -1722,17 +1789,294 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     );
   }
 
+  Widget _buildTingRadarWidget(List<dynamic> tingDetails, int? shanten) {
+    if (tingDetails.isEmpty) return const SizedBox.shrink();
+
+    int totalRemaining = 0;
+    for (final t in tingDetails) {
+      if (t is Map) {
+        totalRemaining += (t['remaining'] as num? ?? 0).toInt();
+      }
+    }
+    final bool hasDead = tingDetails.any((t) => (t is Map && t['is_dead'] == true));
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: hasDead
+              ? [const Color(0xFF2A1015), const Color(0xFF3B151E)]
+              : [const Color(0xFF082216), const Color(0xFF0C3824)],
+        ),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(
+          color: hasDead ? const Color(0xFFFF5252) : const Color(0xFF00E676),
+          width: 0.9,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: (hasDead ? Colors.redAccent : Colors.greenAccent).withAlpha(40),
+            blurRadius: 4,
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Icon(
+                Icons.radar_rounded,
+                color: hasDead ? const Color(0xFFFF5252) : const Color(0xFF00E676),
+                size: 14,
+              ),
+              const SizedBox(width: 4),
+              Text(
+                '【🎯 听牌·胡牌绝张雷达】',
+                style: TextStyle(
+                  color: hasDead ? const Color(0xFFFF8A80) : const Color(0xFF69F0AE),
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.bold,
+                  decoration: TextDecoration.none,
+                ),
+              ),
+              const Spacer(),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                decoration: BoxDecoration(
+                  color: hasDead ? const Color(0xFFD32F2F) : const Color(0xFF2E7D32),
+                  borderRadius: BorderRadius.circular(3),
+                ),
+                child: Text(
+                  hasDead ? '含绝张警报' : '余 $totalRemaining 张机会',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 8.5,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 5),
+          Wrap(
+            spacing: 6,
+            runSpacing: 4,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              for (final item in tingDetails)
+                if (item is Map)
+                  Builder(builder: (context) {
+                    final tMpsz = (item['tile'] ?? '') as String;
+                    final rem = (item['remaining'] ?? 0) as int;
+                    final isDead = item['is_dead'] == true || rem == 0;
+                    final fan = item['fan'] as int?;
+
+                    return Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: isDead
+                            ? const Color(0xFFB71C1C).withAlpha(120)
+                            : const Color(0xFF1B5E20).withAlpha(120),
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(
+                          color: isDead ? const Color(0xFFFF5252) : const Color(0xFF81C784),
+                          width: 0.6,
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          TileChip(tile: tMpsz, size: 18, dead: isDead),
+                          const SizedBox(width: 3),
+                          if (isDead)
+                            const Text(
+                              '⚠️ 绝张0张·建议换叫',
+                              style: TextStyle(
+                                color: Color(0xFFFF8A80),
+                                fontSize: 8.5,
+                                fontWeight: FontWeight.bold,
+                                decoration: TextDecoration.none,
+                              ),
+                            )
+                          else
+                            Text(
+                              '余 $rem 张${fan != null && fan > 1 ? ' · $fan番' : ''}',
+                              style: const TextStyle(
+                                color: Color(0xFFA7FFEB),
+                                fontSize: 9,
+                                fontWeight: FontWeight.bold,
+                                decoration: TextDecoration.none,
+                              ),
+                            ),
+                        ],
+                      ),
+                    );
+                  }),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDualStrategyWidget(Map<String, dynamic> fast, Map<String, dynamic> big) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 6),
+      decoration: BoxDecoration(
+        color: const Color(0xFF151922),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: const Color(0xFF424242), width: 0.7),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.balance_rounded, color: Color(0xFFFFD54F), size: 13),
+              SizedBox(width: 4),
+              Text(
+                '【⚖️ 双策略路线博弈对比】',
+                style: TextStyle(
+                  color: Color(0xFFFFD54F),
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold,
+                  decoration: TextDecoration.none,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              // 稳胡极速流
+              Expanded(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF00382F).withAlpha(150),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: const Color(0xFF00BFA5), width: 0.7),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Row(
+                        children: [
+                          Icon(Icons.shield_outlined, color: Color(0xFF64FFDA), size: 10),
+                          SizedBox(width: 2),
+                          Text(
+                            '🛡️ 稳胡极速流',
+                            style: TextStyle(
+                              color: Color(0xFF64FFDA),
+                              fontSize: 9,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 3),
+                      Row(
+                        children: [
+                          const Text('打 ', style: TextStyle(color: Colors.white70, fontSize: 9.5)),
+                          TileChip(tile: (fast['tile'] ?? '') as String, size: 17),
+                          const SizedBox(width: 3),
+                          Text(
+                            '进张 ${fast['ukeire']} 张',
+                            style: const TextStyle(
+                              color: Colors.lightGreenAccent,
+                              fontSize: 9.5,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              // 大番收益流
+              Expanded(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF3E2723).withAlpha(150),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: const Color(0xFFFFB74D), width: 0.7),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Row(
+                        children: [
+                          Icon(Icons.workspace_premium_rounded, color: Color(0xFFFFD54F), size: 10),
+                          SizedBox(width: 2),
+                          Text(
+                            '👑 大番收益流',
+                            style: TextStyle(
+                              color: Color(0xFFFFD54F),
+                              fontSize: 9,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 3),
+                      Row(
+                        children: [
+                          const Text('打 ', style: TextStyle(color: Colors.white70, fontSize: 9.5)),
+                          TileChip(tile: (big['tile'] ?? '') as String, size: 17),
+                          const SizedBox(width: 3),
+                          Expanded(
+                            child: Text(
+                              (big['desc'] ?? '') as String,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Color(0xFFFFCC80),
+                                fontSize: 8.5,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _adviceSection(List<dynamic> advice, String best, int count) {
     final status = result?['status'] as String? ?? '';
     final bool isDingquePhase = (result?['dingque_phase'] == true || status == 'dingque') && advice.isEmpty;
     final swapData = result?['swap_advice'] as Map<String, dynamic>?;
     final alertData = result?['tenpai_alert'] as Map<String, dynamic>?;
+    final fastAdvice = result?['fast_advice'] as Map<String, dynamic>?;
+    final bigAdvice = result?['big_advice'] as Map<String, dynamic>?;
+    final tingDetails = (result?['ting_details'] as List<dynamic>?) ?? [];
+    final shanten = result?['shanten'] as int?;
 
     final Widget? swapWidget = (swapData != null && swapData['viable'] == true)
         ? _buildSwapAdviceWidget(swapData)
         : null;
     final Widget? alertWidget = (alertData != null && alertData['alert'] == true)
         ? _buildTenpaiAlertWidget(alertData)
+        : null;
+    final Widget? dualStrategyWidget = (fastAdvice != null &&
+            bigAdvice != null &&
+            fastAdvice['tile'] != bigAdvice['tile'])
+        ? _buildDualStrategyWidget(fastAdvice, bigAdvice)
+        : null;
+    final Widget? tingRadarWidget = (shanten == 0 || tingDetails.isNotEmpty)
+        ? _buildTingRadarWidget(tingDetails, shanten)
         : null;
 
     if (isDingquePhase) {
@@ -1773,6 +2117,15 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     if (advice.isEmpty) {
       if (swapWidget != null) {
         return swapWidget;
+      }
+      if (tingRadarWidget != null) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (alertWidget != null) alertWidget,
+            tingRadarWidget,
+          ],
+        );
       }
       final String hint;
       if (status == 'waiting') {
@@ -1826,6 +2179,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       children: [
         if (alertWidget != null) alertWidget,
         if (swapWidget != null) swapWidget,
+        if (tingRadarWidget != null) tingRadarWidget,
+        if (dualStrategyWidget != null) dualStrategyWidget,
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
           decoration: BoxDecoration(
@@ -1833,6 +2188,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             borderRadius: BorderRadius.circular(6),
             border: Border.all(color: const Color(0x6680CBC4), width: 0.8),
           ),
+
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -2095,7 +2451,26 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                                     ),
                                   ),
                                   const SizedBox(width: 4),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                                    decoration: BoxDecoration(
+                                      gradient: const LinearGradient(
+                                        colors: [Color(0xFFFFD700), Color(0xFFFFA000)],
+                                      ),
+                                      borderRadius: BorderRadius.circular(3),
+                                    ),
+                                    child: const Text(
+                                      'PRO',
+                                      style: TextStyle(
+                                        color: Color(0xFF1E1E1E),
+                                        fontSize: 8,
+                                        fontWeight: FontWeight.w900,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 4),
                                   _statusBanner(),
+
                                 ],
                               ),
                             ),

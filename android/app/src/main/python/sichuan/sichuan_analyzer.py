@@ -636,8 +636,16 @@ class SichuanAnalyzer:
                     danger_penalty = 1000.0
                     ev_score -= danger_penalty
 
-            if is_dingque_discard:
-                ev_score += 100000.0
+            ting_details = []
+            if waiting_dict:
+                for w, rem in waiting_dict.items():
+                    ting_details.append({
+                        "tile": index27_to_mpsz(w),
+                        "name": index27_to_chinese(w),
+                        "remaining": rem,
+                        "is_dead": (rem == 0),
+                        "fan": cls.calculate_fan(counts, w, num_fixed_melds),
+                    })
 
             results.append({
                 "tile": index27_to_mpsz(discard),
@@ -646,6 +654,7 @@ class SichuanAnalyzer:
                 "shanten": shanten,
                 "ev": round(ev_score, 1),
                 "ting_tiles": ting_mpsz_list,
+                "ting_details": ting_details,
                 "reason": reason,
                 "is_dingque": is_dingque_discard,
                 "danger_penalty": danger_penalty,

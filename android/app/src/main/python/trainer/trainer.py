@@ -3,7 +3,7 @@ from typing import Dict, List, Optional
 from .objects.tile import Tile
 from .objects.tile_collection import TileCollection
 from .utils.shanten import calculate_shanten
-from .utils.ukeire import calculate_ukeire_ex
+from .utils.ukeire import calculate_ukeire_ex, calculate_discards_info
 from .utils.convert import tile_to_chinese
 from modes import DEFAULT_MODE, available_set, is_sichuan_family, get_laizi
 
@@ -22,6 +22,7 @@ class Trainer:
         self.opponent_dingque_suits: List[int] = []
 
         self.sichuan_results: List[Dict] = []
+        self.general_results: List[Dict] = []
 
     def set_dingque(self, suit: Optional[int]) -> None:
         """设置四川麻将定缺门（0=万, 1=筒, 2=条）。"""
@@ -42,7 +43,8 @@ class Trainer:
         if is_sichuan_family(self.mode):
             try:
                 from sichuan import SichuanAnalyzer
-                hand_indices = SichuanAnalyzer.parse_hand_mpsz(str(self.hand))
+                hand_mpsz = "".join(str(t) for t in self.hand.all)
+                hand_indices = SichuanAnalyzer.parse_hand_mpsz(hand_mpsz)
                 counts = SichuanAnalyzer.counts_from_tiles(hand_indices)
                 return SichuanAnalyzer.calculate_shanten(counts)
             except Exception:
@@ -54,7 +56,8 @@ class Trainer:
         if is_sichuan_family(self.mode):
             try:
                 from sichuan import SichuanAnalyzer
-                hand_indices = SichuanAnalyzer.parse_hand_mpsz(str(self.hand))
+                hand_mpsz = "".join(str(t) for t in self.hand.all)
+                hand_indices = SichuanAnalyzer.parse_hand_mpsz(hand_mpsz)
                 counts = SichuanAnalyzer.counts_from_tiles(hand_indices)
                 # 牌池物理守恒：真实扣减全场公开可见牌（支持 28 型，含 7z 红中）
                 pool_remaining = [0] * 28
@@ -86,9 +89,12 @@ class Trainer:
             except Exception:
                 pass
 
-        return calculate_ukeire_ex(
+
+        self.general_results = calculate_discards_info(
             self.hand, self.available, self.disc_counts, self.meld_counts
         )
+        return {item["tile"]: item["ukeire"] for item in self.general_results}
+
 
     def discard(self, tile: Tile) -> str:
         valid_discards = self.calculate_discards()

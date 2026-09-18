@@ -185,6 +185,7 @@ MODES: Dict[str, Dict] = {
 
 ALIASES = {
     "sc": "sc_xz",
+    "sc_xlch": "sc_xl",
     "4p": "std_tdh",
 }
 
