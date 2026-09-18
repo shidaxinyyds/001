@@ -185,7 +185,7 @@ class GameMode {
       case '3p':
         return '三人竞技';
       case '2p':
-        return '二人雀神';
+        return '二人麻将';
       default:
         return mode;
     }

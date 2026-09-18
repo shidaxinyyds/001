@@ -172,7 +172,7 @@ MODES: Dict[str, Dict] = {
         "laizi": None,
     },
     "2p": {
-        "name": "二人雀神",
+        "name": "二人麻将",
         "players": 2,
         "available": _removed_to_available(_TWOP_REMOVED),
         "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
