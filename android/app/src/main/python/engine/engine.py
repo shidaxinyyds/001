@@ -24,7 +24,9 @@ from utils.stubs import CVImage
 from trainer.trainer import Trainer
 from trainer.objects.tile_collection import TileCollection
 from trainer.objects.tile import Tile
+from trainer.utils.shanten import calculate_shanten
 from trainer.utils.convert import mpsz_to_tile34_index, tiles34_index_to_mpsz, tile_to_chinese
+
 from modes import (
     load_mode,
     load_advice_config,
@@ -2790,9 +2792,8 @@ class Engine:
                         pass
                 else:
                     try:
-                        from trainer.objects.tile_collection import TileCollection
-                        from trainer.utils.shanten import calculate_shanten
                         h_tc = TileCollection.from_mpsz(hand_mpsz)
+
                         own_34 = h_tc.tiles34
                         for d in avail:
                             if own_34[d] >= 4:

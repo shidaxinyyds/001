@@ -179,10 +179,10 @@ class TencentGridDetector(Detector):
         best_lbl = sorted_candidates[0][0]
         best_sc = sorted_candidates[0][1]
 
-        # 1. 2万 vs 3万 物理笔画峰值严格判决（当最高候选为 2m 或 3m，或 2m 与 3m 分数接近时生效）
+        # 1. 2万 vs 3万 物理笔画峰值严格判决（当最高候选为 2m 或 3m 且两者分数极度接近时生效）
         c_2m = scores.get("2m", 0.0)
         c_3m = scores.get("3m", 0.0)
-        if best_lbl in ["2m", "3m"] or (max(c_2m, c_3m) > 0.35 and abs(c_2m - c_3m) < 0.20):
+        if best_lbl in ["2m", "3m"] and abs(c_2m - c_3m) < 0.06:
             top_crop = face[20:58, 14:66]
             top_gray = cv2.cvtColor(top_crop, cv2.COLOR_BGR2GRAY)
             # 自适应二值化 / 动态暗阈值，抵抗屏幕亮度变化
@@ -201,10 +201,10 @@ class TencentGridDetector(Detector):
                 best_lbl = "3m"
                 best_sc = max(c_3m, best_sc)
 
-        # 2. 2条 vs 3条 结构严格判决（当候选包含 2s/3s 且分数接近时生效）
+        # 2. 2条 vs 3条 结构严格判决（当候选包含 2s/3s 且分数极度接近时生效）
         c_2s = scores.get("2s", 0.0)
         c_3s = scores.get("3s", 0.0)
-        if best_lbl in ["2s", "3s"] or (max(c_2s, c_3s) > 0.35 and abs(c_2s - c_3s) < 0.20):
+        if best_lbl in ["2s", "3s"] and abs(c_2s - c_3s) < 0.06:
             bot_center = face[75:105, 35:45]
             bot_center_g = cv2.cvtColor(bot_center, cv2.COLOR_BGR2GRAY)
             bot_dark = float(np.mean(bot_center_g < 140))
@@ -215,10 +215,10 @@ class TencentGridDetector(Detector):
                 best_lbl = "3s"
                 best_sc = max(c_3s, best_sc)
 
-        # 3. 2筒 vs 3筒 结构严格判决（当候选包含 2p/3p 时生效）
+        # 3. 2筒 vs 3筒 结构严格判决（当候选包含 2p/3p 且分数极度接近时生效）
         c_2p = scores.get("2p", 0.0)
         c_3p = scores.get("3p", 0.0)
-        if best_lbl in ["2p", "3p"] or (max(c_2p, c_3p) > 0.35 and abs(c_2p - c_3p) < 0.20):
+        if best_lbl in ["2p", "3p"] and abs(c_2p - c_3p) < 0.06:
             face_hsv = cv2.cvtColor(face[40:80, 20:60], cv2.COLOR_BGR2HSV)
             red_cnt = int(np.sum(((face_hsv[:, :, 0] <= 10) | (face_hsv[:, :, 0] >= 170)) & (face_hsv[:, :, 1] >= 55) & (face_hsv[:, :, 2] >= 45)))
             if red_cnt > 30 and c_3p > 0.32:
@@ -367,7 +367,17 @@ class TencentGridDetector(Detector):
             x, y, bw, bh = cv2.boundingRect(c)
             # 立牌高度通常占手牌带 35% 以上，过滤左下角头像区域 (x >= sw * 0.05)
             if bh > sh * 0.35 and x < sw * 0.95 and bw >= 25 and x >= sw * 0.05:
-                boxes.append((x, y + y_min, bw, bh))
+                # 垂直投影修剪：去除边缘粘连的头像徽章、积分标牌、UI阴影等细窄干扰物
+                sub_mask = is_tile[y:y+bh, x:x+bw]
+                col_counts = np.sum(sub_mask, axis=0)
+                thresh = max(15, int(sh * 0.25))
+                valid_cols = np.where(col_counts >= thresh)[0]
+                if len(valid_cols) >= 20:
+                    refined_x = x + int(valid_cols[0])
+                    refined_bw = int(valid_cols[-1] - valid_cols[0] + 1)
+                    boxes.append((refined_x, y + y_min, refined_bw, bh))
+                else:
+                    boxes.append((x, y + y_min, bw, bh))
 
         if not boxes:
             return []
@@ -462,4 +472,4 @@ class TencentGridDetector(Detector):
         flat: DetectionResult = []
         for r in rows:
             flat.extend(r)
-        return Stage(image=image, detections=flat, stages={})
+        return Stage(result=flat, image=image)
