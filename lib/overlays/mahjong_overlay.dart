@@ -158,28 +158,6 @@ class TileChip extends StatelessWidget {
                   ),
                 ),
               ),
-            if (defenseLevel == 'SAFE' && !isDrawing && !dead)
-              Positioned(
-                left: -4,
-                top: -4,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 2.5, vertical: 0.5),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF1B5E20),
-                    borderRadius: BorderRadius.circular(2.5),
-                    border: Border.all(color: const Color(0xFF81C784), width: 0.5),
-                  ),
-                  child: const Text(
-                    '安',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 6.5,
-                      fontWeight: FontWeight.bold,
-                      height: 1.0,
-                    ),
-                  ),
-                ),
-              ),
             if (defenseLevel == 'DANGER' && !isDrawing && !dead)
               Positioned(
                 left: -4,
@@ -2362,7 +2340,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                                       borderRadius: BorderRadius.circular(3),
                                     ),
                                     child: const Text(
-                                      'PRO v1.3',
+                                      'PRO v1.4',
                                       style: TextStyle(
                                         color: Color(0xFF1E1E1E),
                                         fontSize: 7.5,

@@ -371,21 +371,37 @@ class TencentGridDetector(Detector):
         return gold_ratio >= 0.025
 
     def is_pick_phase(self, image_bgr: np.ndarray) -> bool:
-        """检测腾讯欢乐麻将「请任选一张牌」弹窗（深色弹窗背景+内嵌白色牌面）。"""
+        """检测腾讯欢乐麻将「请任选一张牌」弹窗或选牌确定界面。"""
         if image_bgr is None or image_bgr.size == 0:
             return False
         ih, iw = image_bgr.shape[:2]
-        # 任选牌弹窗位于屏幕中央（y: 50%~65%, x: 15%~92%）
+
+        # 形式1：中央大牌与金色「选牌确定」字样（用户点击选牌后状态）
+        tile_crop = image_bgr[int(ih * 0.20):int(ih * 0.42), int(iw * 0.44):int(iw * 0.56)]
+        if tile_crop.size > 0:
+            hsv_tile = cv2.cvtColor(tile_crop, cv2.COLOR_BGR2HSV)
+            white_ratio = float(np.mean((hsv_tile[:, :, 2] > 190) & (hsv_tile[:, :, 1] < 50)))
+
+            txt_area = image_bgr[int(ih * 0.41):int(ih * 0.53), int(iw * 0.36):int(iw * 0.64)]
+            if txt_area.size > 0:
+                hsv_txt = cv2.cvtColor(txt_area, cv2.COLOR_BGR2HSV)
+                gold = (hsv_txt[:, :, 0] >= 14) & (hsv_txt[:, :, 0] <= 36) & (hsv_txt[:, :, 1] >= 100) & (hsv_txt[:, :, 2] >= 130)
+                gold_ratio = float(np.mean(gold))
+                if white_ratio >= 0.15 and gold_ratio >= 0.028:
+                    return True
+
+        # 形式2：任选牌弹窗位于屏幕中央（深色弹窗背景+内嵌白色牌面横条）
         row = image_bgr[int(ih * 0.50):int(ih * 0.65), int(iw * 0.15):int(iw * 0.92)]
-        if row.size == 0:
-            return False
-        hsv = cv2.cvtColor(row, cv2.COLOR_BGR2HSV)
-        # 弹窗深色背景（V<80, S<60）
-        dark_bg = float(np.mean((hsv[:, :, 2] < 80) & (hsv[:, :, 1] < 60)))
-        # 弹窗内白色牌面（V>180, S<50）
-        white_tiles = float(np.mean((hsv[:, :, 2] > 180) & (hsv[:, :, 1] < 50)))
-        # 需要深色背景>=15% 且 白色牌面>=5%（避免把夜间模式等误判）
-        return dark_bg >= 0.15 and white_tiles >= 0.05
+        if row.size > 0:
+            hsv = cv2.cvtColor(row, cv2.COLOR_BGR2HSV)
+            # 弹窗深色背景（V<80, S<60）
+            dark_bg = float(np.mean((hsv[:, :, 2] < 80) & (hsv[:, :, 1] < 60)))
+            # 弹窗内白色牌面（V>180, S<50）
+            white_tiles = float(np.mean((hsv[:, :, 2] > 180) & (hsv[:, :, 1] < 50)))
+            if dark_bg >= 0.15 and white_tiles >= 0.05:
+                return True
+
+        return False
 
     def detect_pick_candidates(self, image_bgr: np.ndarray) -> List[str]:
         """识别「请任选一张牌」弹窗中的候选牌列表（1万~9万 或 条/筒 横排）。"""

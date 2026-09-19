@@ -771,13 +771,15 @@ def detect_dingque(screen_img: np.ndarray) -> Tuple[Optional[int], Optional[str]
         r_cnt = int(np.sum(red_mask))
         b_cnt = int(np.sum(blue_mask))
         y_cnt = int(np.sum(yellow_mask))
-        p_cnt = max(b_cnt, y_cnt)
 
-        if r_cnt > max(g_cnt, p_cnt) and r_cnt > 40:
+        # 真实定缺徽章为集中大色块，而金杯/等级常驻底噪仅 (y~240, b~60)。
+        # 万(红) >= 200 为主色；条(绿) >= 200 为主色；
+        # 筒(蓝/黄)必须达到 b >= 200 或 y >= 450，远超常驻金杯/等级底噪。
+        if r_cnt >= 200 and r_cnt > g_cnt and r_cnt > max(b_cnt, y_cnt):
             return 0, '万'
-        elif g_cnt > max(r_cnt, p_cnt) and g_cnt > 40:
+        elif g_cnt >= 200 and g_cnt > r_cnt and g_cnt > max(b_cnt, y_cnt):
             return 2, '条'
-        elif p_cnt > max(r_cnt, g_cnt) and p_cnt > 40:
+        elif (b_cnt >= 200 or y_cnt >= 450) and max(b_cnt, y_cnt) > max(g_cnt, r_cnt):
             return 1, '筒'
         return None, None
     except Exception:
@@ -799,13 +801,12 @@ def _detect_badge_suit(badge_crop: np.ndarray) -> Optional[int]:
     r_cnt = int(np.sum(red_mask))
     b_cnt = int(np.sum(blue_mask))
     y_cnt = int(np.sum(yellow_mask))
-    p_cnt = max(b_cnt, y_cnt)
 
-    if r_cnt > max(g_cnt, p_cnt) and r_cnt > 35:
+    if r_cnt >= 200 and r_cnt > g_cnt and r_cnt > max(b_cnt, y_cnt):
         return 0
-    elif g_cnt > max(r_cnt, p_cnt) and g_cnt > 35:
+    elif g_cnt >= 200 and g_cnt > r_cnt and g_cnt > max(b_cnt, y_cnt):
         return 2
-    elif p_cnt > max(r_cnt, g_cnt) and p_cnt > 35:
+    elif (b_cnt >= 200 or y_cnt >= 450) and max(b_cnt, y_cnt) > max(g_cnt, r_cnt):
         return 1
     return None
 
@@ -2315,20 +2316,12 @@ class Engine:
                 return self._build_skip_result(image, self._frame_skipper.cached)
             self._consecutive_skips = 0
 
-            # ===== 动画突变帧检测（吃碰杠过渡帧 / 菜单弹出帧） =====
-            # 整帧丢弃，等下一帧稳定画面。直接复用上次缓存的 payload（避免 UI 抽搐）。
-            # 启动期（前 WARMUP_FRAMES 帧）禁用突变检测：_MotionGuard._history 为空，
-            # 首帧必然被判定为非 spike——但首帧有可能是吃碰杠动画刚开始的瞬间，
-            # 会污染投票窗口。冷启动期一律走完整识别、把投票窗口灌满再说。
-            if self._warmup_left <= 0 and self._motion_guard.is_spike(diff):
-                self._consecutive_skips += 1
-                if self._frame_skipper.cached is not None:
-                    return self._build_skip_result(image, self._frame_skipper.cached)
-                # 没有任何历史稳定结果可复用，必须发一个明确的"等待"信号给 UI，
-                # 不能让 UI 看到旧的 hand/advice（场景可能完全变了）
-                self._tile_voter.reset()
-                return _error_result("animation",
-                                     "画面突变中（动画/菜单），等下一帧稳定再识别")
+            # ===== 动画突变帧检测（记录 diff，交由稳定器平滑，不再丢弃截断） =====
+            # 注：过往版本在此直接丢弃 spike 帧并返回 animation 错误，导致换牌/定缺/选牌
+            # 弹窗弹出时因整屏突变（diff高达5000+）被误判为动画突变帧而永久卡在“画面识别中，请稍候…”。
+            # 现在彻底移除此丢帧截断，所有帧直接交由主识别器与多重集稳定器处理。
+            if self._warmup_left <= 0:
+                self._motion_guard.is_spike(diff)
 
             # ===== 玩法切换硬重置 =====
             # 模式变了 → 投票窗口 / 行锁 / 缓存全部失效，必须清空重建。
@@ -2505,27 +2498,40 @@ class Engine:
                     voted_rows[hand_idx], hand_mpsz)
                 hand_row = voted_rows[hand_idx]
 
-            # 定缺检测（四川麻将模式：支持手动覆盖与视觉自动感知双通道）
+            # 定缺与开局特殊阶段检测（四川麻将模式：换三张 / 选一张牌 / 定缺选门）
             # 必须在扫描弃牌前判定阶段，彻底杜绝换牌/定缺阶段中央UI被误认为弃牌
             dingque_suit, dingque_name = None, None
             is_dq_phase = False
-            # ===== 开局前阶段物理门控（防跨帧状态被误清）=====
-            # 定缺 / 换三张 / 任选一张牌 三个阶段物理上只可能发生在
-            # 「本局第一次弃牌之前」。一旦单调牌池已累积到弃牌，就绝不可能
-            # 再处于这些阶段——此时若视觉探测器误触发，会无条件执行下面的
-            # _monotonic_discards.clear() + _match_started=False，把整局已累积的
-            # 牌池 / 对局状态一把清空，表现为「记牌器归零、活牌计数错乱、
-            # 建议僵死/乱跳」。故：牌池非空时强制判定为非开局前阶段，并跳过
-            # 这些破坏性副作用。开局前牌池本就为空，此门控不影响正常流程。
-            river_locked = sum(self._monotonic_discards.values()) > 0
+            is_pick_phase = False
+            is_swap_phase = False
+            pick_candidates: List[str] = []
+
             if is_dingque_mode(self.mode):
-                # 1. 优先检测中央定缺选门按钮（万/条/筒色盘）
-                if (not river_locked) and hasattr(detector, "is_dingque_phase") and detector.is_dingque_phase(full_for_preview):
+                # 1. 优先检测换三张阶段（右侧金色换牌大圆按钮 / 过按钮）
+                if hasattr(detector, "is_swap_phase") and detector.is_swap_phase(full_for_preview):
+                    is_swap_phase = True
+                    self._monotonic_discards.clear()
+                    self._match_started = False
+                # 2. 定缺选门阶段（中央万/条/筒三色大圆盘）
+                elif hasattr(detector, "is_dingque_phase") and detector.is_dingque_phase(full_for_preview):
                     is_dq_phase = True
+                    self._monotonic_discards.clear()
+                    self._match_started = False
+                # 3. 选一张牌阶段（屏幕中央大牌确认 或 候选横排）
+                elif hasattr(detector, "is_pick_phase") and detector.is_pick_phase(full_for_preview):
+                    is_pick_phase = True
+                    try:
+                        pick_candidates = detector.detect_pick_candidates(full_for_preview)
+                    except Exception:
+                        pick_candidates = []
+
+            # 定缺状态判定：
+            # 若正处于定缺选门交互中（中央出现三色大圆盘），此时玩家正在选门，尚未敲定，保持 None；
+            # 其它阶段（摸打、选牌、换牌），支持用户手动 override 或通过头像右上角视觉感知定缺徽章
+            if is_dingque_mode(self.mode):
+                if is_dq_phase:
                     dingque_suit = None
                     dingque_name = None
-                    self._match_started = False
-                    self._monotonic_discards.clear()
                 else:
                     override = getattr(self, "_dingque_override", None)
                     if override is not None and 0 <= override <= 2:
@@ -2537,42 +2543,9 @@ class Engine:
                         if dingque_suit is not None:
                             self._match_started = True
 
-                # 开局前阶段（定缺中）：牌桌绝对没有打出的牌，彻底重置单调牌池
-                if is_dq_phase:
-                    self._monotonic_discards.clear()
-
-            # _match_started 在正式摸打对局中设为 True；特殊阶段中保持现状（各阶段自行管理）
-            # 注意：此处在 pick/swap 阶段检测之前运行，pick/swap 检测会在后面设置/清除 _match_started
-            # 因此这里只能作为初始触发条件，最终状态以各阶段检测块为准
-            if not is_dq_phase and len(raw_labels) >= 10:
+            # 摸打状态确认：当手牌已有 >= 10 张且不在换牌/定缺等特殊阶段时，确认为牌局已就绪
+            if not (is_dq_phase or is_swap_phase or is_pick_phase) and len(raw_labels) >= 10:
                 self._match_started = True
-
-            # ===== 任选一张牌阶段检测（血流红中初始摸牌选牌）—— 优先判定 =====
-            # 弹窗特征：屏幕中央出现深色背景+白色牌面横排（1~9万/条/筒选一张）
-            # 任选牌弹窗比换牌按钮更显著，优先判定，避免被 is_swap_phase 误判
-            is_pick_phase = False
-            pick_candidates: List[str] = []
-            if is_dingque_mode(self.mode) and not is_dq_phase and not river_locked:
-                if hasattr(detector, "is_pick_phase") and detector.is_pick_phase(full_for_preview):
-                    is_pick_phase = True
-                    # 任选一张牌阶段：此时有 13 张手牌，是定缺后的选牌，
-                    # 这是正式摸打之前的最后一个准备阶段，_match_started 保持不变（已由上面设置）
-                    try:
-                        pick_candidates = detector.detect_pick_candidates(full_for_preview)
-                    except Exception:
-                        pick_candidates = []
-
-            # ===== 换牌阶段检测（血流红中换三张）=====
-            # 换牌阶段特征：右侧出现绿色"换牌"/"过"按钮，
-            # 此阶段应立即给出"换哪3张"的换牌建议，并禁止扫描牌河（牌桌尚未有任何弃牌）
-            # 注意：仅在非任选牌阶段才判定（pick阶段的游戏界面右侧也有绿色区域，会误触发）
-            is_swap_phase = False
-            if is_dingque_mode(self.mode) and not is_dq_phase and not is_pick_phase and not river_locked:
-                if hasattr(detector, "is_swap_phase") and detector.is_swap_phase(full_for_preview):
-                    is_swap_phase = True
-                    # 换牌阶段：无任何牌河弃牌，清空单调牌池，确保建议不受旧牌池干扰
-                    self._monotonic_discards.clear()
-                    self._match_started = False  # 换牌阶段还未正式开局
 
 
             ih, _ = image.shape[:2]
