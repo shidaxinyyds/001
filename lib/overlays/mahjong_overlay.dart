@@ -1,12 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:auto_vision/config_store.dart';
 import 'package:auto_vision/mode_store.dart';
 import 'package:auto_vision/overlays/tile_labels.dart';
 import 'package:auto_vision/server.dart';
@@ -428,13 +426,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // 当前玩法：悬浮窗写入共享文件，Python 引擎每帧读取。默认川麻。
   String selectedMode = 'sc';
 
-  // 防封号：建议做人类式延迟显示。手牌/牌河随 result 立即刷新，
-  // 仅「建议」段经 _shownAdvice/_shownBest 延迟（随机 180–420ms）呈现，
-  // 避免每帧瞬时刷新建议带来的「机械/外挂」节奏特征。
-  bool _antiBan = false;
   List<dynamic> _shownAdvice = const [];
   String _shownBest = '';
-  Timer? _adviceTimer;
 
   static const double collapsed = 56;
   // 胶囊微缩模式：收起态下在屏幕边缘显示小巧横条，展示听牌/最优打法
@@ -462,18 +455,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   bool _isResizing = false;
   bool _hitLimitFeedback = false;
 
-
-
-
-
   @override
   void initState() {
     super.initState();
 
-    // 防封号：读取调试页写下的开关（悬浮窗独立运行，启动时读一次即可）。
-    DebugConfig.load().then((c) {
-      if (mounted) setState(() => _antiBan = c.antiBan);
-    });
     // 加载用户自定义记忆弹窗尺寸
     _loadSavedSize();
 
@@ -490,6 +475,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               if (json['status'] == 'waiting') {
                 _shownAdvice = const [];
                 _shownBest = '';
+              } else {
+                _shownAdvice = (json['advice'] ?? const []) as List<dynamic>;
+                _shownBest = (json['best'] ?? '') as String;
               }
               ready = true;
               // 引擎已读到玩法文件并回传，与本地选择不一致时以回传为准，保持两端同步。
@@ -499,10 +487,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                 selectedMode = m;
               }
             });
-            // 防封号：建议做人类式延迟显示（手牌/牌河已随 result 立即刷新）。
-            if (json['status'] != 'waiting') {
-              _applyAdviceDelay(json);
-            }
           }
           _maybeShareStatus(json);
         },
@@ -529,45 +513,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
   @override
   void dispose() {
-    _adviceTimer?.cancel();
     _panelScrollController.dispose();
     super.dispose();
-  }
-
-  // 防封号：建议做人类式延迟显示。关闭开关时立即呈现（与以往一致）；
-  // 开启时随机延迟 180–420ms 再刷新 _shownAdvice/_shownBest，
-  // 让建议出现节奏更接近人类而非每帧瞬时刷新。手牌/牌河仍随 result 立即刷新。
-  // 例外：换牌/选牌/定缺阶段的建议应当立即显示，给用户足够反应时间。
-  void _applyAdviceDelay(Map<dynamic, dynamic> json) {
-    final List<dynamic> advice =
-        (json['advice'] ?? const []) as List<dynamic>;
-    final String best = (json['best'] ?? '') as String;
-    _adviceTimer?.cancel();
-
-    // 特殊阶段（换牌/选牌/定缺）不延迟，立即显示，确保实时性
-    final String st = (json['status'] as String?) ?? '';
-    final bool isSpecialPhase = (
-      st == 'swap' || st == 'pick' || st == 'dingque' ||
-      json['swap_phase'] == true || json['pick_phase'] == true ||
-      json['dingque_phase'] == true
-    );
-
-    if (!_antiBan || isSpecialPhase) {
-      setState(() {
-        _shownAdvice = advice;
-        _shownBest = best;
-      });
-      return;
-    }
-    final int delay = 180 + Random().nextInt(241); // [180, 420]
-    _adviceTimer = Timer(Duration(milliseconds: delay), () {
-      if (mounted) {
-        setState(() {
-          _shownAdvice = advice;
-          _shownBest = best;
-        });
-      }
-    });
   }
 
   // 只在识别内容真正变化时回传一次摘要给主 App，
@@ -2340,7 +2287,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                                       borderRadius: BorderRadius.circular(3),
                                     ),
                                     child: const Text(
-                                      'PRO v1.4',
+                                      'PRO v1.4.1',
                                       style: TextStyle(
                                         color: Color(0xFF1E1E1E),
                                         fontSize: 7.5,

@@ -260,12 +260,12 @@ public class ImageProcessor {
     private long captureDelayMs() {
         boolean isIdle = (consecutiveSkips >= 3);
         if (isIdle) {
-            return 400 + (cfgAntiBan ? sRng.nextInt(100) : 0);
+            return 350 + (cfgAntiBan ? sRng.nextInt(100) : 0);
         }
         if (cfgAntiBan) {
-            return 220 + sRng.nextInt(81); // [220, 300]
+            return 160 + sRng.nextInt(61); // [160, 220]
         }
-        return 200;
+        return 120;
     }
 
     // 单帧采集 + 识别（原函数体从 TimerTask.run 抽出，便于自调度复用）。

@@ -11,6 +11,7 @@
 from __future__ import annotations
 import itertools
 from typing import Dict, List, Optional, Set, Tuple
+from functools import lru_cache
 
 
 # 花色索引常量
@@ -82,7 +83,62 @@ def index27_to_chinese(idx: int) -> str:
         return f"{idx - 18 + 1}条"
     elif idx == 27:
         return "中"
-    return f"未知({idx})"
+@lru_cache(maxsize=16384)
+def _min_wild_melds(c: Tuple[int, ...]) -> int:
+    """计算将单门牌 c (9元组) 全部组合为顺子/刻子所需的最少红中赖子数。"""
+    idx = -1
+    for i in range(9):
+        if c[i] > 0:
+            idx = i
+            break
+    if idx == -1:
+        return 0
+
+    # 1. 纯赖子补齐当前牌
+    ans = 2 + _min_wild_melds(c[:idx] + (c[idx] - 1,) + c[idx + 1:])
+
+    # 2. 刻子
+    if c[idx] >= 3:
+        ans = min(ans, _min_wild_melds(c[:idx] + (c[idx] - 3,) + c[idx + 1:]))
+    if c[idx] >= 2:
+        ans = min(ans, 1 + _min_wild_melds(c[:idx] + (c[idx] - 2,) + c[idx + 1:]))
+
+    # 3. 顺子
+    if idx <= 6 and c[idx + 1] >= 1 and c[idx + 2] >= 1:
+        cl = list(c)
+        cl[idx] -= 1
+        cl[idx + 1] -= 1
+        cl[idx + 2] -= 1
+        ans = min(ans, _min_wild_melds(tuple(cl)))
+    if idx <= 7 and c[idx + 1] >= 1:
+        cl = list(c)
+        cl[idx] -= 1
+        cl[idx + 1] -= 1
+        ans = min(ans, 1 + _min_wild_melds(tuple(cl)))
+    if idx <= 6 and c[idx + 2] >= 1:
+        cl = list(c)
+        cl[idx] -= 1
+        cl[idx + 2] -= 1
+        ans = min(ans, 1 + _min_wild_melds(tuple(cl)))
+
+    return ans
+
+
+@lru_cache(maxsize=16384)
+def _min_wild_pair_melds(c: Tuple[int, ...]) -> int:
+    """计算将单门牌 c (9元组) 组合为一个雀头(对子) + 任意面子所需的最少红中赖子数。"""
+    # 雀头全由赖子充当 (需2张赖子)
+    ans = 2 + _min_wild_melds(c)
+    for p in range(9):
+        if c[p] >= 2:
+            cl = list(c)
+            cl[p] -= 2
+            ans = min(ans, _min_wild_melds(tuple(cl)))
+        if c[p] >= 1:
+            cl = list(c)
+            cl[p] -= 1
+            ans = min(ans, 1 + _min_wild_melds(tuple(cl)))
+    return ans
 
 
 class SichuanAnalyzer:
@@ -222,55 +278,47 @@ class SichuanAnalyzer:
                 if cls._can_form_melds(counts, num_needed):
                     counts[pair_tile] += 2
                     return True
-                counts[pair_tile] += 2
-
         return False
 
     @classmethod
     def can_win(cls, counts: List[int], num_fixed_melds: int = 0) -> bool:
-        """川麻胡牌核心判定（支持红中赖子万能百搭，必须缺一门）。"""
+        """川麻胡牌核心判定（分门 DP 极速算法，支持红中赖子万能百搭，必须缺一门）。"""
         suits = cls.get_suits_in_hand(counts)
         if len(suits) > 2:
             return False
 
         num_wild = counts[27] if len(counts) > 27 else 0
-        if num_wild == 0:
-            return cls._can_win_no_wild(counts[:27], num_fixed_melds)
+        total_len = sum(counts[:27]) + num_wild + num_fixed_melds * 3
+        if total_len != 14:
+            return False
 
-        # 带有红中赖子的七对判定
+        # 七对判定
         if num_fixed_melds == 0:
             num_pairs = sum(counts[i] // 2 for i in range(27))
             num_singles = sum(counts[i] % 2 for i in range(27))
             if num_wild >= num_singles and (num_pairs + num_singles + (num_wild - num_singles) // 2) >= 7:
                 return True
 
-        # 赖子替张枚举
-        cand = set()
-        for t in range(27):
-            if counts[t] > 0:
-                cand.add(t)
-                num = t % 9
-                if num > 0: cand.add(t - 1)
-                if num < 8: cand.add(t + 1)
-                if num > 1: cand.add(t - 2)
-                if num < 7: cand.add(t + 2)
-        if not cand:
+        m_c = tuple(counts[0:9])
+        p_c = tuple(counts[9:18])
+        s_c = tuple(counts[18:27])
+
+        m_m = _min_wild_melds(m_c)
+        p_m = _min_wild_melds(p_c)
+        s_m = _min_wild_melds(s_c)
+
+        # 赖子全做雀头
+        if m_m + p_m + s_m + 2 <= num_wild:
             return True
 
-        return cls._can_win_wild_recurse(list(counts[:27]), num_wild, sorted(cand), num_fixed_melds)
+        # 雀头在万 / 筒 / 条
+        if _min_wild_pair_melds(m_c) + p_m + s_m <= num_wild:
+            return True
+        if m_m + _min_wild_pair_melds(p_c) + s_m <= num_wild:
+            return True
+        if m_m + p_m + _min_wild_pair_melds(s_c) <= num_wild:
+            return True
 
-    @classmethod
-    def _can_win_wild_recurse(
-        cls, c27: List[int], wilds_left: int, cand: List[int], num_fixed_melds: int
-    ) -> bool:
-        if wilds_left == 0:
-            return cls._can_win_no_wild(c27, num_fixed_melds)
-        for t in cand:
-            c27[t] += 1
-            if cls._can_win_wild_recurse(c27, wilds_left - 1, cand, num_fixed_melds):
-                c27[t] -= 1
-                return True
-            c27[t] -= 1
         return False
 
     @staticmethod
@@ -279,57 +327,38 @@ class SichuanAnalyzer:
         protected = set()
         for s in range(3):
             sub = counts_27[s * 9 : (s + 1) * 9]
-            if sum(sub) < 3:
-                continue
-            best_melds = -1
-            best_leftover_lists = []
-
-            def dfs(c, melds, pairs, leftovers):
-                nonlocal best_melds, best_leftover_lists
-                idx = -1
-                for i in range(9):
-                    if c[i] > 0:
-                        idx = i
-                        break
-                if idx == -1:
-                    score = melds * 10 + pairs * 3
-                    if score > best_melds:
-                        best_melds = score
-                        best_leftover_lists = [set(leftovers)]
-                    elif score == best_melds:
-                        best_leftover_lists.append(set(leftovers))
-                    return
-
-                if c[idx] >= 3:
-                    c[idx] -= 3
-                    dfs(c, melds + 1, pairs, leftovers)
-                    c[idx] += 3
-
-                if idx <= 6 and c[idx + 1] > 0 and c[idx + 2] > 0:
-                    c[idx] -= 1
-                    c[idx + 1] -= 1
-                    c[idx + 2] -= 1
-                    dfs(c, melds + 1, pairs, leftovers)
-                    c[idx] += 1
-                    c[idx + 1] += 1
-                    c[idx + 2] += 1
-
-                if c[idx] >= 2:
-                    c[idx] -= 2
-                    dfs(c, melds, pairs + 1, leftovers)
-                    c[idx] += 2
-
-                c[idx] -= 1
-                dfs(c, melds, pairs, leftovers + [idx])
-                c[idx] += 1
-
-            dfs(list(sub), 0, 0, [])
-            if best_melds >= 10:
-                all_leftovers = set().union(*best_leftover_lists) if best_leftover_lists else set()
-                for num in range(9):
-                    if sub[num] > 0 and num not in all_leftovers:
-                        protected.add(s * 9 + num)
+            # 刻子
+            for num in range(9):
+                if sub[num] >= 3:
+                    protected.add(s * 9 + num)
+            # 顺子完整性保护
+            for start in range(7):
+                if sub[start] >= 1 and sub[start + 1] >= 1 and sub[start + 2] >= 1:
+                    protected.add(s * 9 + start)
+                    protected.add(s * 9 + start + 1)
+                    protected.add(s * 9 + start + 2)
         return protected
+
+    @classmethod
+    def is_tenpai(cls, counts: List[int], num_fixed_melds: int = 0) -> bool:
+        """极速听牌判断：只要存在任意一张能胡的牌，立即返回 True"""
+        suits = cls.get_suits_in_hand(counts)
+        if len(suits) > 2:
+            return False
+        num_wild = counts[27] if len(counts) > 27 else 0
+        total_len = sum(counts[:27]) + num_wild + num_fixed_melds * 3
+        if total_len % 3 != 1:
+            return False
+        for test_tile in range(27):
+            test_suit = tile_to_suit(test_tile)
+            if len(suits | {test_suit}) > 2:
+                continue
+            counts[test_tile] += 1
+            win = cls.can_win(counts, num_fixed_melds)
+            counts[test_tile] -= 1
+            if win:
+                return True
+        return False
 
     @classmethod
     def find_waiting_tiles(
@@ -341,10 +370,14 @@ class SichuanAnalyzer:
         if len(suits) > 2:
             return waiting
 
+        num_wild = counts[27] if len(counts) > 27 else 0
+        total_len = sum(counts[:27]) + num_wild + num_fixed_melds * 3
+        if total_len % 3 != 1:
+            return waiting
+
         for test_tile in range(27):
             test_suit = tile_to_suit(test_tile)
-            new_suits = suits | {test_suit}
-            if len(new_suits) > 2:
+            if len(suits | {test_suit}) > 2:
                 continue
 
             counts[test_tile] += 1
@@ -380,31 +413,32 @@ class SichuanAnalyzer:
             if cls.can_win(counts, num_fixed_melds):
                 return 0
         elif total_tiles % 3 == 1:
-            waits = cls.find_waiting_tiles(counts, num_fixed_melds)
-            if waits:
+            if cls.is_tenpai(counts, num_fixed_melds):
                 return 0
 
         if extra_dingque_penalty > 0:
             return max(1, extra_dingque_penalty)
 
-        # 1 向听检测
+        # 1 向听极速检测
         if total_tiles % 3 == 2:
             for d in range(27):
                 if counts[d] > 0:
                     counts[d] -= 1
-                    w = cls.find_waiting_tiles(counts, num_fixed_melds)
+                    ten = cls.is_tenpai(counts, num_fixed_melds)
                     counts[d] += 1
-                    if w:
+                    if ten:
                         return 1
         elif total_tiles % 3 == 1:
             for t in range(27):
+                if len(suits | {tile_to_suit(t)}) > 2:
+                    continue
                 counts[t] += 1
                 for d in range(27):
                     if counts[d] > 0:
                         counts[d] -= 1
-                        w = cls.find_waiting_tiles(counts, num_fixed_melds)
+                        ten = cls.is_tenpai(counts, num_fixed_melds)
                         counts[d] += 1
-                        if w:
+                        if ten:
                             counts[t] -= 1
                             return 1
                 counts[t] -= 1
@@ -461,9 +495,9 @@ class SichuanAnalyzer:
             for d in range(27):
                 if counts[d] > 0:
                     counts[d] -= 1
-                    w = cls.find_waiting_tiles(counts, num_fixed_melds, pool_remaining)
+                    ten = cls.is_tenpai(counts, num_fixed_melds)
                     counts[d] += 1
-                    if w:
+                    if ten:
                         can_reach_ting = True
                         break
             counts[test_tile] -= 1
