@@ -913,12 +913,13 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final shanten = result?['shanten'];
     final int count = ((result?['count'] as num?)?.toInt() ?? 0);
     final String status = (result?['status'] as String?) ?? '';
+    final bool isDingquePhase = (result?['dingque_phase'] == true || status == 'dingque');
     final bool isSwapPhase = (result?['swap_phase'] == true || status == 'swap');
     final bool isPickPhase = (result?['pick_phase'] == true || status == 'pick');
     final bool inMatch = status != 'waiting' && status != 'no_tiles' && count >= 4;
-    final adviceList = (inMatch && _shownAdvice.isNotEmpty)
+    final adviceList = ((inMatch || isDingquePhase || isPickPhase) && _shownAdvice.isNotEmpty)
         ? _shownAdvice
-        : (inMatch ? (result?['advice'] as List<dynamic>? ?? const []) : const []);
+        : ((inMatch || isDingquePhase || isPickPhase) ? (result?['advice'] as List<dynamic>? ?? const []) : const []);
     final topAdvice = adviceList.isNotEmpty ? adviceList[0] as Map<dynamic, dynamic>? : null;
     final String bestTile = inMatch ? (_shownBest.isNotEmpty ? _shownBest : (result?['best'] ?? '')) : '';
     final String tileStr = (topAdvice != null && topAdvice['tile'] != null) ? topAdvice['tile'] as String : bestTile;
@@ -972,20 +973,40 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             ),
             const SizedBox(width: 5),
             if (isSwapPhase && swapData != null && swapData['viable'] == true) ...[
-              // 换牌阶段：显示要换出的牌
+              // 1. 换牌阶段：显示换出的3张牌
               const Text('换出', style: TextStyle(color: Colors.white70, fontSize: 10.5, decoration: TextDecoration.none)),
               const SizedBox(width: 2),
               ...((swapData['tiles'] as List<dynamic>? ?? []).take(3).map((t) =>
                 Row(children: [TileChip(tile: t as String, size: 19), const SizedBox(width: 1)])
               )),
-            ] else if (isPickPhase && pickAdvice != null && (pickAdvice['tile'] ?? '').isNotEmpty) ...[
-              // 选牌阶段：显示推荐选的牌
-              const Text('选', style: TextStyle(color: Colors.white70, fontSize: 10.5, decoration: TextDecoration.none)),
-              const SizedBox(width: 2),
-              TileChip(tile: pickAdvice['tile'] as String, size: 19),
+            ] else if (isDingquePhase) ...[
+              // 2. 定缺阶段：优先展示定缺建议
+              const Text('定缺', style: TextStyle(color: Color(0xFFFFD54F), fontSize: 10.5, fontWeight: FontWeight.bold, decoration: TextDecoration.none)),
               const SizedBox(width: 3),
-              const Flexible(child: Text('最优', overflow: TextOverflow.ellipsis, style: TextStyle(color: Color(0xFFFFD54F), fontSize: 10, fontWeight: FontWeight.bold, decoration: TextDecoration.none))),
+              if (tileStr.isNotEmpty) ...[
+                TileChip(tile: tileStr, size: 19),
+                const SizedBox(width: 3),
+              ],
+              Flexible(
+                child: Text(
+                  result?['message'] ?? '推演中…',
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: Color(0xFFFFF9C4), fontSize: 10, fontWeight: FontWeight.bold, decoration: TextDecoration.none),
+                ),
+              ),
+            ] else if (isPickPhase) ...[
+              // 3. 选牌阶段：优先展示推荐选择的牌
+              const Text('选', style: TextStyle(color: Color(0xFFFFCC80), fontSize: 10.5, fontWeight: FontWeight.bold, decoration: TextDecoration.none)),
+              const SizedBox(width: 2),
+              if (pickAdvice != null && (pickAdvice['tile'] ?? '').isNotEmpty) ...[
+                TileChip(tile: pickAdvice['tile'] as String, size: 19),
+                const SizedBox(width: 3),
+                const Flexible(child: Text('最优', overflow: TextOverflow.ellipsis, style: TextStyle(color: Color(0xFFFFD54F), fontSize: 10, fontWeight: FontWeight.bold, decoration: TextDecoration.none))),
+              ] else ...[
+                Flexible(child: Text(result?['message'] ?? '选牌中…', overflow: TextOverflow.ellipsis, style: const TextStyle(color: Color(0xFFFFCC80), fontSize: 10, fontWeight: FontWeight.bold, decoration: TextDecoration.none))),
+              ],
             ] else if (tileStr.isNotEmpty) ...[
+              // 4. 正常摸打阶段：显示建议打出牌及进张
               const Text(
                 '打',
                 style: TextStyle(
@@ -1009,33 +1030,12 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                   ),
                 ),
               ),
-            ] else if (result?['dingque_phase'] == true || status == 'dingque') ...[
-              Flexible(
-                child: Text(
-                  result?['message'] ?? '定缺推荐分析中…',
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Color(0xFFFFD54F),
-                    fontSize: 10,
-                    fontWeight: FontWeight.bold,
-                    decoration: TextDecoration.none,
-                  ),
-                ),
-              ),
             ] else if (isSwapPhase) ...[
               Flexible(
                 child: Text(
                   result?['message'] ?? '换牌建议中…',
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(color: Color(0xFF80CBC4), fontSize: 10, fontWeight: FontWeight.bold, decoration: TextDecoration.none),
-                ),
-              ),
-            ] else if (isPickPhase) ...[
-              Flexible(
-                child: Text(
-                  result?['message'] ?? '选牌建议中…',
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: Color(0xFFFFCC80), fontSize: 10, fontWeight: FontWeight.bold, decoration: TextDecoration.none),
                 ),
               ),
             ] else ...[
@@ -1421,7 +1421,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     if (hand.isEmpty || count == 0) {
       return const SizedBox.shrink();
     }
-    final bool partial = count > 0 && count < 13;
+    // 合法麻将立牌张数：1/2 (碰4次), 4/5 (碰3次), 7/8 (碰2次), 10/11 (碰1次), 13/14 (门清)
+    // 仅在非标准张数（如 3, 6, 9, 12 张）时才提示可能被遮挡
+    final bool isLegalStanding = const {1, 2, 4, 5, 7, 8, 10, 11, 13, 14}.contains(count);
+    final bool partial = count > 0 && !isLegalStanding;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
       child: Column(
@@ -1895,7 +1898,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final shanten = result?['shanten'] as int?;
     final pickCandidates = (result?['pick_candidates'] as List<dynamic>?) ?? [];
 
-    final Widget? swapWidget = (swapData != null && swapData['viable'] == true)
+    // swapWidget 仅在真正的换牌阶段有效，严禁泄露至定缺、选牌或摸打对局
+    final Widget? swapWidget = (isSwapPhase && swapData != null && swapData['viable'] == true)
         ? _buildSwapAdviceWidget(swapData)
         : null;
     final Widget? alertWidget = (alertData != null && alertData['alert'] == true)
@@ -1910,44 +1914,45 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         ? _buildTingRadarWidget(tingDetails, shanten)
         : null;
 
-    // ===== 换牌阶段专用 UI =====
+    // ===== 1. 换牌阶段专用 UI =====
     if (isSwapPhase) {
       final msg = (result?['message'] as String?) ?? '换牌建议推演中…';
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // 优先展示 swap_advice（换出哪3张）
-          if (swapWidget != null) swapWidget
-          else Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
-            decoration: BoxDecoration(
-              color: const Color(0x3300BFA5),
-              borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: const Color(0xFF00BFA5), width: 0.8),
-            ),
-            child: Row(
-              children: [
-                const Icon(Icons.swap_horiz, color: Color(0xFF80CBC4), size: 16),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    '【换牌阶段】$msg',
-                    style: const TextStyle(
-                      color: Color(0xFFB2EBF2),
-                      fontSize: 10.5,
-                      fontWeight: FontWeight.bold,
-                      decoration: TextDecoration.none,
+          if (swapWidget != null)
+            swapWidget
+          else
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+              decoration: BoxDecoration(
+                color: const Color(0x3300BFA5),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: const Color(0xFF00BFA5), width: 0.8),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.swap_horiz, color: Color(0xFF80CBC4), size: 16),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      '【换牌阶段】$msg',
+                      style: const TextStyle(
+                        color: Color(0xFFB2EBF2),
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.bold,
+                        decoration: TextDecoration.none,
+                      ),
                     ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
         ],
       );
     }
 
-    // ===== 任选一张牌阶段专用 UI =====
+    // ===== 2. 任选一张牌阶段专用 UI =====
     if (isPickPhase) {
       final msg = (result?['message'] as String?) ?? '等待选牌弹窗识别…';
       final topPick = activeAdvice.isNotEmpty ? activeAdvice[0] as Map<dynamic, dynamic>? : null;
@@ -1967,10 +1972,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               children: [
                 const Icon(Icons.casino, color: Color(0xFFFFCC80), size: 16),
                 const SizedBox(width: 6),
-                Expanded(
+                const Expanded(
                   child: Text(
-                    '【任选一张牌】',
-                    style: const TextStyle(
+                    '【任选一张牌】推荐选择',
+                    style: TextStyle(
                       color: Color(0xFFFFE0B2),
                       fontSize: 10.5,
                       fontWeight: FontWeight.bold,
@@ -1981,10 +1986,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               ],
             ),
             if (pickTile.isNotEmpty) ...[
-              const SizedBox(height: 4),
+              const SizedBox(height: 5),
               Row(
                 children: [
-                  const Text('推荐选: ', style: TextStyle(color: Colors.white70, fontSize: 10, decoration: TextDecoration.none)),
+                  const Text('首选用牌: ', style: TextStyle(color: Colors.white70, fontSize: 10, decoration: TextDecoration.none)),
                   TileChip(tile: pickTile, size: 22),
                   const SizedBox(width: 6),
                   Expanded(
@@ -2011,20 +2016,22 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       );
     }
 
+    // ===== 3. 定缺阶段专用 UI =====
     if (isDingquePhase) {
       final msg = (result?['message'] as String?) ?? '正在推演最佳断门…';
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (swapWidget != null) swapWidget,
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
-            decoration: BoxDecoration(
-              color: const Color(0x33FFB300),
-              borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: const Color(0xFFFFB300), width: 0.8),
-            ),
-            child: Row(
+      final topDq = activeAdvice.isNotEmpty ? activeAdvice[0] as Map<dynamic, dynamic>? : null;
+      final dqTile = (topDq != null && topDq['tile'] != null) ? topDq['tile'] as String : '';
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+        decoration: BoxDecoration(
+          color: const Color(0x33FFB300),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: const Color(0xFFFFB300), width: 0.8),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
               children: [
                 const Icon(Icons.lightbulb, color: Color(0xFFFFD54F), size: 16),
                 const SizedBox(width: 6),
@@ -2041,15 +2048,22 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                 ),
               ],
             ),
-          ),
-        ],
+            if (dqTile.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Row(
+                children: [
+                  const Text('建议打缺: ', style: TextStyle(color: Colors.white70, fontSize: 10, decoration: TextDecoration.none)),
+                  TileChip(tile: dqTile, size: 20),
+                ],
+              ),
+            ],
+          ],
+        ),
       );
     }
 
+    // ===== 4. 正常摸打对局：activeAdvice 为空时的友好占位 =====
     if (activeAdvice.isEmpty) {
-      if (swapWidget != null) {
-        return swapWidget;
-      }
       if (tingRadarWidget != null) {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2110,7 +2124,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (alertWidget != null) alertWidget,
-        if (swapWidget != null) swapWidget,
         if (tingRadarWidget != null) tingRadarWidget,
         if (dualStrategyWidget != null) dualStrategyWidget,
         Container(

@@ -352,22 +352,23 @@ class TencentGridDetector(Detector):
 
 
     def is_swap_phase(self, image_bgr: np.ndarray) -> bool:
-        """检测腾讯欢乐麻将「换牌中...」换三张阶段（右侧出现大面积绿色换牌按钮）。"""
+        """检测腾讯欢乐麻将「换牌中...」换三张阶段。
+        真实特征：右侧必定出现金黄色【换牌】大圆按钮 (H in [14, 35], S >= 110, V >= 140)
+        以及青色【过】按钮，绝不能检测绿色（绿色为牌桌桌布主色，会导致整局被误判为换牌）。"""
         if image_bgr is None or image_bgr.size == 0:
             return False
         ih, iw = image_bgr.shape[:2]
-        # 换牌/过 按钮位于右侧中央区域（y: 55%~85%, x: 55%~100%）
-        right = image_bgr[int(ih * 0.55):int(ih * 0.85), int(iw * 0.55):]
-        if right.size == 0:
+        # 金黄色换牌按钮专属区域（y: 55%~75%, x: 65%~85%）
+        btn_area = image_bgr[int(ih * 0.55):int(ih * 0.75), int(iw * 0.65):int(iw * 0.85)]
+        if btn_area.size == 0:
             return False
-        hsv = cv2.cvtColor(right, cv2.COLOR_BGR2HSV)
-        # 换牌按钮：饱和高绿（H: 65~95, S>=120, V>=100）
-        green_btn = (
-            (hsv[:, :, 0] >= 65) & (hsv[:, :, 0] <= 95) &
-            (hsv[:, :, 1] >= 120) & (hsv[:, :, 2] >= 100)
-        )
-        green_ratio = float(np.mean(green_btn))
-        return green_ratio >= 0.15
+        hsv = cv2.cvtColor(btn_area, cv2.COLOR_BGR2HSV)
+        # 金黄色大圆形按钮颜色区间：色相 14~35，高饱和 S>=110，高明度 V>=140
+        gold_btn = (hsv[:, :, 0] >= 14) & (hsv[:, :, 0] <= 35) & (hsv[:, :, 1] >= 110) & (hsv[:, :, 2] >= 140)
+        gold_ratio = float(np.mean(gold_btn))
+
+        # 真实换牌阶段金黄色圆形按钮占比约为 4%~8%，非换牌对局为 0%
+        return gold_ratio >= 0.025
 
     def is_pick_phase(self, image_bgr: np.ndarray) -> bool:
         """检测腾讯欢乐麻将「请任选一张牌」弹窗（深色弹窗背景+内嵌白色牌面）。"""

@@ -980,29 +980,30 @@ def detect_player_melds(image: np.ndarray, detector, mode: str = "sc_hz", hand_r
             for c in cnts:
                 bx, by, bw, bh = cv2.boundingRect(c)
                 area = bw * bh
-                if area < 600:
+                # 一组副露（3~4张牌）物理面积必 >= 1200
+                if area < 1200 or area > 7000:
                     continue
+                # 长宽比：副露由3~4张牌拼成，必呈长条形 (aspect >= 1.8)
+                aspect = bh / float(bw) if is_vert else bw / float(bh)
+                if aspect < 1.8:
+                    continue
+
                 gx, gy = x1 + bx, y1 + by
                 if gy + bh >= hand_min_y and not (gx + bw < hand_min_x or gx > hand_max_x):
                     continue
 
-                if is_vert:
-                    if bh < bw * 0.9:
-                        continue
-                    num_t = 4 if bh > bw * 1.8 else 3
-                    step = bh / float(num_t)
-                else:
-                    if bw < bh * 1.1:
-                        continue
-                    num_t = 4 if bw > bh * 3.2 else 3
-                    step = bw / float(num_t)
+                num_t = 4 if aspect > 3.2 else 3
+                step = (bh / float(num_t)) if is_vert else (bw / float(num_t))
 
                 cand_scores = []
+                # 牌面垂直向上延展 15%，完整纳入上方数字/字头，杜绝字符被切断
+                crop_y1 = max(0, by - int(bh * 0.15))
+                crop_h = min(crop.shape[0] - crop_y1, bh + int(bh * 0.15))
                 for i in range(num_t):
                     if is_vert:
-                        t = crop[int(by + i * step):int(by + (i + 1) * step), bx:bx + bw]
+                        t = crop[int(crop_y1 + i * step):int(crop_y1 + (i + 1) * step), bx:bx + bw]
                     else:
-                        t = crop[by:by + bh, int(bx + i * step):int(bx + (i + 1) * step)]
+                        t = crop[crop_y1:crop_y1 + crop_h, int(bx + i * step):int(bx + (i + 1) * step)]
                     if rot is not None:
                         t = cv2.rotate(t, rot)
                     if hasattr(detector, "classify_tile"):
@@ -1011,14 +1012,18 @@ def detect_player_melds(image: np.ndarray, detector, mode: str = "sc_hz", hand_r
                         best_lbl, best_sc = None, 0.0
 
                     try:
-                        if best_lbl and mpsz_to_tile34_index(best_lbl) in avail and best_sc >= 0.45:
+                        if best_lbl and mpsz_to_tile34_index(best_lbl) in avail and best_sc >= 0.50:
                             cand_scores.append((best_lbl, best_sc))
                     except Exception:
                         pass
 
                 if cand_scores:
-                    cand_scores.sort(key=lambda x: x[1], reverse=True)
-                    melds.extend([cand_scores[0][0]] * num_t)
+                    # 碰/杠必定为同字牌，以出现频次最多且置信度最高的牌作为该副露的真实牌型
+                    vote_cnt = Counter([c[0] for c in cand_scores])
+                    top_lbl, top_votes = vote_cnt.most_common(1)[0]
+                    # 至少有 2 张一致判定或者平均置信度 >= 0.52
+                    if top_votes >= 2 or max([c[1] for c in cand_scores if c[0] == top_lbl]) >= 0.52:
+                        melds.extend([top_lbl] * num_t)
         return melds
     except Exception:
         return []
@@ -2898,9 +2903,8 @@ class Engine:
                         opponents_danger_suits=opponent_danger_suits,
                     )
 
-                    # 功能2：博弈级换三张推荐（换牌阶段 或 开局阶段且未打出牌）
-                    has_any_discards = bool(disc_mpsz_out and len(disc_mpsz_out) > 0)
-                    if is_swap_phase or ((not has_any_discards) and tile_count in (13, 14) and (dingque_suit is None)):
+                    # 功能2：博弈级换三张推荐（严格限定仅在真正的换牌阶段生成，绝不污染定缺、选牌或摸打阶段）
+                    if is_swap_phase:
                         swap_advice = SichuanAnalyzer.recommend_huan_san_zhang(hand_counts_final[:27])
 
                     # 附加大牌出牌决策安全评级
