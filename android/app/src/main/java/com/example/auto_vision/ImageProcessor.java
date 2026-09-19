@@ -283,10 +283,9 @@ public class ImageProcessor {
             }
             image = callback.get();
             if (image == null) {
-                // 收不到画面：屏幕静止（虚拟显示不重复出帧），
-                // 或者 VirtualDisplay 建流失败/会话被系统结束。
-                // 以前这里直接 return，一旦采集挂掉就是永久静默。
-                heartbeat("no_frames");
+                // 画面未更新（手机屏幕静止，系统虚拟显示不重复出帧）：
+                // 自适应降频巡检，绝不发送清空界面的伪心跳状态，保留当前手牌与建议
+                consecutiveSkips++;
                 return;
             }
             framesAcquired++;
@@ -305,6 +304,9 @@ public class ImageProcessor {
         }
     }
 
+    private static volatile long sLastForegroundCheckTime = 0;
+    private static volatile boolean sLastForegroundResult = true;
+
     // 防平台检测：判断当前是否「可识别」状态——即某个麻将 App 在前台。
     // 返回 true = 采帧；false = 暂停（前台是本 App 或桌面启动器）。
     // 无 Context / 无权限 / 取不到前台包名时一律返回 true（降级为常开，绝不阻断识别）。
@@ -312,12 +314,22 @@ public class ImageProcessor {
         if (sContext == null) return true;
         if (!hasUsageStatsPermission()) return true;
         final long now = System.currentTimeMillis();
+        if (now - sLastForegroundCheckTime < 1000) {
+            return sLastForegroundResult;
+        }
+        sLastForegroundCheckTime = now;
         final UsageStatsManager usm =
                 (UsageStatsManager) sContext.getSystemService(Context.USAGE_STATS_SERVICE);
-        if (usm == null) return true;
+        if (usm == null) {
+            sLastForegroundResult = true;
+            return true;
+        }
         final List<UsageStats> stats =
                 usm.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, now - 2000, now);
-        if (stats == null || stats.isEmpty()) return true;
+        if (stats == null || stats.isEmpty()) {
+            sLastForegroundResult = true;
+            return true;
+        }
         String top = null;
         long last = 0;
         for (final UsageStats s : stats) {
@@ -326,10 +338,20 @@ public class ImageProcessor {
                 top = s.getPackageName();
             }
         }
-        if (top == null) return true;
+        if (top == null) {
+            sLastForegroundResult = true;
+            return true;
+        }
         // 暂停条件：前台是我们自己的 App（用户在设置页），或系统桌面启动器（没在打牌）。
-        if (top.equals(sContext.getPackageName())) return false;
-        if (isLauncher(top)) return false;
+        if (top.equals(sContext.getPackageName())) {
+            sLastForegroundResult = false;
+            return false;
+        }
+        if (isLauncher(top)) {
+            sLastForegroundResult = false;
+            return false;
+        }
+        sLastForegroundResult = true;
         return true;
     }
 
@@ -446,6 +468,9 @@ public class ImageProcessor {
         if (timer != null) {
             timer.cancel();
             timer = null;
+        }
+        if (client != null) {
+            client.close();
         }
     }
 

@@ -20,47 +20,59 @@ class Server {
     );
     serverFuture.then((ServerSocket server) {
       server.listen((Socket socket) {
-        List<int> metadataBuffer = [];
-        List<int> dataBuffer = [];
-        int length = -1;
-        socket.listen((List<int> data) {
-          if (length < 0) {
-            // 尚未读完 8 字节长度前缀
-            if (metadataBuffer.length + data.length < 8) {
-              metadataBuffer.addAll(data);
-              return;
+        try {
+          socket.setOption(SocketOption.tcpNoDelay, true);
+        } catch (_) {}
+
+        final List<int> buffer = [];
+        int expectedLength = -1;
+
+        socket.listen((List<int> chunk) {
+          buffer.addAll(chunk);
+
+          while (true) {
+            if (expectedLength < 0) {
+              if (buffer.length < 8) {
+                // 尚未累积够 8 字节长度头
+                break;
+              }
+              final lenStr = String.fromCharCodes(buffer.sublist(0, 8));
+              final parsed = int.tryParse(lenStr);
+              if (parsed == null || parsed <= 0) {
+                print("数据长度解析失败: $lenStr");
+                try {
+                  socket.destroy();
+                } catch (_) {}
+                return;
+              }
+              expectedLength = parsed;
+              buffer.removeRange(0, 8);
             }
-            int reserve = 8 - metadataBuffer.length;
-            metadataBuffer.addAll(data.sublist(0, reserve));
-            int? dataLength =
-                int.tryParse(String.fromCharCodes(metadataBuffer));
-            if (dataLength == null) {
-              print("数据长度解析失败");
-              try { socket.destroy(); } catch (_) {}
-              return;
+
+            if (buffer.length < expectedLength) {
+              // 尚未累积够当前帧完整负载
+              break;
             }
-            length = dataLength;
-            data = data.sublist(reserve);
-          }
-          dataBuffer.addAll(data);
-          // 注意：必须以累计长度 dataBuffer.length 判断，不能用单个分片长度。
-          if (dataBuffer.length >= length) {
-            final frameData = dataBuffer.sublist(0, length);
-            dataBuffer = [];
-            metadataBuffer = [];
-            length = -1;
+
+            // 完整提取当前帧
+            final frameData = buffer.sublist(0, expectedLength);
+            buffer.removeRange(0, expectedLength);
+            expectedLength = -1;
+
             try {
               callback(frameData);
             } catch (e) {
               print("悬浮窗 callback 执行异常: $e");
-            } finally {
-              try { socket.destroy(); } catch (_) {}
             }
           }
         }, onError: (err) {
-          try { socket.destroy(); } catch (_) {}
+          try {
+            socket.destroy();
+          } catch (_) {}
         }, onDone: () {
-          try { socket.destroy(); } catch (_) {}
+          try {
+            socket.destroy();
+          } catch (_) {}
         }, cancelOnError: true);
       }, onError: (err) {
         print("ServerSocket listen 异常: $err");

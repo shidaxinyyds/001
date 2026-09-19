@@ -2443,45 +2443,9 @@ class Engine:
                 self._frame_skipper = _FrameSkipper()
             self._prev_raw_n = curr_raw_n
 
-            # 新洗牌发牌 / 换三张判定：若当前帧原始手牌张数较完整（>=10张），
-            # 且旧稳定手牌小于10张（残缺/空手牌/非牌局残留）或重合度很低（<= 8 张相同），
-            # 说明新开局发牌或换三张！立即彻底重置，绝不让旧牌残留或阻塞新手牌！
-            if len(raw_labels) >= 10:
-                old_mpsz = getattr(self._hand_stab, "stable_mpsz", "")
-                old_set = parse_mpsz_tiles(old_mpsz) if old_mpsz else []
-                if len(old_set) < 10:
-                    self._monotonic_discards.clear()
-                    self._hand_stab.reset()
-                    self._tile_voter.reset()
-                    self._frame_skipper = _FrameSkipper()
-                    self._stable_hand_mpsz = ""
-                    self._stable_hand_count = 0
-                    self._last_hand_y = None
-                    self._match_started = False
-                    self._last_stable_counter = Counter()
-                    self._last_stable_n = 0
-                    self._advice_key = None
-                    self._advice = []
-                else:
-                    raw_set = [l for l in raw_labels if l]
-                    overlap = sum(min(old_set.count(t), raw_set.count(t)) for t in set(raw_set))
-                    if overlap <= 8:
-                        self._monotonic_discards.clear()
-                        self._hand_stab.reset()
-                        self._tile_voter.reset()
-                        self._frame_skipper = _FrameSkipper()
-                        self._stable_hand_mpsz = ""
-                        self._stable_hand_count = 0
-                        self._last_hand_y = None
-                        self._match_started = False
-                        self._last_stable_counter = Counter()
-                        self._last_stable_n = 0
-                        self._advice_key = None
-                        self._advice = []
-
             # TencentGridDetector 直接采信高精度网格整排切片结果，0 帧延迟
             if is_grid_det:
-                valid_sizes_now = hsizes if getattr(self, "_match_started", False) else (14, 13, 12, 11, 10)
+                valid_sizes_now = hsizes
                 if len(raw_labels) in valid_sizes_now:
                     hand_mpsz = "".join(raw_labels)
                     self._hand_stab.stable_mpsz = hand_mpsz
@@ -2543,8 +2507,8 @@ class Engine:
                         if dingque_suit is not None:
                             self._match_started = True
 
-            # 摸打状态确认：当手牌已有 >= 10 张且不在换牌/定缺等特殊阶段时，确认为牌局已就绪
-            if not (is_dq_phase or is_swap_phase or is_pick_phase) and len(raw_labels) >= 10:
+            # 摸打状态确认：当手牌已有 >= 10 张或属于合法手牌张数（如碰/杠后的 7、4 张），且不在换牌/定缺等特殊阶段时，确认为牌局已就绪
+            if not (is_dq_phase or is_swap_phase or is_pick_phase) and (len(raw_labels) in hsizes or len(raw_labels) >= 10):
                 self._match_started = True
 
 

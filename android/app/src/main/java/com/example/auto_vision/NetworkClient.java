@@ -1,5 +1,6 @@
 package com.example.auto_vision;
 
+import java.io.BufferedOutputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -12,6 +13,10 @@ public class NetworkClient {
 
     final String TAG = "NetworkClient";
 
+    private Socket mSocket = null;
+    private DataOutputStream mDataOut = null;
+    private final Object mLock = new Object();
+
     public NetworkClient(String host, int port) {
         this.host = host;
         this.port = port;
@@ -21,33 +26,63 @@ public class NetworkClient {
         return String.format("%1$" + length + "s", s).replace(' ', '0');
     }
 
+    private void ensureConnectedLocked() throws IOException {
+        if (mSocket != null && mSocket.isConnected() && !mSocket.isClosed()) {
+            return;
+        }
+        closeLocked();
+        Socket socket = new Socket();
+        socket.setTcpNoDelay(true);
+        socket.setKeepAlive(true);
+        socket.setSendBufferSize(65536);
+        socket.connect(new InetSocketAddress(host, port), 1000);
+        mDataOut = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream(), 65536));
+        mSocket = socket;
+    }
+
+    private void closeLocked() {
+        if (mDataOut != null) {
+            try { mDataOut.close(); } catch (Exception ignore) {}
+            mDataOut = null;
+        }
+        if (mSocket != null) {
+            try { mSocket.close(); } catch (Exception ignore) {}
+            mSocket = null;
+        }
+    }
+
+    public void close() {
+        synchronized (mLock) {
+            closeLocked();
+        }
+    }
+
     /**
-     * 发送一帧数据到 Dart 悬浮窗监听的本地端口。
-     * 返回是否发送成功，让调用方可以统计失败次数（此前失败只进 logcat，
-     * 悬浮窗端表现为"没有任何反应"，完全无法区分是识别挂了还是链路断了）。
+     * 发送一帧数据到 Dart 悬浮窗监听的本地端口（通过复用持久长连接实现零延迟传输）。
      */
     public boolean send(byte[] bytes) {
-        Socket socket = null;
-        int bytesLength = bytes.length;
-        try {
-            socket = new Socket();
-            socket.setSoTimeout(1500);
-            socket.connect(new InetSocketAddress(host, port), 1000);
-            DataOutputStream dataOut = new DataOutputStream(socket.getOutputStream());
-            dataOut.writeBytes(leftPadZeros(String.valueOf(bytesLength), 8));
-            dataOut.write(bytes);
-            dataOut.flush();
-            dataOut.close();
-            socket.close();
-            return true;
-        } catch (IOException e) {
-            TimedLog.e(TAG, "Error sending data: " + e.toString());
-            return false;
-        } finally {
-            if (socket != null && !socket.isClosed()) {
+        if (bytes == null || bytes.length == 0) return false;
+        synchronized (mLock) {
+            try {
+                ensureConnectedLocked();
+                mDataOut.writeBytes(leftPadZeros(String.valueOf(bytes.length), 8));
+                mDataOut.write(bytes);
+                mDataOut.flush();
+                return true;
+            } catch (IOException e1) {
+                // 连接断开或异常，关闭旧连接并重试一次
+                closeLocked();
                 try {
-                    socket.close();
-                } catch (Exception ignore) {}
+                    ensureConnectedLocked();
+                    mDataOut.writeBytes(leftPadZeros(String.valueOf(bytes.length), 8));
+                    mDataOut.write(bytes);
+                    mDataOut.flush();
+                    return true;
+                } catch (IOException e2) {
+                    TimedLog.e(TAG, "Error sending data over persistent socket: " + e2);
+                    closeLocked();
+                    return false;
+                }
             }
         }
     }

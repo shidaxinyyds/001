@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Dict, List, Set
 
 # 与 Dart 端 (lib/overlays/mahjong_overlay.dart) 完全一致的绝对路径。
@@ -225,19 +226,30 @@ def mode_keys() -> List[str]:
     return list(MODES.keys())
 
 
+_MODE_CACHE = {"mtime": 0.0, "check_time": 0.0, "mode": DEFAULT_MODE}
+
+
 def load_mode() -> str:
-    """从共享文件读取当前玩法键，文件不存在或损坏时回退默认 sc_hz。"""
+    """从共享文件读取当前玩法键，带内存与时间戳缓存防每帧磁盘 IO 阻塞。"""
+    now = time.time()
+    if now - _MODE_CACHE["check_time"] < 0.5:
+        return _MODE_CACHE["mode"]
+    _MODE_CACHE["check_time"] = now
     try:
+        if not os.path.exists(MODE_PATH):
+            return _MODE_CACHE["mode"]
+        mtime = os.path.getmtime(MODE_PATH)
+        if mtime == _MODE_CACHE["mtime"]:
+            return _MODE_CACHE["mode"]
         with open(MODE_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
         m = data.get("mode", DEFAULT_MODE)
-        if m in ALIASES:
-            return ALIASES[m]
-        if m in MODES:
-            return m
+        res = ALIASES.get(m, m) if m in MODES or m in ALIASES else DEFAULT_MODE
+        _MODE_CACHE["mtime"] = mtime
+        _MODE_CACHE["mode"] = res
+        return res
     except (OSError, ValueError, TypeError):
-        pass
-    return DEFAULT_MODE
+        return _MODE_CACHE["mode"]
 
 
 def save_mode(key: str) -> bool:
@@ -250,6 +262,7 @@ def save_mode(key: str) -> bool:
             os.makedirs(d, exist_ok=True)
         with open(MODE_PATH, "w", encoding="utf-8") as f:
             json.dump({"mode": key}, f)
+        _MODE_CACHE["check_time"] = 0.0
         return True
     except OSError:
         return False
@@ -273,9 +286,20 @@ DEFAULT_MIN_UKEIRE = 0
 DEFAULT_WARN_DEAL_IN = False
 DEFAULT_WARN_PON_KONG = False
 
+_ADVICE_CACHE = {
+    "mtime": 0.0,
+    "check_time": 0.0,
+    "cfg": {
+        "show_advice": DEFAULT_SHOW_ADVICE,
+        "min_ukeire": DEFAULT_MIN_UKEIRE,
+        "warn_deal_in": DEFAULT_WARN_DEAL_IN,
+        "warn_pon_kong": DEFAULT_WARN_PON_KONG,
+    },
+}
+
 
 def load_advice_config() -> Dict:
-    """读取出牌建议配置。
+    """读取出牌建议配置，带时间戳缓存防每帧磁盘 IO 阻塞。
 
     字段：
     - show_advice  (bool) ：False 时 build_advice 返回空列表（不出建议）。
@@ -286,11 +310,20 @@ def load_advice_config() -> Dict:
     与 load_mode 同策略：文件缺失/损坏/字段类型不对时**静默回退默认值**，
     识别链路绝不因配置文件坏掉而抛异常或崩溃。
     """
+    now = time.time()
+    if now - _ADVICE_CACHE["check_time"] < 0.5:
+        return dict(_ADVICE_CACHE["cfg"])
+    _ADVICE_CACHE["check_time"] = now
     show = DEFAULT_SHOW_ADVICE
     minu = DEFAULT_MIN_UKEIRE
     wdi = DEFAULT_WARN_DEAL_IN
     wpk = DEFAULT_WARN_PON_KONG
     try:
+        if not os.path.exists(ADVICE_PATH):
+            return dict(_ADVICE_CACHE["cfg"])
+        mtime = os.path.getmtime(ADVICE_PATH)
+        if mtime == _ADVICE_CACHE["mtime"]:
+            return dict(_ADVICE_CACHE["cfg"])
         with open(ADVICE_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
         v = data.get("show_advice", show)
@@ -306,11 +339,14 @@ def load_advice_config() -> Dict:
         k = data.get("warn_pon_kong", wpk)
         if isinstance(k, bool):
             wpk = k
+        cfg = {
+            "show_advice": show,
+            "min_ukeire": minu,
+            "warn_deal_in": wdi,
+            "warn_pon_kong": wpk,
+        }
+        _ADVICE_CACHE["mtime"] = mtime
+        _ADVICE_CACHE["cfg"] = cfg
+        return dict(cfg)
     except (OSError, ValueError, TypeError, AttributeError):
-        pass
-    return {
-        "show_advice": show,
-        "min_ukeire": minu,
-        "warn_deal_in": wdi,
-        "warn_pon_kong": wpk,
-    }
+        return dict(_ADVICE_CACHE["cfg"])
