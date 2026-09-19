@@ -74,6 +74,8 @@ localtest/tiles/tencent_happy/*_media_*
 localtest/yolo/vis_real.png
 localtest/*.png
 localtest/_tmp*
+localtest/_dbg*
+localtest/*.jsonl
 localtest/gt/
 localtest/river_vis/
 localtest/shots/

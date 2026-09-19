@@ -2509,9 +2509,18 @@ class Engine:
             # 必须在扫描弃牌前判定阶段，彻底杜绝换牌/定缺阶段中央UI被误认为弃牌
             dingque_suit, dingque_name = None, None
             is_dq_phase = False
+            # ===== 开局前阶段物理门控（防跨帧状态被误清）=====
+            # 定缺 / 换三张 / 任选一张牌 三个阶段物理上只可能发生在
+            # 「本局第一次弃牌之前」。一旦单调牌池已累积到弃牌，就绝不可能
+            # 再处于这些阶段——此时若视觉探测器误触发，会无条件执行下面的
+            # _monotonic_discards.clear() + _match_started=False，把整局已累积的
+            # 牌池 / 对局状态一把清空，表现为「记牌器归零、活牌计数错乱、
+            # 建议僵死/乱跳」。故：牌池非空时强制判定为非开局前阶段，并跳过
+            # 这些破坏性副作用。开局前牌池本就为空，此门控不影响正常流程。
+            river_locked = sum(self._monotonic_discards.values()) > 0
             if is_dingque_mode(self.mode):
                 # 1. 优先检测中央定缺选门按钮（万/条/筒色盘）
-                if hasattr(detector, "is_dingque_phase") and detector.is_dingque_phase(full_for_preview):
+                if (not river_locked) and hasattr(detector, "is_dingque_phase") and detector.is_dingque_phase(full_for_preview):
                     is_dq_phase = True
                     dingque_suit = None
                     dingque_name = None
@@ -2532,7 +2541,6 @@ class Engine:
                 if is_dq_phase:
                     self._monotonic_discards.clear()
 
-
             # _match_started 在正式摸打对局中设为 True；特殊阶段中保持现状（各阶段自行管理）
             # 注意：此处在 pick/swap 阶段检测之前运行，pick/swap 检测会在后面设置/清除 _match_started
             # 因此这里只能作为初始触发条件，最终状态以各阶段检测块为准
@@ -2544,7 +2552,7 @@ class Engine:
             # 任选牌弹窗比换牌按钮更显著，优先判定，避免被 is_swap_phase 误判
             is_pick_phase = False
             pick_candidates: List[str] = []
-            if is_dingque_mode(self.mode) and not is_dq_phase:
+            if is_dingque_mode(self.mode) and not is_dq_phase and not river_locked:
                 if hasattr(detector, "is_pick_phase") and detector.is_pick_phase(full_for_preview):
                     is_pick_phase = True
                     # 任选一张牌阶段：此时有 13 张手牌，是定缺后的选牌，
@@ -2559,7 +2567,7 @@ class Engine:
             # 此阶段应立即给出"换哪3张"的换牌建议，并禁止扫描牌河（牌桌尚未有任何弃牌）
             # 注意：仅在非任选牌阶段才判定（pick阶段的游戏界面右侧也有绿色区域，会误触发）
             is_swap_phase = False
-            if is_dingque_mode(self.mode) and not is_dq_phase and not is_pick_phase:
+            if is_dingque_mode(self.mode) and not is_dq_phase and not is_pick_phase and not river_locked:
                 if hasattr(detector, "is_swap_phase") and detector.is_swap_phase(full_for_preview):
                     is_swap_phase = True
                     # 换牌阶段：无任何牌河弃牌，清空单调牌池，确保建议不受旧牌池干扰

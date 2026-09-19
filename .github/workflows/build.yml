@@ -77,10 +77,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         with:
-          tag_name: v1.3.0
-          name: "雀神助手 全流程实战强化版 v1.3.0 APK"
+          tag_name: v1.3.1
+          name: "雀神助手 全流程实战强化版 v1.3.1 APK"
           body: |
-            ## 雀神助手 全流程实战强化版 v1.3.0 安装包
+            ## 雀神助手 全流程实战强化版 v1.3.1 安装包
+            - **对局中物理门控防误清**：新增 `river_locked` 门控，彻底防止对局进行中特殊阶段误触发导致牌河清空
             - **界面醒目标识**：悬浮窗状态栏增加 `PRO v1.3` 标识，安装后一目了然
             - **换牌建议致命修复**：修复 recommendations 键值解析遗漏，换牌建议与最优换牌精准动态刷新
             - **防点炮雷达真实门控**：牌河证据不足时抑制「未见即危险」误判，彻底杜绝虚假与乱报错
