@@ -78,15 +78,17 @@ jobs:
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         with:
           tag_name: v1.0.0
-          name: "雀神助手 最新实战安装包 (63MB)"
+          name: "雀神助手 全功能实战优化版 APK"
           body: |
-            ## 雀神助手 最新实战安装包发布
-            - 100% 修复识别精度（34 类全量高清模板纯内存常驻，彻底穿透 Chaquopy）
-            - 完美适配换牌浮起牌与定缺出牌推演
-            - 彻底解决状态卡死与新局重置
+            ## 雀神助手 全功能实战优化版安装包发布
+            - **全流程阶段实时识别**：支持换三张建议、定缺建议、任选一张牌最优推荐、正常对局出牌建议
+            - **牌河识别与全场记牌器**：四象限高精识别 + 瞬时出牌感知 + 两帧确认防抖，精准计算剩余活牌
+            - **杜绝幽灵手牌**：重构场景桌布判定，100% 消除加载中/大厅场景误识别
+            - **血流红中深度适配**：记牌器专属红中活牌高亮展示
             - 手机端直接点击下方 `app-release.apk` 即可下载安装！
           files: build/app/outputs/flutter-apk/app-release.apk
           draft: false
           prerelease: false
+          make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
