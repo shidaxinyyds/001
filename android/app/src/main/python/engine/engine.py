@@ -855,7 +855,7 @@ def infer_opponents_from_discards(disc_counts: List[int]) -> Tuple[List[int], Li
 
 def detect_river_discards(image: np.ndarray, detector, mode: str = "4p", hand_row=None) -> List[str]:
     """高精度牌桌弃牌检测：严格排除中央骰子盒、倒计时、房间名及头像，
-    仅提取牌桌中央四方牌河内真实打出的麻将牌。统一调用高精度 classify_tile，杜绝误检。"""
+    支持多牌相连自适应切片与多角度归一化，精准提取全场四方牌河弃牌。"""
     if image is None or detector is None or image.size == 0:
         return []
     try:
@@ -863,13 +863,12 @@ def detect_river_discards(image: np.ndarray, detector, mode: str = "4p", hand_ro
         avail = available_set(mode)
         raw_discards = []
 
-        # 四方牌河扫描区（围绕中央指南针/骰子盒）：
-        # 上方（南家）、右方（东家）、下方（自家）、左方（西家）
+        # 四方牌河扫描区（避开中央指南针/骰子盒与外围UI）：
         zones = [
-            ('bottom', int(iw * 0.32), int(ih * 0.52), int(iw * 0.68), int(ih * 0.72)),
-            ('top', int(iw * 0.32), int(ih * 0.16), int(iw * 0.68), int(ih * 0.36)),
-            ('left', int(iw * 0.22), int(ih * 0.30), int(iw * 0.44), int(ih * 0.64)),
-            ('right', int(iw * 0.56), int(ih * 0.30), int(iw * 0.78), int(ih * 0.64)),
+            ('bottom', int(iw * 0.30), int(ih * 0.58), int(iw * 0.70), int(ih * 0.74)),
+            ('top', int(iw * 0.30), int(ih * 0.16), int(iw * 0.70), int(ih * 0.38)),
+            ('left', int(iw * 0.20), int(ih * 0.28), int(iw * 0.42), int(ih * 0.64)),
+            ('right', int(iw * 0.58), int(ih * 0.28), int(iw * 0.80), int(ih * 0.64)),
         ]
 
         for zname, x1, y1, x2, y2 in zones:
@@ -877,9 +876,8 @@ def detect_river_discards(image: np.ndarray, detector, mode: str = "4p", hand_ro
             if crop.size == 0:
                 continue
             hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-            # 牌面特征：高明度低饱和象牙白底
-            white = (hsv[:, :, 1] < 60) & (hsv[:, :, 2] > 125) & (crop[:, :, 0] > 70) & (crop[:, :, 1] > 70) & (crop[:, :, 2] > 70)
-            # 过滤高亮黄光/出牌光标指示标
+            # 牌面象牙白底特征
+            white = (hsv[:, :, 1] < 65) & (hsv[:, :, 2] > 115) & (crop[:, :, 0] > 65) & (crop[:, :, 1] > 65) & (crop[:, :, 2] > 65)
             is_beacon = (hsv[:, :, 0] >= 10) & (hsv[:, :, 0] <= 35) & (hsv[:, :, 1] > 120)
             white[is_beacon] = 0
 
@@ -889,57 +887,62 @@ def detect_river_discards(image: np.ndarray, detector, mode: str = "4p", hand_ro
 
             for c in cnts:
                 bx, by, bw, bh = cv2.boundingRect(c)
-                # 排除过小（噪点）或过大（非麻将牌或UI面板）轮廓
-                if bw < 14 or bh < 14 or bw * bh < 250 or bw * bh > 5000:
-                    continue
-                asp = bw / float(bh)
-                # 麻将牌宽高比：竖牌 0.55~0.95，横牌 1.05~1.75
-                if not (0.50 <= asp <= 1.85):
+                if bw < 14 or bh < 14 or bw * bh < 220 or bw * bh > 6000:
                     continue
 
                 gx, gy = x1 + bx, y1 + by
+                # 排除中央指南针/骰子盒物理区域
+                if (0.42 * iw <= gx + bw / 2 <= 0.58 * iw) and (0.38 * ih <= gy + bh / 2 <= 0.62 * ih):
+                    continue
                 # 避免切到手牌顶部
                 if gy + bh >= int(ih * 0.76):
                     continue
 
-                tile_crop = crop[by:by + bh, bx:bx + bw]
-                if tile_crop.size == 0:
-                    continue
+                # 连片牌自适应网格切片（横排与竖排粘连）
+                n_horiz = max(1, int(round(bw / float(max(18, bh * 0.85))))) if bw > 1.35 * bh else 1
+                n_vert = max(1, int(round(bh / float(max(18, bw * 0.85))))) if bh > 1.35 * bw else 1
 
-                # 根据横竖方向进行旋转对齐
-                rots = [None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE] if bw > bh else [None]
-                best_lbl, best_sc = None, 0.0
+                sub_crops = []
+                if n_horiz > 1:
+                    step = bw / float(n_horiz)
+                    for k in range(n_horiz):
+                        sub_crops.append((gx + int(k * step), gy, int(step), bh, crop[by:by + bh, int(bx + k * step):int(bx + (k + 1) * step)]))
+                elif n_vert > 1:
+                    step = bh / float(n_vert)
+                    for k in range(n_vert):
+                        sub_crops.append((gx, gy + int(k * step), bw, int(step), crop[int(by + k * step):int(by + (k + 1) * step), bx:bx + bw]))
+                else:
+                    sub_crops.append((gx, gy, bw, bh, crop[by:by + bh, bx:bx + bw]))
 
-                for r in rots:
-                    cur = tile_crop if r is None else cv2.rotate(tile_crop, r)
-                    if hasattr(detector, "classify_tile"):
-                        lbl, sc = detector.classify_tile(cur)
-                    else:
-                        lbl, sc = None, 0.0
-                    try:
-                        if lbl and mpsz_to_tile34_index(lbl) in avail and sc > best_sc:
-                            best_sc, best_lbl = sc, lbl
-                    except Exception:
-                        pass
+                for sx, sy, sw, sh, tile_crop in sub_crops:
+                    if tile_crop.size == 0:
+                        continue
+                    rots = [None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE]
+                    best_lbl, best_sc = None, 0.0
 
-                # 弃牌置信度阈值：0.52（足够灵敏且杜绝噪点）
-                if best_lbl and best_sc >= 0.52:
-                    raw_discards.append((gx, gy, bw, bh, best_lbl, best_sc))
+                    for r in rots:
+                        cur = tile_crop if r is None else cv2.rotate(tile_crop, r)
+                        if hasattr(detector, "classify_tile"):
+                            lbl, sc = detector.classify_tile(cur, avail=avail)
+                        else:
+                            lbl, sc = None, 0.0
+                        try:
+                            if lbl and mpsz_to_tile34_index(lbl) in avail and sc > best_sc:
+                                best_sc, best_lbl = sc, lbl
+                        except Exception:
+                            pass
 
-        # 空间非极大值抑制（NMS）：消除相邻分区重叠区域的同一张牌多重匹配
+                    # 牌河弃牌置信度门槛：0.42
+                    if best_lbl and best_sc >= 0.42:
+                        raw_discards.append((sx, sy, sw, sh, best_lbl, best_sc))
+
+        # 空间非极大值抑制（NMS）
         raw_discards.sort(key=lambda d: d[5], reverse=True)
         final_discards = []
         for d in raw_discards:
             gx, gy, bw, bh, lbl, sc = d
-            overlap = False
             cx1, cy1 = gx + bw / 2, gy + bh / 2
-            for ex in final_discards:
-                egx, egy, ebw, ebh, elbl, esc = ex
-                cx2, cy2 = egx + ebw / 2, egy + ebh / 2
-                if abs(cx1 - cx2) < 22 and abs(cy1 - cy2) < 22:
-                    overlap = True
-                    break
-            if not overlap:
+            if not any(abs(cx1 - (ex[0] + ex[2] / 2)) < 20 and abs(cy1 - (ex[1] + ex[3] / 2)) < 20 for ex in final_discards):
                 final_discards.append(d)
 
         return [d[4] for d in final_discards]
@@ -976,15 +979,13 @@ def detect_player_melds(image: np.ndarray, detector, mode: str = "sc_hz", hand_r
         for name, x1, y1, x2, y2, rot, is_vert in regions:
             crop = image[y1:y2, x1:x2]
             hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-            white = (hsv[:, :, 1] < 60) & (hsv[:, :, 2] > 130) & (crop[:, :, 0] > 75) & (crop[:, :, 1] > 75) & (crop[:, :, 2] > 75)
+            white = (hsv[:, :, 1] < 60) & (hsv[:, :, 2] > 120) & (crop[:, :, 0] > 70) & (crop[:, :, 1] > 70) & (crop[:, :, 2] > 70)
             cnts, _ = cv2.findContours(white.astype('uint8'), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             for c in cnts:
                 bx, by, bw, bh = cv2.boundingRect(c)
                 area = bw * bh
-                # 一组副露（3~4张牌）物理面积必 >= 1200
-                if area < 1200 or area > 7000:
+                if area < 1000 or area > 7500:
                     continue
-                # 长宽比：副露由3~4张牌拼成，必呈长条形 (aspect >= 1.8)
                 aspect = bh / float(bw) if is_vert else bw / float(bh)
                 if aspect < 1.8:
                     continue
@@ -997,33 +998,45 @@ def detect_player_melds(image: np.ndarray, detector, mode: str = "sc_hz", hand_r
                 step = (bh / float(num_t)) if is_vert else (bw / float(num_t))
 
                 cand_scores = []
-                # 牌面垂直向上延展 15%，完整纳入上方数字/字头，杜绝字符被切断
-                crop_y1 = max(0, by - int(bh * 0.15))
-                crop_h = min(crop.shape[0] - crop_y1, bh + int(bh * 0.15))
                 for i in range(num_t):
                     if is_vert:
-                        t = crop[int(crop_y1 + i * step):int(crop_y1 + (i + 1) * step), bx:bx + bw]
+                        t = crop[int(by + i * step):int(by + (i + 1) * step), bx:bx + bw]
                     else:
-                        t = crop[crop_y1:crop_y1 + crop_h, int(bx + i * step):int(bx + (i + 1) * step)]
+                        t = crop[by:by + bh, int(bx + i * step):int(bx + (i + 1) * step)]
                     if rot is not None:
                         t = cv2.rotate(t, rot)
+
+                    best_lbl, best_sc = None, 0.0
+                    # 1. 分类器
                     if hasattr(detector, "classify_tile"):
-                        best_lbl, best_sc = detector.classify_tile(t)
-                    else:
-                        best_lbl, best_sc = None, 0.0
+                        lbl, sc = detector.classify_tile(t, avail=avail)
+                        if lbl and mpsz_to_tile34_index(lbl) in avail:
+                            best_lbl, best_sc = lbl, sc
+                    # 2. 紧凑模板匹配补充（针对俯视平躺牌）
+                    if hasattr(detector, "templates_bgr") and best_sc < 0.45:
+                        try:
+                            face = detector.extract_face(t)
+                            for lbl, tmpl in detector.templates_bgr.items():
+                                if mpsz_to_tile34_index(lbl) not in avail:
+                                    continue
+                                t_compact = tmpl[20:98, 12:68]
+                                res = cv2.matchTemplate(face, t_compact, cv2.TM_CCOEFF_NORMED)
+                                sc_c = float(res.max())
+                                if sc_c > best_sc:
+                                    best_sc, best_lbl = sc_c, lbl
+                        except Exception:
+                            pass
 
                     try:
-                        if best_lbl and mpsz_to_tile34_index(best_lbl) in avail and best_sc >= 0.50:
+                        if best_lbl and mpsz_to_tile34_index(best_lbl) in avail and best_sc >= 0.42:
                             cand_scores.append((best_lbl, best_sc))
                     except Exception:
                         pass
 
                 if cand_scores:
-                    # 碰/杠必定为同字牌，以出现频次最多且置信度最高的牌作为该副露的真实牌型
                     vote_cnt = Counter([c[0] for c in cand_scores])
                     top_lbl, top_votes = vote_cnt.most_common(1)[0]
-                    # 至少有 2 张一致判定或者平均置信度 >= 0.52
-                    if top_votes >= 2 or max([c[1] for c in cand_scores if c[0] == top_lbl]) >= 0.52:
+                    if top_votes >= 2 or max([c[1] for c in cand_scores if c[0] == top_lbl]) >= 0.48:
                         melds.extend([top_lbl] * num_t)
         return melds
     except Exception:
@@ -2460,25 +2473,24 @@ class Engine:
             is_swap_phase = False
             pick_candidates: List[str] = []
 
-            # ===== 开局前阶段物理门控（防跨帧状态被误清）=====
-            # 定缺 / 换三张 / 任选一张牌 三个阶段物理上只可能发生在
-            # 「本局第一次弃牌之前」。一旦单调牌池已累积到弃牌，就绝不可能
-            # 再处于这些阶段——此时若视觉探测器误触发，会无条件执行
-            # _monotonic_discards.clear() + _match_started=False，把整局已累积的
-            # 牌池 / 对局状态一把清空，表现为「记牌器归零、活牌计数错乱、
-            # 建议僵死/乱跳」。故：牌池非空时强制判定为非开局前阶段，并跳过
-            # 这些破坏性副作用。开局前牌池本就为空，此门控不影响正常流程。
-            river_locked = sum(self._monotonic_discards.values()) > 0
+            # ===== 开局前阶段 vs 局中状态严格门控 =====
+            # 真实定缺/换牌阶段铁证：全场无确认定缺徽章（尚未敲定选门），且检测到定缺三色色盘或金色换牌按钮；
+            # 局中防护：当本局已有确凿弃牌且已有确认定缺徽章时，认定处于局中，屏蔽误触清空；
+            # 但若进入真实新对局开局（全场无定缺徽章且出现定缺/换牌物理特征），立即重置旧局残留牌池。
+            curr_my_dq, _ = detect_dingque(full_for_preview)
+            river_locked = (sum(self._monotonic_discards.values()) > 0 and curr_my_dq is not None)
             if is_dingque_mode(self.mode) and not river_locked:
                 # 1. 优先检测换三张阶段（右侧金色换牌大圆按钮 / 过按钮）
                 if hasattr(detector, "is_swap_phase") and detector.is_swap_phase(full_for_preview):
                     is_swap_phase = True
                     self._monotonic_discards.clear()
+                    self._pending_discards.clear()
                     self._match_started = False
                 # 2. 定缺选门阶段（中央万/条/筒三色大圆盘）
                 elif hasattr(detector, "is_dingque_phase") and detector.is_dingque_phase(full_for_preview):
                     is_dq_phase = True
                     self._monotonic_discards.clear()
+                    self._pending_discards.clear()
                     self._match_started = False
                 # 3. 选一张牌阶段（屏幕中央大牌确认 或 候选横排）
                 elif hasattr(detector, "is_pick_phase") and detector.is_pick_phase(full_for_preview):

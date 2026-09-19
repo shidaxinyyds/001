@@ -141,7 +141,7 @@ class TencentGridDetector(Detector):
             peaks += 1
         return peaks
 
-    def classify_tile(self, crop: np.ndarray) -> Tuple[str, float]:
+    def classify_tile(self, crop: np.ndarray, avail=None) -> Tuple[str, float]:
         face = self.extract_face(crop)
         hsv = cv2.cvtColor(face, cv2.COLOR_BGR2HSV)
         is_grey = (np.mean(hsv[:, :, 1]) < 35)
@@ -153,7 +153,14 @@ class TencentGridDetector(Detector):
         c_face = face[y_start:110, 6:74]
         scores: Dict[str, float] = {}
 
-        valid_tiles = {f"{i}m" for i in range(1, 10)} | {f"{i}p" for i in range(1, 10)} | {f"{i}s" for i in range(1, 10)} | {"7z"}
+        if avail is not None:
+            if avail and isinstance(next(iter(avail)), int):
+                from trainer.utils.convert import tiles34_index_to_mpsz
+                valid_tiles = {tiles34_index_to_mpsz(i) for i in avail}
+            else:
+                valid_tiles = set(avail)
+        else:
+            valid_tiles = {f"{i}m" for i in range(1, 10)} | {f"{i}p" for i in range(1, 10)} | {f"{i}s" for i in range(1, 10)} | {"7z"}
 
         if is_grey:
             c_face_g = cv2.normalize(cv2.cvtColor(c_face, cv2.COLOR_BGR2GRAY), None, 0, 255, cv2.NORM_MINMAX)
@@ -173,7 +180,7 @@ class TencentGridDetector(Detector):
                 scores[lbl] = float(res.max())
 
         if not scores:
-            return "7z", 0.0
+            return next(iter(valid_tiles)) if valid_tiles else "7z", 0.0
 
         sorted_candidates = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         best_lbl = sorted_candidates[0][0]
