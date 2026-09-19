@@ -27,20 +27,28 @@ public class NetworkClient {
      * 悬浮窗端表现为"没有任何反应"，完全无法区分是识别挂了还是链路断了）。
      */
     public boolean send(byte[] bytes) {
-        Socket socket = new Socket();
-
+        Socket socket = null;
         int bytesLength = bytes.length;
         try {
+            socket = new Socket();
+            socket.setSoTimeout(1500);
             socket.connect(new InetSocketAddress(host, port), 1000);
             DataOutputStream dataOut = new DataOutputStream(socket.getOutputStream());
             dataOut.writeBytes(leftPadZeros(String.valueOf(bytesLength), 8));
             dataOut.write(bytes);
+            dataOut.flush();
             dataOut.close();
             socket.close();
             return true;
         } catch (IOException e) {
-            TimedLog.e(TAG, "Error sending data" + e.toString());
+            TimedLog.e(TAG, "Error sending data: " + e.toString());
             return false;
+        } finally {
+            if (socket != null && !socket.isClosed()) {
+                try {
+                    socket.close();
+                } catch (Exception ignore) {}
+            }
         }
     }
 

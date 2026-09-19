@@ -2404,10 +2404,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                                       borderRadius: BorderRadius.circular(3),
                                     ),
                                     child: const Text(
-                                      'PRO',
+                                      'PRO v1.2',
                                       style: TextStyle(
                                         color: Color(0xFF1E1E1E),
-                                        fontSize: 8,
+                                        fontSize: 7.5,
                                         fontWeight: FontWeight.w900,
                                       ),
                                     ),

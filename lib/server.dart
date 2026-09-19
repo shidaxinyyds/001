@@ -36,6 +36,7 @@ class Server {
                 int.tryParse(String.fromCharCodes(metadataBuffer));
             if (dataLength == null) {
               print("数据长度解析失败");
+              try { socket.destroy(); } catch (_) {}
               return;
             }
             length = dataLength;
@@ -44,13 +45,25 @@ class Server {
           dataBuffer.addAll(data);
           // 注意：必须以累计长度 dataBuffer.length 判断，不能用单个分片长度。
           if (dataBuffer.length >= length) {
-            callback(dataBuffer.sublist(0, length));
-            // 单次连接只发送一帧，重置以便复用（实际上连接随后即关闭）。
+            final frameData = dataBuffer.sublist(0, length);
             dataBuffer = [];
             metadataBuffer = [];
             length = -1;
+            try {
+              callback(frameData);
+            } catch (e) {
+              print("悬浮窗 callback 执行异常: $e");
+            } finally {
+              try { socket.destroy(); } catch (_) {}
+            }
           }
-        });
+        }, onError: (err) {
+          try { socket.destroy(); } catch (_) {}
+        }, onDone: () {
+          try { socket.destroy(); } catch (_) {}
+        }, cancelOnError: true);
+      }, onError: (err) {
+        print("ServerSocket listen 异常: $err");
       });
     }).catchError((e) {
       print("分析服务启动失败：$e");
