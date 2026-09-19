@@ -572,7 +572,7 @@ class _HandStabilizer:
             self.reset()
             return ""
 
-        if n < 5:
+        if n not in valid_sizes and n < 4:
             self._empty_streak = getattr(self, "_empty_streak", 0) + 1
             if self._empty_streak >= 2:
                 # 连续 2 帧手牌区无有效手牌（对局结束/未开局/大厅）：彻底重置稳定手牌，绝不跨局残留
@@ -2301,19 +2301,9 @@ class Engine:
             except Exception:
                 diff = float("inf")  # 帧差算不出来就当不动也跑完整识别
 
-            # 强制跑完整识别的两个条件：
-            #  1) 连续跳过已达上限 —— 画面可以长时间静止，但牌河/剩余数仍要刷新；
-            #  2) 稳定器报告"看到了新牌型但证据还不够"。
-            #     缺了第 2 条会有个很隐蔽的死结：麻将画面打完一张牌后就静止了，
-            #     帧差低于阈值 → 后续帧全被跳过 → 稳定器永远攒不到第二票 →
-            #     手牌再也不更新。用户看到的就是"识别不出来"。
-            force_run = (self._consecutive_skips >= MAX_SKIP_FRAMES
-                         or self._hand_stab.pending)
-            if (not force_run
-                    and diff < FRAME_DIFF_THRESHOLD
-                    and self._frame_skipper.cached is not None):
-                self._consecutive_skips += 1
-                return self._build_skip_result(image, self._frame_skipper.cached)
+            # 彻底移除 _FrameSkipper 帧差跳帧截断：
+            # Android 端 ScreenStreamer 仅在画面刷新时推送新帧，且单帧完整识别仅需数十毫秒。
+            # 跳帧会导致摸打阶段界面死锁在开局旧建议（如换三张）并带来秒级滞后，因此强制每帧均执行完整推演，实现毫秒级跟随。
             self._consecutive_skips = 0
 
             # ===== 动画突变帧检测（记录 diff，交由稳定器平滑，不再丢弃截断） =====
@@ -2470,7 +2460,16 @@ class Engine:
             is_swap_phase = False
             pick_candidates: List[str] = []
 
-            if is_dingque_mode(self.mode):
+            # ===== 开局前阶段物理门控（防跨帧状态被误清）=====
+            # 定缺 / 换三张 / 任选一张牌 三个阶段物理上只可能发生在
+            # 「本局第一次弃牌之前」。一旦单调牌池已累积到弃牌，就绝不可能
+            # 再处于这些阶段——此时若视觉探测器误触发，会无条件执行
+            # _monotonic_discards.clear() + _match_started=False，把整局已累积的
+            # 牌池 / 对局状态一把清空，表现为「记牌器归零、活牌计数错乱、
+            # 建议僵死/乱跳」。故：牌池非空时强制判定为非开局前阶段，并跳过
+            # 这些破坏性副作用。开局前牌池本就为空，此门控不影响正常流程。
+            river_locked = sum(self._monotonic_discards.values()) > 0
+            if is_dingque_mode(self.mode) and not river_locked:
                 # 1. 优先检测换三张阶段（右侧金色换牌大圆按钮 / 过按钮）
                 if hasattr(detector, "is_swap_phase") and detector.is_swap_phase(full_for_preview):
                     is_swap_phase = True
