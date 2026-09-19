@@ -559,12 +559,22 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // 防封号：建议做人类式延迟显示。关闭开关时立即呈现（与以往一致）；
   // 开启时随机延迟 180–420ms 再刷新 _shownAdvice/_shownBest，
   // 让建议出现节奏更接近人类而非每帧瞬时刷新。手牌/牌河仍随 result 立即刷新。
-  void _applyAdviceDelay(Map<String, dynamic> json) {
+  // 例外：换牌/选牌/定缺阶段的建议应当立即显示，给用户足够反应时间。
+  void _applyAdviceDelay(Map<dynamic, dynamic> json) {
     final List<dynamic> advice =
         (json['advice'] ?? const []) as List<dynamic>;
     final String best = (json['best'] ?? '') as String;
     _adviceTimer?.cancel();
-    if (!_antiBan) {
+
+    // 特殊阶段（换牌/选牌/定缺）不延迟，立即显示，确保实时性
+    final String st = (json['status'] as String?) ?? '';
+    final bool isSpecialPhase = (
+      st == 'swap' || st == 'pick' || st == 'dingque' ||
+      json['swap_phase'] == true || json['pick_phase'] == true ||
+      json['dingque_phase'] == true
+    );
+
+    if (!_antiBan || isSpecialPhase) {
       setState(() {
         _shownAdvice = advice;
         _shownBest = best;
@@ -1146,7 +1156,12 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     }
 
     Widget buildZRow(String suitName, Color labelColor, List<dynamic> counts) {
-      const zNames = ['东', '南', '西', '北', '白', '发', '中'];
+      if (counts.isEmpty) return const SizedBox.shrink();
+      // 若只有 1 张字牌（血流红中），专门呈现醒目的【中】
+      final bool isOnlyHongZhong = counts.length == 1;
+      final List<String> zNames = isOnlyHongZhong ? const ['中'] : const ['东', '南', '西', '北', '白', '发', '中'];
+      final int displayCount = isOnlyHongZhong ? 1 : (counts.length >= 7 ? 7 : counts.length);
+
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 1.0),
         child: Row(
@@ -1154,9 +1169,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             SizedBox(
               width: 14,
               child: Text(
-                suitName,
+                isOnlyHongZhong ? '中' : suitName,
                 style: TextStyle(
-                  color: labelColor,
+                  color: isOnlyHongZhong ? const Color(0xFFFF5252) : labelColor,
                   fontSize: 9.5,
                   fontWeight: FontWeight.bold,
                 ),
@@ -1166,7 +1181,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             Expanded(
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.start,
-                children: List.generate(7, (idx) {
+                children: List.generate(displayCount, (idx) {
                   final int cnt = (counts.length > idx && counts[idx] is int) ? counts[idx] as int : 0;
                   final Color numColor;
                   final Color cellBg;
@@ -1192,7 +1207,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                   return Padding(
                     padding: const EdgeInsets.only(right: 3.5),
                     child: Container(
-                      width: 23,
+                      width: isOnlyHongZhong ? 34 : 23,
                       height: 22,
                       decoration: BoxDecoration(
                         color: cellBg,
@@ -1208,7 +1223,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                           Text(
                             zNames[idx],
                             style: TextStyle(
-                              color: labelColor.withAlpha(cnt == 0 ? 70 : 220),
+                              color: (isOnlyHongZhong ? const Color(0xFFFF5252) : labelColor).withAlpha(cnt == 0 ? 70 : 220),
                               fontSize: 7.5,
                               fontWeight: FontWeight.bold,
                               height: 1.0,
@@ -2293,12 +2308,12 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       final String best = _shownBest;
       final String status = (result?['status'] as String?) ?? '';
       final bool isDingquePhase = (result?['dingque_phase'] == true || status == 'dingque');
+      final bool isSwapPhase = (result?['swap_phase'] == true || status == 'swap');
+      final bool isPickPhase = (result?['pick_phase'] == true || status == 'pick');
+      // inMatch：对局已进行中（有手牌且不是等待状态），不再要求 remaining_matrix（swap/pick阶段无牌河）
       final bool inMatch = status != 'waiting' &&
           status != 'no_tiles' &&
-          count >= 4 &&
-          result?['remaining_matrix'] is Map &&
-          (result!['remaining_matrix'] as Map)['m'] != null &&
-          ((result!['remaining_matrix'] as Map)['m'] as List).isNotEmpty;
+          count >= 4;
 
       current = SizedBox.expand(
         child: Stack(
@@ -2466,7 +2481,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                         _adviceSection(advice, best, count),
                         const SizedBox(height: 5),
                         // 2. 当前手牌（仅在确认对局内或定缺阶段才显示，杜绝大厅与非对局干扰）
-                        if (hand.isNotEmpty && count > 0 && (inMatch || isDingquePhase)) ...[
+                        if (hand.isNotEmpty && count > 0 && (inMatch || isDingquePhase || isSwapPhase || isPickPhase)) ...[
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
                             decoration: BoxDecoration(

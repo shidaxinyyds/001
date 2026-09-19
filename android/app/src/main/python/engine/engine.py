@@ -854,7 +854,7 @@ def infer_opponents_from_discards(disc_counts: List[int]) -> Tuple[List[int], Li
 
 def detect_river_discards(image: np.ndarray, detector, mode: str = "4p", hand_row=None) -> List[str]:
     """高精度牌桌弃牌检测：严格排除中央骰子盒、倒计时、房间名及头像，
-    仅提取牌桌中央四方牌河内真实打出的麻将牌。"""
+    仅提取牌桌中央四方牌河内真实打出的麻将牌。统一调用高精度 classify_tile，杜绝误检。"""
     if image is None or detector is None or image.size == 0:
         return []
     try:
@@ -865,48 +865,64 @@ def detect_river_discards(image: np.ndarray, detector, mode: str = "4p", hand_ro
         # 四方牌河扫描区（围绕中央指南针/骰子盒）：
         # 上方（南家）、右方（东家）、下方（自家）、左方（西家）
         zones = [
-            ('top', int(iw * 0.35), int(ih * 0.18), int(iw * 0.65), int(ih * 0.38)),
-            ('right', int(iw * 0.56), int(ih * 0.32), int(iw * 0.72), int(ih * 0.64)),
-            ('bottom', int(iw * 0.35), int(ih * 0.54), int(iw * 0.65), int(ih * 0.72)),
-            ('left', int(iw * 0.28), int(ih * 0.32), int(iw * 0.44), int(ih * 0.64)),
+            ('bottom', int(iw * 0.32), int(ih * 0.52), int(iw * 0.68), int(ih * 0.72)),
+            ('top', int(iw * 0.32), int(ih * 0.16), int(iw * 0.68), int(ih * 0.36)),
+            ('left', int(iw * 0.22), int(ih * 0.30), int(iw * 0.44), int(ih * 0.64)),
+            ('right', int(iw * 0.56), int(ih * 0.30), int(iw * 0.78), int(ih * 0.64)),
         ]
 
         for zname, x1, y1, x2, y2 in zones:
             crop = image[y1:y2, x1:x2]
+            if crop.size == 0:
+                continue
             hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-            white = (hsv[:, :, 1] < 65) & (hsv[:, :, 2] > 130) & (crop[:, :, 0] > 75) & (crop[:, :, 1] > 75) & (crop[:, :, 2] > 75)
-            # 过滤高亮黄光指示标
-            is_beacon = (hsv[:, :, 0] >= 10) & (hsv[:, :, 0] <= 30) & (hsv[:, :, 1] > 100)
+            # 牌面特征：高明度低饱和象牙白底
+            white = (hsv[:, :, 1] < 60) & (hsv[:, :, 2] > 125) & (crop[:, :, 0] > 70) & (crop[:, :, 1] > 70) & (crop[:, :, 2] > 70)
+            # 过滤高亮黄光/出牌光标指示标
+            is_beacon = (hsv[:, :, 0] >= 10) & (hsv[:, :, 0] <= 35) & (hsv[:, :, 1] > 120)
             white[is_beacon] = 0
 
-            cnts, _ = cv2.findContours(white.astype('uint8'), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            mask = cv2.morphologyEx(white.astype('uint8'), cv2.MORPH_CLOSE, kernel)
+            cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
             for c in cnts:
                 bx, by, bw, bh = cv2.boundingRect(c)
-                area = bw * bh
-                if area < 300 or area > 4500:
+                # 排除过小（噪点）或过大（非麻将牌或UI面板）轮廓
+                if bw < 14 or bh < 14 or bw * bh < 250 or bw * bh > 5000:
                     continue
-                gx, gy = x1 + bx, y1 + by
-                if gy + bh >= int(ih * 0.78):
+                asp = bw / float(bh)
+                # 麻将牌宽高比：竖牌 0.55~0.95，横牌 1.05~1.75
+                if not (0.50 <= asp <= 1.85):
                     continue
 
-                tile_crop = crop[by:by + max(12, int(bh * 0.80)), bx:bx + bw]
-                rots = [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE] if bw > bh * 1.15 else [None, cv2.ROTATE_90_CLOCKWISE]
+                gx, gy = x1 + bx, y1 + by
+                # 避免切到手牌顶部
+                if gy + bh >= int(ih * 0.76):
+                    continue
+
+                tile_crop = crop[by:by + bh, bx:bx + bw]
+                if tile_crop.size == 0:
+                    continue
+
+                # 根据横竖方向进行旋转对齐
+                rots = [None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE] if bw > bh else [None]
                 best_lbl, best_sc = None, 0.0
+
                 for r in rots:
                     cur = tile_crop if r is None else cv2.rotate(tile_crop, r)
-                    face = detector.extract_face(cur) if hasattr(detector, "extract_face") else cur
-                    for lbl, tmpl in getattr(detector, "templates_bgr", {}).items():
-                        try:
-                            if mpsz_to_tile34_index(lbl) not in avail:
-                                continue
-                        except Exception:
-                            pass
-                        t_core = tmpl[16:104, 12:68]
-                        res = cv2.matchTemplate(face, t_core, cv2.TM_CCOEFF_NORMED)
-                        mx = float(res.max())
-                        if mx > best_sc:
-                            best_sc, best_lbl = mx, lbl
-                if best_lbl and best_sc >= 0.50:
+                    if hasattr(detector, "classify_tile"):
+                        lbl, sc = detector.classify_tile(cur)
+                    else:
+                        lbl, sc = None, 0.0
+                    try:
+                        if lbl and mpsz_to_tile34_index(lbl) in avail and sc > best_sc:
+                            best_sc, best_lbl = sc, lbl
+                    except Exception:
+                        pass
+
+                # 弃牌置信度阈值：0.52（足够灵敏且杜绝噪点）
+                if best_lbl and best_sc >= 0.52:
                     raw_discards.append((gx, gy, bw, bh, best_lbl, best_sc))
 
         # 空间非极大值抑制（NMS）：消除相邻分区重叠区域的同一张牌多重匹配
@@ -919,7 +935,7 @@ def detect_river_discards(image: np.ndarray, detector, mode: str = "4p", hand_ro
             for ex in final_discards:
                 egx, egy, ebw, ebh, elbl, esc = ex
                 cx2, cy2 = egx + ebw / 2, egy + ebh / 2
-                if abs(cx1 - cx2) < 30 and abs(cy1 - cy2) < 25:
+                if abs(cx1 - cx2) < 22 and abs(cy1 - cy2) < 22:
                     overlap = True
                     break
             if not overlap:
@@ -989,21 +1005,16 @@ def detect_player_melds(image: np.ndarray, detector, mode: str = "sc_hz", hand_r
                         t = crop[by:by + bh, int(bx + i * step):int(bx + (i + 1) * step)]
                     if rot is not None:
                         t = cv2.rotate(t, rot)
-                    face = detector.extract_face(t) if hasattr(detector, "extract_face") else t
-                    best_lbl, best_sc = None, -1.0
-                    for lbl, tmpl in getattr(detector, "templates_bgr", {}).items():
-                        try:
-                            if mpsz_to_tile34_index(lbl) not in avail:
-                                continue
-                        except Exception:
-                            pass
-                        t_core = tmpl[16:104, 12:68]
-                        res = cv2.matchTemplate(face, t_core, cv2.TM_CCOEFF_NORMED)
-                        mx = float(res.max())
-                        if mx > best_sc:
-                            best_sc, best_lbl = mx, lbl
-                    if best_lbl and best_sc >= 0.40:
-                        cand_scores.append((best_lbl, best_sc))
+                    if hasattr(detector, "classify_tile"):
+                        best_lbl, best_sc = detector.classify_tile(t)
+                    else:
+                        best_lbl, best_sc = None, 0.0
+
+                    try:
+                        if best_lbl and mpsz_to_tile34_index(best_lbl) in avail and best_sc >= 0.45:
+                            cand_scores.append((best_lbl, best_sc))
+                    except Exception:
+                        pass
 
                 if cand_scores:
                     cand_scores.sort(key=lambda x: x[1], reverse=True)
@@ -1053,6 +1064,7 @@ class Engine:
         # 牌河稳定性历史与牌池单调累加器（单局牌池只增不减、108张物理守恒）
         self._discard_history: deque = deque(maxlen=DISCARD_HISTORY_FRAMES)
         self._monotonic_discards: Counter = Counter()
+        self._pending_discards: Counter = Counter()  # 视觉牌河连续帧确认投票器
         self._match_started: bool = False
         self._last_stable_counter: Counter = Counter()
         self._last_stable_n: int = 0
@@ -1107,11 +1119,12 @@ class Engine:
         self._non_table_frames: int = 0
 
     def _is_mahjong_table(self, image: np.ndarray) -> bool:
-        """检测当前画面是否为真实的麻将牌桌对局场景（排除大厅/主菜单/结算界面）。
+        """检测当前画面是否为真实的麻将牌桌对局场景（排除大厅/主菜单/结算界面/加载画面）。
 
         真实麻将牌桌具备两大铁证：
-        1. 牌桌中央为主流桌布颜色（经典绿、深青湖蓝、温润木纹），色相饱和度集中。
-        2. 画面下半部（手牌区）存在实体手牌先验特征（横向排列的象牙白矩形块）。
+        1. 牌桌中央呈现大面积单色平整的麻将桌布（经典绿呢、深青墨绿呢或温润木纹），
+           主色调占比必 >= 18%，且彻底排除蓝天白云沙滩等多色混合干扰。
+        2. 画面下半部（手牌区）存在实体手牌先验特征。
         """
         if image is None or image.size == 0:
             return False
@@ -1121,35 +1134,37 @@ class Engine:
             return False
         small = cv2.resize(center, (100, 100), interpolation=cv2.INTER_NEAREST)
         hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
-        
-        # 常见麻将桌布颜色（更加收敛准确的色相与饱和度区间）：
-        # 1. 经典绿呢桌布: H in [35, 88], S >= 35, V >= 30
-        # 2. 雀魂/腾讯深青/湖蓝/深蓝桌布: H in [95, 125], S >= 35, V >= 30
-        # 3. 仿木纹/咖啡色桌布: H in [12, 25], S >= 45, V >= 35
-        table_mask = (
-            ((hsv[:, :, 0] >= 35) & (hsv[:, :, 0] <= 88) & (hsv[:, :, 1] >= 35) & (hsv[:, :, 2] >= 30)) |
-            ((hsv[:, :, 0] >= 95) & (hsv[:, :, 0] <= 125) & (hsv[:, :, 1] >= 35) & (hsv[:, :, 2] >= 30)) |
-            ((hsv[:, :, 0] >= 12) & (hsv[:, :, 0] <= 25) & (hsv[:, :, 1] >= 45) & (hsv[:, :, 2] >= 35))
-        )
-        table_ratio = float(np.mean(table_mask))
-        if table_ratio >= 0.15:
+
+        # 真实麻将桌布单色区间（必须是单一主色调，杜绝风景多色拼接）：
+        # 1. 经典绿呢桌布: H in [35, 88], S >= 40, V in [30, 210]
+        # 2. 腾讯/雀魂深墨绿/深青呢: H in [88, 112], S >= 45, V in [30, 150] (排除高亮海蓝天蓝)
+        # 3. 仿木纹/咖啡色桌布: H in [12, 25], S >= 60, V in [35, 160]
+        green_felt = float(np.mean((hsv[:, :, 0] >= 35) & (hsv[:, :, 0] <= 88) & (hsv[:, :, 1] >= 40) & (hsv[:, :, 2] >= 30) & (hsv[:, :, 2] <= 210)))
+        cyan_felt = float(np.mean((hsv[:, :, 0] >= 88) & (hsv[:, :, 0] <= 112) & (hsv[:, :, 1] >= 45) & (hsv[:, :, 2] >= 30) & (hsv[:, :, 2] <= 150)))
+        wood_felt = float(np.mean((hsv[:, :, 0] >= 12) & (hsv[:, :, 0] <= 25) & (hsv[:, :, 1] >= 60) & (hsv[:, :, 2] >= 35) & (hsv[:, :, 2] <= 160)))
+
+        max_felt = max(green_felt, cyan_felt, wood_felt)
+
+        # 真实牌桌中央桌布单色占比通常达到 18% 以上
+        if max_felt >= 0.18:
             return True
 
-        # 兜底：若牌桌被中央悬浮窗/特效遮挡，检查底部手牌区是否具备实体白底手牌块
-        bottom_region = image[int(h * 0.72):, :]
-        if bottom_region.size > 0:
-            b_small = cv2.resize(bottom_region, (120, 40), interpolation=cv2.INTER_NEAREST)
-            b_hsv = cv2.cvtColor(b_small, cv2.COLOR_BGR2HSV)
-            white_tiles = (b_hsv[:, :, 2] >= 135) & (b_hsv[:, :, 1] <= 60)
-            white_ratio = float(np.mean(white_tiles))
-            if white_ratio >= 0.08 or (white_ratio >= 0.05 and table_ratio >= 0.08):
-                return True
+        # 兜底：若中央被全屏大弹窗（如选牌面板）遮挡，通过手牌识别器底层检查是否能检测出合法手牌
+        det = getattr(self, "_detector", None)
+        if det is not None and hasattr(det, "detect_hand_strip"):
+            try:
+                tiles = det.detect_hand_strip(image)
+                if len(tiles) >= 7:
+                    return True
+            except Exception:
+                pass
 
         return False
 
     def _reset_game_state(self):
         """重置整局游戏的动态状态（新开局/返回大厅/结算时调用）。"""
         self._monotonic_discards.clear()
+        self._pending_discards.clear()
         self._discard_history.clear()
         self._tile_voter.reset()
         self._hand_stab.reset()
@@ -2376,6 +2391,9 @@ class Engine:
                     self._monotonic_discards.clear()
 
 
+            # _match_started 在正式摸打对局中设为 True；特殊阶段中保持现状（各阶段自行管理）
+            # 注意：此处在 pick/swap 阶段检测之前运行，pick/swap 检测会在后面设置/清除 _match_started
+            # 因此这里只能作为初始触发条件，最终状态以各阶段检测块为准
             if not is_dq_phase and len(raw_labels) >= 10:
                 self._match_started = True
 
@@ -2387,6 +2405,8 @@ class Engine:
             if is_dingque_mode(self.mode) and not is_dq_phase:
                 if hasattr(detector, "is_pick_phase") and detector.is_pick_phase(full_for_preview):
                     is_pick_phase = True
+                    # 任选一张牌阶段：此时有 13 张手牌，是定缺后的选牌，
+                    # 这是正式摸打之前的最后一个准备阶段，_match_started 保持不变（已由上面设置）
                     try:
                         pick_candidates = detector.detect_pick_candidates(full_for_preview)
                     except Exception:
@@ -2458,6 +2478,7 @@ class Engine:
                 for missing_tile, m_count in missing_cnt.items():
                     if m_count > 0:
                         self._monotonic_discards[missing_tile] += m_count
+                        self._pending_discards[missing_tile] = self._monotonic_discards[missing_tile]
                         self._match_started = True
 
             # ===== 瞬时摸牌感知：手牌张数增加（例如 13->14，玩家刚摸到一张牌）=====
@@ -2493,13 +2514,23 @@ class Engine:
                     sorted_hand_by_x = sorted(hand_row, key=lambda d: d[0][0])
                     drawing_tile = sorted_hand_by_x[-1][1]
 
-            # 牌池单调累加器：同局内牌池只增不减，防止由于动画/飞牌/气泡遮挡导致牌池牌数掉落
+            # 牌池单调累加器：同局内牌池只增不减，结合两帧确认机制，防止动画/飞牌/气泡导致噪点永久写入
             if allow_river_scan:
-                for lab in discard_labels:
-                    if lab:
-                        cnt = discard_labels.count(lab)
-                        if cnt > self._monotonic_discards[lab]:
+                current_frame_discards = Counter(discard_labels)
+                for lab, cnt in current_frame_discards.items():
+                    if not lab:
+                        continue
+                    if cnt > self._monotonic_discards[lab]:
+                        # 视觉牌河连续两帧验证：必须在连续两帧均观测到该数量，才递增单调牌池，杜绝单帧动画杂斑误入
+                        if self._pending_discards[lab] >= cnt:
                             self._monotonic_discards[lab] = cnt
+                        else:
+                            self._pending_discards[lab] = cnt
+                # 衰减未确认的孤立噪点
+                for lab in list(self._pending_discards.keys()):
+                    if current_frame_discards[lab] == 0:
+                        self._pending_discards[lab] = self._monotonic_discards[lab]
+
 
             # 计算手牌各牌计数
             hand_counts = [0] * 34
@@ -2810,11 +2841,21 @@ class Engine:
                         hand_counts_final[mpsz_to_tile34_index(hand_mpsz[i:i + 2])] += 1
                     except Exception:
                         pass
+                if self.mode == "sc_hz":
+                    # 血流红中模式：字牌仅有红中 (7z，索引33)，单独呈现
+                    z_counts = [max(0, 4 - (hand_counts_final[33] + disc_counts_out[33]))]
+                elif is_sichuan_family(self.mode):
+                    # 普通四川麻将（血战到底/血流成河）：无任何字牌
+                    z_counts = []
+                else:
+                    # 其他包含字牌的玩法（东/南/西/北/白/发/中，共7张）
+                    z_counts = [max(0, 4 - (hand_counts_final[i] + disc_counts_out[i])) for i in range(27, 34)]
+
                 remaining_matrix = {
                     "m": [max(0, 4 - (hand_counts_final[i] + disc_counts_out[i])) for i in range(0, 9)],
                     "p": [max(0, 4 - (hand_counts_final[i] + disc_counts_out[i])) for i in range(9, 18)],
                     "s": [max(0, 4 - (hand_counts_final[i] + disc_counts_out[i])) for i in range(18, 27)],
-                    "z": [max(0, 4 - (hand_counts_final[i] + disc_counts_out[i])) for i in range(27, 34)],
+                    "z": z_counts,
                 }
                 known = sum(hand_counts_final[i] for i in avail_list) + sum(disc_counts_out[i] for i in avail_list)
                 remaining = max(0, wall_total - known)
