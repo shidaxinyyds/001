@@ -43,6 +43,12 @@ class DebugConfig {
   // 采集存帧（风格库自举）：开启后把引擎看到的原始帧落盘到 app 外部 files/frames/，
   // 供后续 harvest→cluster→标注重建该风格的完整模板库。默认关闭。
   static const bool defDumpFrames = false;
+  // 牌河真实帧采集（P4 再训练闭环数据入口）：引擎在牌河内容变化时存
+  // 整帧+元数据到 files/river_frames/。默认关闭。
+  static const bool defCollectRiver = false;
+  // 牌河 YOLO 影子对比（E）：引擎每帧额外跑 YOLO 条带法检测牌河，只写
+  // diag/日志供离线对比，绝不参与显示与建议。默认关闭（有推理开销）。
+  static const bool defYoloRiver = false;
 
   /// 好牌机率可选项（百分比）。
   static const List<int> rates = [10, 20, 30, 40, 50, 60, 70, 80, 90];
@@ -57,6 +63,8 @@ class DebugConfig {
   bool antiBan;
   bool antiDetect;
   bool dumpFrames;
+  bool collectRiver;
+  bool yoloRiver;
 
   DebugConfig({
     this.autoOrient = defAutoOrient,
@@ -69,6 +77,8 @@ class DebugConfig {
     this.antiBan = defAntiBan,
     this.antiDetect = defAntiDetect,
     this.dumpFrames = defDumpFrames,
+    this.collectRiver = defCollectRiver,
+    this.yoloRiver = defYoloRiver,
   });
 
   /// 好牌机率 → 引擎「进张数下限」。
@@ -87,6 +97,8 @@ class DebugConfig {
     bool? antiBan,
     bool? antiDetect,
     bool? dumpFrames,
+    bool? collectRiver,
+    bool? yoloRiver,
   }) {
     return DebugConfig(
       autoOrient: autoOrient ?? this.autoOrient,
@@ -99,6 +111,8 @@ class DebugConfig {
       antiBan: antiBan ?? this.antiBan,
       antiDetect: antiDetect ?? this.antiDetect,
       dumpFrames: dumpFrames ?? this.dumpFrames,
+      collectRiver: collectRiver ?? this.collectRiver,
+      yoloRiver: yoloRiver ?? this.yoloRiver,
     );
   }
 
@@ -113,6 +127,8 @@ class DebugConfig {
   static const String _kAntiBan = 'dbg_anti_ban';
   static const String _kAntiDetect = 'dbg_anti_detect';
   static const String _kDumpFrames = 'dbg_dump_frames';
+  static const String _kCollectRiver = 'dbg_collect_river';
+  static const String _kYoloRiver = 'dbg_yolo_river';
 
   static Future<DebugConfig> load() async {
     try {
@@ -130,6 +146,8 @@ class DebugConfig {
         antiBan: p.getBool(_kAntiBan) ?? defAntiBan,
         antiDetect: p.getBool(_kAntiDetect) ?? defAntiDetect,
         dumpFrames: p.getBool(_kDumpFrames) ?? defDumpFrames,
+        collectRiver: p.getBool(_kCollectRiver) ?? defCollectRiver,
+        yoloRiver: p.getBool(_kYoloRiver) ?? defYoloRiver,
       );
     } catch (_) {
       return DebugConfig();
@@ -149,6 +167,8 @@ class DebugConfig {
       await p.setBool(_kAntiBan, antiBan);
       await p.setBool(_kAntiDetect, antiDetect);
       await p.setBool(_kDumpFrames, dumpFrames);
+      await p.setBool(_kCollectRiver, collectRiver);
+      await p.setBool(_kYoloRiver, yoloRiver);
     } catch (_) {
       // 存不下就算了，不能因为本地存储失败影响识别主流程
     }
@@ -167,7 +187,11 @@ class DebugConfig {
   /// 显式 `clear_frames` 让 Java 清空旧帧目录。初始化同步 / 「确认配置」重发
   /// 绝不能传 true：否则 app 重启后 apply() 重发 dump_frames=true 会被当成
   /// 上升沿清空已采集的帧（已采集数据丢失）。
-  Future<bool> apply({bool clearDumpedFrames = false}) async {
+  /// [clearRiverFrames]：同上约定，仅用户手动拨开「牌河采集」时传 true。
+  Future<bool> apply({
+    bool clearDumpedFrames = false,
+    bool clearRiverFrames = false,
+  }) async {
     bool ok = true;
 
     // 用户手动开启采集存帧：先显式清空旧帧，保证每轮是干净集合。
@@ -175,6 +199,16 @@ class DebugConfig {
       try {
         await _ch.invokeMethod<dynamic>('setConfig', {
           'key': 'clear_frames',
+          'value': true,
+        });
+      } catch (_) {
+        ok = false;
+      }
+    }
+    if (clearRiverFrames) {
+      try {
+        await _ch.invokeMethod<dynamic>('setConfig', {
+          'key': 'clear_river',
           'value': true,
         });
       } catch (_) {
@@ -192,6 +226,11 @@ class DebugConfig {
       'anti_detect': antiDetect,
       // 采集存帧（风格库自举）：行为在 Java 侧把原始帧落盘到 files/frames/。
       'dump_frames': dumpFrames,
+      // 牌河真实帧采集：真正的采帧在 Python 引擎（牌河变化触发），
+      // 落盘到 files/river_frames/（jpg+json 成对）。
+      'collect_river': collectRiver,
+      // 牌河 YOLO 影子对比：只写 diag/日志供离线评测，不影响显示。
+      'yolo_river': yoloRiver,
     }.entries) {
       try {
         await _ch.invokeMethod<dynamic>('setConfig', {
@@ -217,5 +256,16 @@ class DebugConfig {
     }
 
     return ok;
+  }
+
+  /// 触发 Java 侧把 river_frames 打包成 zip 并返回绝对路径。
+  /// 返回 null 表示通道异常（引擎/Activity 未就绪），空串表示暂无采集数据。
+  /// 调用方拿到路径后自行交给 share_plus 走系统分享面板。
+  static Future<String?> exportRiverFrames() async {
+    try {
+      return await _ch.invokeMethod<String>('exportRiverFrames');
+    } catch (_) {
+      return null;
+    }
   }
 }

@@ -16,9 +16,12 @@ import io.flutter.embedding.engine.FlutterEngine;
 import io.flutter.plugin.common.MethodChannel;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.util.concurrent.CompletableFuture;
 import java.util.regex.Pattern;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 
 public class MainActivity extends FlutterActivity {
@@ -133,6 +136,15 @@ public class MainActivity extends FlutterActivity {
         ImageProcessor.setConfig(key, val);
         result.success(0);
         return;
+      }
+
+      if (call.method.equals("exportRiverFrames")) {
+        // 调试页「导出牌河帧」：把 app 私有目录里的 river_frames 打包成 zip，
+        // 返回绝对路径给 Dart 侧走系统分享面板（微信「发送给电脑」）。
+        // app 能读自己的外部 files 目录，绕开 Android 11+ 对其它 App 的读限制。
+        toRun = () -> {
+          result.success(zipRiverFrames());
+        };
       }
 
       if (call.method.equals("setAdviceConfig")) {
@@ -438,6 +450,41 @@ public class MainActivity extends FlutterActivity {
     } catch (Throwable t) {
       TimedLog.e(TAG, "writeAdviceFile failed: " + t);
       return -4;
+    }
+  }
+
+  /**
+   * 把 river_frames 目录打包成 cache/river_frames.zip，返回绝对路径；
+   * 目录不存在/为空/出错一律回空串（Dart 侧据此提示“暂无数据”，不抛异常）。
+   * 采帧由 Python 引擎写入该目录（jpg+json 成对），文件名带时间戳不会碰撞。
+   */
+  private String zipRiverFrames() {
+    try {
+      File base = getApplicationContext().getExternalFilesDir(null);
+      if (base == null) return "";
+      File src = new File(base, "river_frames");
+      File[] files = src.listFiles();
+      if (files == null || files.length == 0) return "";
+      File out = new File(getApplicationContext().getCacheDir(), "river_frames.zip");
+      byte[] buf = new byte[8192];
+      int n = 0;
+      try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(out))) {
+        for (File f : files) {
+          if (!f.isFile()) continue;
+          zos.putNextEntry(new ZipEntry(f.getName()));
+          try (FileInputStream in = new FileInputStream(f)) {
+            int r;
+            while ((r = in.read(buf)) > 0) zos.write(buf, 0, r);
+          }
+          zos.closeEntry();
+          n++;
+        }
+      }
+      TimedLog.i(TAG, "zipRiverFrames: " + n + " files -> " + out.getAbsolutePath());
+      return n > 0 ? out.getAbsolutePath() : "";
+    } catch (Throwable t) {
+      TimedLog.e(TAG, "zipRiverFrames failed: " + t);
+      return "";
     }
   }
 

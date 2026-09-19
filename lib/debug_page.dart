@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:auto_vision/config_store.dart';
 
 /// 配置页：所有开关都**真实下发给识别引擎**，没有一个是纯 UI 摆设。
@@ -24,6 +25,7 @@ class _DebugPageState extends State<DebugPage> {
   DebugConfig _cfg = DebugConfig();
   bool _loading = true;
   bool _applying = false;
+  bool _exporting = false;
 
   @override
   void initState() {
@@ -43,14 +45,53 @@ class _DebugPageState extends State<DebugPage> {
     await c.apply();
   }
 
+  /// 一键导出牌河帧：Java 打包 zip → 系统分享面板 → 微信「发送给电脑」。
+  /// 不依赖数据线 / adb / 同一 WiFi；app 读自己的私有目录，绕开系统限制。
+  Future<void> _exportRiver() async {
+    setState(() => _exporting = true);
+    final path = await DebugConfig.exportRiverFrames();
+    if (!mounted) return;
+    setState(() => _exporting = false);
+    if (path == null) {
+      _snack('导出失败：请确认已点「开始识别」后重试');
+      return;
+    }
+    if (path.isEmpty) {
+      _snack('暂无牌河帧：先打开「牌河采集」并打几局');
+      return;
+    }
+    try {
+      await Share.shareXFiles(
+        [XFile(path)],
+        subject: 'river_frames',
+        text: '牌河帧 zip（jpg+json 成对），解压后发我即可',
+      );
+    } catch (e) {
+      _snack('分享面板调起失败：$e');
+    }
+  }
+
+  void _snack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(msg), duration: const Duration(seconds: 2)));
+  }
+
   /// 开关/档位变更：立即保存并下发（即时生效，符合直觉）。
   ///
-  /// [clearDumpedFrames]：仅采集存帧开关**拨开**时为 true——先显式清空旧帧，
-  /// 见 [DebugConfig.apply] 的说明（初始化同步绝不清空，防止重启丢已采帧）。
-  Future<void> _update(DebugConfig next, {bool clearDumpedFrames = false}) async {
+  /// [clearDumpedFrames] / [clearRiverFrames]：仅对应采集开关**拨开**时为 true——
+  /// 先显式清空旧数据。初始化同步绝不清空，防止重启丢失已采帧。
+  Future<void> _update(
+    DebugConfig next, {
+    bool clearDumpedFrames = false,
+    bool clearRiverFrames = false,
+  }) async {
     setState(() => _cfg = next);
     await next.save();
-    await next.apply(clearDumpedFrames: clearDumpedFrames);
+    await next.apply(
+      clearDumpedFrames: clearDumpedFrames,
+      clearRiverFrames: clearRiverFrames,
+    );
   }
 
   /// 「确认配置」：重发一次全部配置，并给出真实成败反馈。
@@ -195,6 +236,25 @@ class _DebugPageState extends State<DebugPage> {
                       clearDumpedFrames: v),
                 ),
                 _switchRow(
+                  title: '牌河采集',
+                  desc: '开启后，引擎在每次看到新弃牌（牌河变化）时存一帧真实画面'
+                      '到手机（含牌河弱标签元数据），用于牌河识别模型再训练。正常打'
+                      '几局即可攒够样本；拨开会清空旧数据。攒够后按下「导出」一键'
+                      '发送给自己，不需要数据线',
+                  value: _cfg.collectRiver,
+                  onChanged: (v) => _update(_cfg.copyWith(collectRiver: v),
+                      clearRiverFrames: v),
+                ),
+                _exportRiverButton(),
+                _switchRow(
+                  title: '牌河影子对比',
+                  desc: '开启后引擎每帧额外用 YOLO 再检一次牌河并与现行轮廓法'
+                      '并排记入日志（只供离线评测，绝不显示到悬浮窗、不影响建议'
+                      '与识别）。有一定推理开销，攒数据时再开',
+                  value: _cfg.yoloRiver,
+                  onChanged: (v) => _update(_cfg.copyWith(yoloRiver: v)),
+                ),
+                _switchRow(
                   title: '防封号',
                   desc: '开启后截屏节奏在 350–550ms 间随机抖动，并让建议稍作'
                       '人类式延迟显示，避免固定节奏被识别为机械/外挂。'
@@ -322,6 +382,35 @@ class _DebugPageState extends State<DebugPage> {
               const SizedBox(width: 6),
               const Icon(Icons.arrow_drop_down, color: _textSub),
             ],
+          ),
+        ),
+      );
+
+  /// 「导出牌河帧」按钮：打包 + 调起系统分享面板。带加载态防重复点。
+  Widget _exportRiverButton() => Padding(
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+        child: SizedBox(
+          width: double.infinity,
+          height: 46,
+          child: OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(
+              foregroundColor: _kAccent,
+              side: const BorderSide(color: _kAccent),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12)),
+            ),
+            onPressed: _exporting ? null : _exportRiver,
+            icon: _exporting
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: _kAccent))
+                : const Icon(Icons.ios_share, size: 20),
+            label: Text(
+              _exporting ? '打包中…' : '导出牌河帧（发给电脑）',
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+            ),
           ),
         ),
       );

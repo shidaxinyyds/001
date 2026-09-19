@@ -72,4 +72,10 @@ localtest/app-debug.zip
 localtest/yolo/*.pt
 localtest/tiles/tencent_happy/*_media_*
 localtest/yolo/vis_real.png
+localtest/*.png
+localtest/_tmp*
+localtest/gt/
+localtest/river_vis/
+localtest/shots/
+localtest/yolo/staging/
 

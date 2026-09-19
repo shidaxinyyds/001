@@ -200,3 +200,77 @@ def generate_mahjong_strip(tile_bank, strip_w=STRIP_W, strip_h=STRIP_H):
         strip = cv2.GaussianBlur(strip, (ksize, ksize), random.uniform(0.5, 1.2))
 
     return strip, boxes
+
+
+def generate_river_row(tile_bank, strip_w=STRIP_W, strip_h=STRIP_H):
+    """生成牌河行合成图：牌桌上某一行的弃牌。
+
+    与手牌行的关键差异（正是现任模型学不到的部分）：
+      - 牌更小：tile_h 约占行高 0.30~0.50（手牌是 0.55~0.76）
+      - 每行更多张：8~18 张（含换行前的一整排弃牌）
+      - 背景恒为深色绒布（牌桌），且牌间距更紧、常带轻微错位
+    返回 (strip_bgr, boxes)，boxes=[[cls_id,x1,y1,x2,y2], ...]，与手牌行同格式。
+    """
+    # 深色绒布桌面（腾讯血流红中牌桌为墨绿），带少量色相/亮度抖动
+    base_color = [random.randint(20, 42), random.randint(58, 96), random.randint(22, 44)]
+    strip = np.zeros((strip_h, strip_w, 3), dtype=np.uint8)
+    strip[:, :] = base_color
+    noise = np.random.normal(0, 5.0, (strip_h, strip_w, 3))
+    strip = np.clip(strip.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+
+    num_tiles = random.choice([8, 9, 10, 11, 12, 13, 14, 15, 16, 18])
+    chosen_classes = random.choices(CLASSES, k=num_tiles)
+
+    tile_h = random.randint(int(strip_h * 0.30), int(strip_h * 0.50))
+    aspect = random.uniform(0.68, 0.78)
+    tile_w = int(tile_h * aspect)
+    gap = random.randint(0, 3)
+    total_w = num_tiles * tile_w + (num_tiles - 1) * gap
+
+    if total_w > strip_w - 12:
+        scale = (strip_w - 16) / float(total_w)
+        tile_w = max(14, int(tile_w * scale))
+        tile_h = max(18, int(tile_h * scale))
+        gap = max(0, int(gap * scale))
+        total_w = num_tiles * tile_w + (num_tiles - 1) * gap
+
+    max_start_x = max(6, strip_w - total_w - 6)
+    start_x = random.randint(6, max_start_x)
+    base_y = random.randint(int(strip_h * 0.28), max(int(strip_h * 0.28) + 1, strip_h - tile_h - 6))
+
+    boxes = []
+    cur_x = start_x
+    for cls_name in chosen_classes:
+        sample_raw = random.choice(tile_bank[cls_name])
+        tile_img = _render_tile(sample_raw, tile_w, tile_h)
+        cur_y = base_y + (random.randint(-2, 2) if random.random() < 0.25 else 0)
+        cur_y = max(2, min(strip_h - tile_h - 2, cur_y))
+        if cur_x + tile_w >= strip_w:
+            break
+        y2 = min(strip_h, cur_y + tile_h)
+        x2 = min(strip_w, cur_x + tile_w)
+        if (x2 - cur_x) >= 12 and (y2 - cur_y) >= 14:
+            strip[cur_y:y2, cur_x:x2] = tile_img[:y2 - cur_y, :x2 - cur_x]
+            boxes.append([CLASS_TO_IDX[cls_name], cur_x, cur_y, x2, y2])
+        cur_x += tile_w + gap
+
+    if random.random() < 0.5:
+        alpha = random.uniform(0.85, 1.12)
+        beta = random.randint(-14, 12)
+        strip = np.clip(strip.astype(np.float32) * alpha + beta, 0, 255).astype(np.uint8)
+    if random.random() < 0.4:
+        strip = cv2.GaussianBlur(strip, (3, 3), random.uniform(0.4, 1.0))
+
+    return strip, boxes
+
+
+def generate_training_strip(tile_bank, strip_w=STRIP_W, strip_h=STRIP_H, river_frac=0.5):
+    """训练样本调度器：按 river_frac 概率生成牌河行，否则生成手牌行。
+
+    返回 (strip_bgr, boxes, kind)，kind in {'hand','river'}。
+    """
+    if random.random() < river_frac:
+        s, b = generate_river_row(tile_bank, strip_w, strip_h)
+        return s, b, 'river'
+    s, b = generate_mahjong_strip(tile_bank, strip_w, strip_h)
+    return s, b, 'hand'

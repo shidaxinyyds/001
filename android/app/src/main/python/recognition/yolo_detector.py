@@ -244,3 +244,93 @@ class YOLODetector(Detector):
         for r in rows:
             flat.extend(r)
         return Stage(image=image, detections=flat, stages={})
+
+    # ===== 牌河条带化检测（影子对比路径）=====
+    # 旧路把整个中心区 letterbox 进 640x160：四方×多行的网格被压成一条，
+    # 与训练时的单行横条分布完全对不上 → 真实牌河检出≈0。
+    # 正解：按四方分区（与 engine.detect_river_discards 同一套几何）再按行投影
+    # 切条，每个条带只含一行牌（宽高比≈4，与训练条一致），逐条 detect_strip。
+    # 侧家牌横放：先把左右分区旋转 90° 使牌面向上，坐标映射回原图。
+
+    # 与 engine.detect_river_discards 的 zones 保持同一比例（那边改了这里要同步）。
+    RIVER_ZONES = (
+        ("bottom", 0.32, 0.52, 0.68, 0.72),
+        ("top", 0.32, 0.16, 0.68, 0.36),
+        ("left", 0.22, 0.30, 0.44, 0.64),
+        ("right", 0.56, 0.30, 0.78, 0.64),
+    )
+
+    @staticmethod
+    def _row_bands(strip_white: np.ndarray, min_h: int = 12) -> List[Tuple[int, int]]:
+        """在白色掩码上按 y 投影切出牌行带（连续有牌列 > 间隙）。"""
+        h, w = strip_white.shape[:2]
+        proj = strip_white.sum(axis=1)
+        thr = max(3.0, w * 0.03)
+        bands: List[Tuple[int, int]] = []
+        start = -1
+        for y in range(h):
+            if proj[y] >= thr:
+                if start < 0:
+                    start = y
+            elif start >= 0:
+                if y - start >= min_h:
+                    bands.append((start, y))
+                start = -1
+        if start >= 0 and h - start >= min_h:
+            bands.append((start, h))
+        # 向上下各外扩 2px 补齐牌面边缘
+        return [(max(0, a - 2), min(h, b + 2)) for a, b in bands]
+
+    def _zone_white_mask(self, crop: np.ndarray) -> np.ndarray:
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        return ((hsv[:, :, 1] < 80) & (hsv[:, :, 2] > 110)).astype('uint8')
+
+    def _detect_zone_rows(self, crop: np.ndarray) -> List[Tuple[Rect, str, float]]:
+        """把一个分区（已保证牌面向上）按行切条逐条检测，返回区内坐标。"""
+        dets: List[Tuple[Rect, str, float]] = []
+        mask = self._zone_white_mask(crop)
+        for y0, y1 in self._row_bands(mask):
+            strip = crop[y0:y1, :]
+            if strip.shape[0] < 12 or strip.shape[1] < 30:
+                continue
+            dets.extend(self.detect_strip(strip, offset_x=0, offset_y=y0))
+        return dets
+
+    def detect_river_strips(
+        self, image: CVImage
+    ) -> List[Tuple[Rect, Optional[str], float]]:
+        """四方牌河条带化检测：返回全图坐标的 (rect, label, conf) 列表。
+
+        仅用于影子对比/离线评测；不改生产牌河链路。"""
+        if image is None or image.size == 0 or not self.is_available:
+            return []
+        ih, iw = image.shape[:2]
+        all_dets: List[Tuple[Rect, str, float]] = []
+        for name, fx1, fy1, fx2, fy2 in self.RIVER_ZONES:
+            x1, y1 = int(iw * fx1), int(ih * fy1)
+            x2, y2 = int(iw * fx2), int(ih * fy2)
+            crop = image[y1:y2, x1:x2]
+            if crop.size == 0:
+                continue
+            if name in ("left", "right"):
+                rot = cv2.rotate(crop, cv2.ROTATE_90_CLOCKWISE)
+                H0 = crop.shape[0]  # 旋转前高
+                # 旋转 CW：new_x = H0-1-y, new_y = x → 逆变换：x=y', y=H0-1-x'-w'
+                for (rx, ry, rw, rh), lbl, conf in self._detect_zone_rows(rot):
+                    ox = x1 + ry
+                    oy = y1 + (H0 - 1 - rx - rw)
+                    all_dets.append(((ox, oy, rh, rw), lbl, conf))  # w/h 互换
+            else:
+                for (rx, ry, rw, rh), lbl, conf in self._detect_zone_rows(crop):
+                    all_dets.append(((x1 + rx, y1 + ry, rw, rh), lbl, conf))
+
+        # 分区重叠处同一张牌可能被两侧各检一次：中心距 NMS（与轮廓法同尺度的 22px）
+        all_dets.sort(key=lambda d: -d[2])
+        kept: List[Tuple[Rect, str, float]] = []
+        for (x, y, w, h), lbl, conf in all_dets:
+            cx, cy = x + w / 2.0, y + h / 2.0
+            if any(abs(cx - (kx + kw / 2.0)) < 22 and abs(cy - (ky + kh / 2.0)) < 22
+                   for (kx, ky, kw, kh), _, _ in kept):
+                continue
+            kept.append(((x, y, w, h), lbl, conf))
+        return kept

@@ -1112,6 +1112,15 @@ class Engine:
             # 采集存帧（风格库自举）：真实行为在 Java 侧把原始帧落盘到 files/frames/，
             # 这里仅存档该开关状态，供 set_config 接受。
             "dump_frames": False,
+            # 牌河真实帧采集（P4 再训练闭环的数据入口）：真实对局中每当「牌河内容
+            # 变化」时，把方向归一后的整帧 JPEG + 元数据 JSON 落盘到
+            # set_frame_dump_dir 指定的目录。区别于 dump_frames 的无差别全量存帧，
+            # 这里只在牌河状态变化时存（一局 ≈ 几十帧而非几千帧重复垃圾），
+            # 供 adb pull → 人工校验标注 → 牌河检测模型再训练。
+            "collect_river": False,
+            # 牌河 YOLO 影子对比（E）：开启后每帧额外跑一次 YOLO 条带法检测牌河，
+            # 只写进 diag 与日志供离线对比，**绝不参与建议/显示**。默认关（有推理开销）。
+            "yolo_river": False,
         }
         # 出牌建议配置（调试页开关，process() 每帧从 mahjong_advice.json reload）。
         # 这里给一份安全默认：显示出牌建议、不过滤进张。即便文件永远不存在，
@@ -1122,6 +1131,13 @@ class Engine:
         }
         # 牌桌场景防抖计数：连续 N 帧非牌桌才判定离开对局，防止游戏弹窗遮罩瞬时误触发 waiting
         self._non_table_frames: int = 0
+        # ===== 牌河真实帧采集状态（见 _maybe_collect_river）=====
+        # 目录由 Java 侧启动引擎时经 set_frame_dump_dir 推入；空串 = 未配置（采集自动失效）。
+        self._river_dump_dir: str = ""
+        self._river_last_sig: Optional[tuple] = None  # 上一张已存帧的牌河状态签名
+        self._river_saved: int = 0
+        # YOLO 影子对比实例：None=未创建，False=创建失败（不再重试），对象=可用
+        self._yolo_shadow = None
 
     def _is_mahjong_table(self, image: np.ndarray) -> bool:
         """检测当前画面是否为真实的麻将牌桌对局场景（排除大厅/主菜单/结算界面/加载画面）。
@@ -1199,6 +1215,127 @@ class Engine:
         """调试页开关：实时修改识别策略。未知 key 静默忽略。"""
         if key in self._cfg:
             self._cfg[key] = bool(value)
+
+    # 每轮采集上限：牌河状态签名去重后，一次长局约产生 60~150 帧，
+    # 1200 足够几天采样用尽前不会撑爆存储（单帧 ≈ 300KB，上限约 360MB 前
+    # 用户早该 pull 走了；目录满也有 Java 侧 clear_river 信号手动清空）。
+    RIVER_DUMP_LIMIT = 1200
+
+    def set_frame_dump_dir(self, path) -> None:
+        """Java 侧推入牌河采集目录（引擎可直接写的应用外部files路径）。"""
+        try:
+            p = str(path) if path else ""
+        except Exception:
+            return
+        self._river_dump_dir = p
+        self._river_last_sig = None
+        self._river_saved = 0
+        if p:
+            try:
+                os.makedirs(p, exist_ok=True)
+            except Exception:
+                self._river_dump_dir = ""
+
+    def _maybe_collect_river(self, image, result: Dict) -> None:
+        """牌河真实帧采集：每当「牌河内容」变化时存一帧整屏 + 元数据。
+
+        设计约束（P4 闭环数据入口）：
+        - 签名 = (牌河mpsz, 定缺门)。牌池单调累加器保证牌河只增不减且经两帧
+          确认，签名变化 ≡ 观测到新弃牌，天然滤掉静止画面的重复帧；
+          手牌变化不触发存帧（牌河训练只关心牌河）。
+        - 存方向归一后的整帧（含牌河+手牌+副露），训练标注时可自由裁切；
+          ROI 裁剪后的图不能代表全场，不用。
+        - 元数据带引擎弱标签（牌河内容/各家张数/手牌/阶段），后续人工只需
+          「校验+纠错」而非从零标注，大幅降低标注重。
+        - 任何异常都静默吞掉：采集绝不允许影响识别主链路。
+        """
+        try:
+            if not self._cfg.get("collect_river") or not self._river_dump_dir:
+                return
+            if not isinstance(image, np.ndarray) or image.size == 0:
+                return
+            # 只采正式对局中且牌桌可见的帧；大厅/结算/过渡动画全部跳过。
+            status = result.get("status")
+            if status not in ("ok", "incomplete"):
+                return
+            if self._river_saved >= self.RIVER_DUMP_LIMIT:
+                return
+            disc = result.get("discards") or ""
+            sig = (disc, result.get("dingque_suit"))
+            if sig == self._river_last_sig:
+                return
+            self._river_last_sig = sig  # 存失败也不重试同签名，防风暴
+            ok, buf = cv2.imencode(
+                ".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), 98])
+            if not ok:
+                return
+            ts = int(time.time() * 1000)
+            stem = os.path.join(
+                self._river_dump_dir, f"river_{self._river_saved:04d}_{ts}")
+            blob = buf.tobytes()
+            with open(stem + ".jpg", "wb") as f:
+                f.write(blob)
+            # 牌河标签→张数（引擎弱标签，供人工校验对拍）
+            river_tally: Dict[str, int] = {}
+            for i in range(0, len(disc) - 1, 2):
+                lab = disc[i:i + 2]
+                river_tally[lab] = river_tally.get(lab, 0) + 1
+            meta = {
+                "ts": ts,
+                "file": stem.rsplit(os.sep, 1)[-1] + ".jpg",
+                "mode": result.get("mode"),
+                "status": status,
+                "hand": result.get("hand") or "",
+                "hand_count": result.get("count"),
+                "river_mpsz": disc,
+                "river_tally": river_tally,
+                "dingque_suit": result.get("dingque_suit"),
+                "dingque_phase": result.get("dingque_phase"),
+                "swap_phase": result.get("swap_phase"),
+                "pick_phase": result.get("pick_phase"),
+                "remaining": result.get("remaining"),
+                "shanten": result.get("shanten"),
+                "frame_size": [int(image.shape[1]), int(image.shape[0])],
+                "orient": result.get("diag", {}).get("orient"),
+                "verified": False,  # 弱标签未经人工核验，下游不得当 GT 用
+            }
+            with open(stem + ".json", "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False)
+            self._river_saved += 1
+            print(f"[collect_river] 存第 {self._river_saved} 帧 牌河{len(river_tally)}种 签名={sig}")
+        except Exception:
+            traceback.print_exc()
+
+    def _maybe_yolo_shadow(self, image, result: Dict) -> None:
+        """牌河 YOLO 影子对比：与轮廓法（生产 discards）并跑同一帧，结果只进
+        diag 与日志。任何异常吞掉；开关关闭时零开销（仅一次布尔判断）。"""
+        try:
+            if not self._cfg.get("yolo_river"):
+                return
+            if not isinstance(image, np.ndarray) or image.size == 0:
+                return
+            if self._yolo_shadow is None:
+                try:
+                    from recognition.yolo_detector import YOLODetector
+                    inst = YOLODetector()
+                    self._yolo_shadow = inst if inst.is_available else False
+                except Exception:
+                    self._yolo_shadow = False
+            if self._yolo_shadow is False:
+                return
+            dets = self._yolo_shadow.detect_river_strips(image)
+            labels = [d[1] for d in dets if d[1]]
+            contour = result.get("discards") or ""
+            c_labels = [contour[i:i + 2] for i in range(0, len(contour) - 1, 2)]
+            agree = sum((Counter(c_labels) & Counter(labels)).values())
+            result.setdefault("diag", {})["yolo_river"] = {
+                "n": len(labels), "contour_n": len(c_labels), "agree": agree,
+                "labels": "".join(sorted(labels)),
+            }
+            print(f"[yolo_shadow] contour={len(c_labels)} yolo={len(labels)} "
+                  f"agree={agree} yolo_labels={''.join(labels)}")
+        except Exception:
+            traceback.print_exc()
 
     def start(self):
         pass
@@ -2598,17 +2735,23 @@ class Engine:
                     h_counts = SichuanAnalyzer.counts_from_tiles(h_indices)
                     swap_rec = SichuanAnalyzer.recommend_huan_san_zhang(h_counts)
                     if swap_rec and swap_rec.get("viable"):
-                        tiles_to_swap = swap_rec.get("tiles_to_swap", [])
+                        # recommend_huan_san_zhang 返回键为 "tiles"(mpsz) / "tiles_cn"(中文)，
+                        # 早期误读 "tiles_to_swap" 恒取空列表 → 本分支 advice 永远为空、
+                        # message 拼成「换出 （…）」畸形。此处按真实键取，mpsz 供牌面渲染，
+                        # 中文名供文案展示，保证 advice/best/message 三者一致且随牌局动态更新。
+                        tiles_to_swap = swap_rec.get("tiles", []) or []
+                        tiles_cn = swap_rec.get("tiles_cn", []) or tiles_to_swap
                         reason_str = swap_rec.get("reason", "换掉最孤立的牌")
-                        message = f"换牌建议：换出 {' '.join(tiles_to_swap)}（{reason_str}）"
+                        message = f"换牌建议：换出 {' '.join(str(c) for c in tiles_cn)}（{reason_str}）"
                         # 以每张换出牌为一条advice条目
-                        for t in tiles_to_swap:
+                        for _i, t in enumerate(tiles_to_swap):
+                            cn = tiles_cn[_i] if _i < len(tiles_cn) else str(t)
                             advice.append({
                                 "tile": t,
                                 "ukeire": 0,
                                 "shanten": 1,
                                 "ev": 10000.0,
-                                "reason": f"换出{t}（{reason_str}）",
+                                "reason": f"换出{cn}（{reason_str}）",
                                 "ting_tiles": [],
                                 "is_swap": True,
                             })
@@ -2896,11 +3039,14 @@ class Engine:
                     dead_tiles = matrix_data.get("dead_tiles", [])
 
                     # 功能1：防点炮雷达全息评级
+                    # pool_evidence：本局已可靠观测到的弃牌总数，用于证据门控——
+                    # 牌河未稳定读入时抑制「未见即危险」的凭空警告。
                     defense_radar = SichuanAnalyzer.evaluate_defense_radar(
                         hand_counts_final[:27],
                         pool_remaining=pool_rem_27,
                         opponents_dingque=opponent_dingque_suits,
                         opponents_danger_suits=opponent_danger_suits,
+                        pool_evidence=int(sum(disc_counts_out)),
                     )
 
                     # 功能2：博弈级换三张推荐（严格限定仅在真正的换牌阶段生成，绝不污染定缺、选牌或摸打阶段）
@@ -3173,8 +3319,14 @@ class Engine:
                 "frame_skipped": False,
             }
 
+            # 牌河 YOLO 影子对比（默认关；只写 diag/日志，不影响任何显示与建议；
+            # 必须在 json.dumps 之前，diag 结果才能随帧送到接料/日志）
+            self._maybe_yolo_shadow(full_for_preview, result)
+
             payload = json.dumps(result)
             self._frame_skipper.remember(payload, result["top_score"])
+            # 牌河真实帧采集（仅当调试页「牌河采集」开启；异常已内部吞掉）
+            self._maybe_collect_river(full_for_preview, result)
 
             res = EngineResult(
                 image=_make_preview(full_for_preview),

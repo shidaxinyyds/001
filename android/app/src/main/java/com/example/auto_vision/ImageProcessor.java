@@ -62,6 +62,13 @@ public class ImageProcessor {
     // volatile：setConfig（主线程）写、采集线程读，保证开关变化对采集线程立即可见；
     // 非 volatile 的 static boolean 在无数据竞争保护时可能长期读到旧值（开关"不生效"）。
     private static volatile boolean cfgDumpFrames = false;
+    // 牌河真实帧采集（P4 再训练闭环数据入口）：真正的采帧逻辑在 Python 引擎
+    // （它知道牌河内容何时变化），Java 只负责：① 开关转发；② 启动时把
+    // 应用外部 files/river_frames/ 目录推给引擎；③ clear_river 信号清目录。
+    private static volatile boolean cfgCollectRiver = false;
+    // 牌河 YOLO 影子对比：真实采帧逻辑在 Python 引擎（只写 diag/日志不显示），
+    // Java 仅转发开关。
+    private static volatile boolean cfgYoloRiver = false;
     // volatile long：32 位 ARM 上 long 写非原子（可能读到高低位撕裂的值），必须 volatile。
     // framesDumped 由采集线程（dumpFrame）递增、主线程（clearFramesDir）清零，两线程共享。
     private static volatile long framesDumped = 0;
@@ -139,6 +146,16 @@ public class ImageProcessor {
                 // 初始化同步/「确认配置」重发都不会走到这里。
                 if (value) clearFramesDir();
                 break;
+            case "collect_river":
+                // 与 dump_frames 同理：只改开关，绝不清空（清空走显式 clear_river）。
+                cfgCollectRiver = value;
+                break;
+            case "clear_river":
+                if (value) clearRiverFramesDir();
+                break;
+            case "yolo_river":
+                cfgYoloRiver = value;
+                break;
             default: return;
         }
         configDirty = true;
@@ -179,6 +196,17 @@ public class ImageProcessor {
             return false;
         }
         TimedLog.i(TAG, "started Python");
+        // 牌河采集目录推给引擎（仅在配置了「牌河采集」时引擎才会真正写盘）。
+        // 引擎用普通文件 IO 写应用私有外部目录，无需存储权限；adb pull 可取回。
+        try {
+            File rdir = riverFramesDir();
+            if (rdir != null) {
+                engine.callAttr("set_frame_dump_dir", rdir.getAbsolutePath());
+                TimedLog.i(TAG, "牌河采集目录已推给引擎: " + rdir.getAbsolutePath());
+            }
+        } catch (Throwable t) {
+            TimedLog.e(TAG, "set_frame_dump_dir 推送失败（不影响识别）: " + t);
+        }
         sendStatus(NetworkClient.statusJson("engine_ready", null));
         return true;
     }
@@ -357,6 +385,33 @@ public class ImageProcessor {
         }
     }
 
+    // 牌河采集目录：app 外部 files/river_frames/（jpg + json 元数据成对）。
+    private static File riverFramesDir() {
+        if (sContext == null) return null;
+        File dir = sContext.getExternalFilesDir(null);
+        if (dir == null) return null;
+        return new File(dir, "river_frames");
+    }
+
+    // 清空牌河采集目录（仅用户手动拨开「牌河采集」开关时触发，与 clear_frames
+    // 同一防误删约定）。Python 引擎侧重置由 set_frame_dump_dir 被下一次清目录
+    // 后的引擎重建完成；即使计数不同步也无害——文件名带时间戳不会碰撞。
+    private static void clearRiverFramesDir() {
+        synchronized (sFramesLock) {
+            File dir = riverFramesDir();
+            if (dir == null) return;
+            File[] old = dir.listFiles();
+            if (old != null) {
+                for (File f : old) {
+                    try { f.delete(); } catch (Exception ignore) { }
+                }
+            }
+            //noinspection ResultOfMethodCallIgnored
+            dir.mkdirs();
+            TimedLog.i(TAG, "牌河采集目录已清空: " + dir.getAbsolutePath());
+        }
+    }
+
     private static void dumpFrame(byte[] encoded) {
         if (sContext == null) return;
         synchronized (sFramesLock) {
@@ -457,6 +512,8 @@ public class ImageProcessor {
                 engine.callAttr("set_config", "anti_ban", cfgAntiBan);
                 engine.callAttr("set_config", "anti_detect", cfgAntiDetect);
                 engine.callAttr("set_config", "dump_frames", cfgDumpFrames);
+                engine.callAttr("set_config", "collect_river", cfgCollectRiver);
+                engine.callAttr("set_config", "yolo_river", cfgYoloRiver);
                 configDirty = false;
             } catch (Throwable t) {
                 TimedLog.e(TAG, "set_config 推送失败（不影响本帧）: " + t);

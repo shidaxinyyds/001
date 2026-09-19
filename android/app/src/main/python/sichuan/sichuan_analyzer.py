@@ -753,18 +753,27 @@ class SichuanAnalyzer:
         pool_remaining: Optional[List[int]] = None,
         opponents_dingque: Optional[List[int]] = None,
         opponents_danger_suits: Optional[List[int]] = None,
+        pool_evidence: int = 0,
     ) -> List[Dict]:
         """防点炮雷达评级系统 (SAFE / SUSPICIOUS / DANGER)
         全息追踪对手打牌习惯与弃牌特征：
         - 绝对安全 (SAFE)：对手定缺门、绝张现物（已出4张或场上见3张）、或已被验证的现物。
         - 疑牌 (SUSPICIOUS)：场上见 1~2 张的邻张或偏张。
         - 极度危险 (DANGER)：对手清一色主攻门、中心中张(4/5/6)纯生张(0见)。
+
+        pool_evidence：本局已可靠观测到的弃牌总数（牌河视觉 + 自家打出差分累计）。
+        当证据不足（牌河尚未稳定读入）时，「尚未出现 / 纯生张」这类基于 seen==0 的
+        危险判定毫无依据——没读到牌河当然什么都「未出现」。此时仅保留有实据的 SAFE
+        评级（对手定缺门、现物绝张），抑制一切凭空捏造的 SUSPICIOUS/DANGER，
+        从根源消除「无中生有、乱显示防守警告」。随着牌局推进证据累积，评级自动恢复。
         """
         ratings = []
         if opponents_dingque is None:
             opponents_dingque = []
         if opponents_danger_suits is None:
             opponents_danger_suits = []
+        # 证据门控阈值：少于 3 张已观测弃牌时，牌河不可信，禁止基于「未见」的危险推断。
+        evidence_ok = pool_evidence >= 3
 
         for t in range(27):
             if counts[t] <= 0:
@@ -782,15 +791,18 @@ class SichuanAnalyzer:
             elif rem == 0 or seen >= 3:
                 lvl = "SAFE"
                 reason = f"现物绝张：场上已见 {seen} 张，无人能以此牌胡牌"
+            elif is_edge and seen >= 1:
+                lvl = "SAFE"
+                reason = f"边张相对安全：1/9 偏张且已见 {seen} 张"
+            elif not evidence_ok:
+                # 牌河证据不足：不得凭「未见」捏造危险/疑牌，直接跳过该张，交由 UI 显示中性状态。
+                continue
             elif s in opponents_danger_suits and seen == 0:
                 lvl = "DANGER"
                 reason = f"极度高危：对手主攻【{SUIT_NAMES[s]}】门，此牌为未见生张，点炮率极高！"
             elif is_middle and seen == 0:
                 lvl = "DANGER"
                 reason = f"高危生张：中心张 {index27_to_chinese(t)} 纯生张，切勿在深牌墙轻易打出"
-            elif is_edge and seen >= 1:
-                lvl = "SAFE"
-                reason = f"边张相对安全：1/9 偏张且已见 {seen} 张"
             elif seen == 0:
                 lvl = "SUSPICIOUS"
                 reason = f"疑牌生张：{index27_to_chinese(t)} 尚未出现，存在暗叫风险"

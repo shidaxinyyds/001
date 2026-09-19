@@ -25,7 +25,7 @@ torch.set_num_threads(8)
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 from localtest.yolo.dataset import (
     CLASSES, CLASS_TO_IDX, NUM_CLASSES, STRIP_W, STRIP_H,
-    load_all_tile_banks, generate_mahjong_strip
+    load_all_tile_banks, generate_mahjong_strip, generate_training_strip
 )
 from localtest.yolo.model import MahjongYOLONano, MahjongYOLOExport
 
@@ -36,15 +36,17 @@ LR = 1.5e-3
 
 
 class SyntheticMahjongDataset(Dataset):
-    def __init__(self, tile_bank, num_samples=512):
+    def __init__(self, tile_bank, num_samples=512, river_frac=0.5):
         self.tile_bank = tile_bank
         self.num_samples = num_samples
+        self.river_frac = river_frac
 
     def __len__(self):
         return self.num_samples
 
     def __getitem__(self, idx):
-        strip_bgr, boxes = generate_mahjong_strip(self.tile_bank, STRIP_W, STRIP_H)
+        strip_bgr, boxes, _kind = generate_training_strip(
+            self.tile_bank, STRIP_W, STRIP_H, river_frac=self.river_frac)
         rgb = cv2.cvtColor(strip_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         tensor_img = torch.from_numpy(rgb).permute(2, 0, 1)
 
@@ -142,29 +144,46 @@ def compute_loss(model, preds, targets, anchor_centers, anchor_strides):
     return cls_loss, reg_loss + obj_loss
 
 
-def train_yolo_mahjong():
-    print(f"=== Starting MahjongYOLONano Training on {DEVICE} (8 CPU threads) ===")
+def train_and_export(epochs=EPOCHS, train_samples=512, val_samples=64, river_frac=0.5,
+                     out_onnx=None, ckpt=None, init_from=None, verbose=True):
+    """训练（可选混合牌河行）并导出 ONNX。
+
+    out_onnx: 导出路径（默认写回生产 models/yolo_mahjong.onnx；闭环应传 staging）。
+    ckpt:     权重保存路径。
+    init_from:从已有 .pt 热启动（增量再训练）；None 则从头训。
+    """
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    if out_onnx is None:
+        out_onnx = os.path.join(base_dir, "android", "app", "src", "main", "python",
+                                "recognition", "models", "yolo_mahjong.onnx")
+    if ckpt is None:
+        ckpt = os.path.join(os.path.dirname(__file__), "yolo_mahjong.pt")
+    if verbose:
+        print(f"=== Starting MahjongYOLONano Training on {DEVICE} (river_frac={river_frac}) ===")
     tile_bank = load_all_tile_banks(base_dir)
 
-    train_ds = SyntheticMahjongDataset(tile_bank, num_samples=512)
-    val_ds = SyntheticMahjongDataset(tile_bank, num_samples=64)
+    train_ds = SyntheticMahjongDataset(tile_bank, num_samples=train_samples, river_frac=river_frac)
+    val_ds = SyntheticMahjongDataset(tile_bank, num_samples=val_samples, river_frac=river_frac)
 
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
 
     model = MahjongYOLONano(num_classes=NUM_CLASSES).to(DEVICE)
+    if init_from and os.path.isfile(init_from):
+        model.load_state_dict(torch.load(init_from, map_location=DEVICE))
+        if verbose:
+            print(f"[warm-start] loaded weights from {init_from}")
     export_net = MahjongYOLOExport(model).to(DEVICE)
     anchor_centers = export_net.anchor_centers
     anchor_strides = export_net.anchor_strides
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-5)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
 
-    ckpt_path = os.path.join(os.path.dirname(__file__), "yolo_mahjong.pt")
+    ckpt_path = ckpt
     start_t0 = time.time()
 
-    for epoch in range(1, EPOCHS + 1):
+    for epoch in range(1, epochs + 1):
         model.train()
         train_cls_total = 0.0
         train_reg_total = 0.0
@@ -201,23 +220,26 @@ def train_yolo_mahjong():
                 val_n += 1
 
         val_total = (val_cls_total + val_reg_total) / max(1, val_n)
-        print(f"Epoch [{epoch:02d}/{EPOCHS:02d}] "
-              f"Train Loss: {(train_cls_total+train_reg_total)/n_batches:.4f} (Cls: {train_cls_total/n_batches:.4f}, Reg: {train_reg_total/n_batches:.4f}) | "
-              f"Val Loss: {val_total:.4f}")
+        if verbose:
+            print(f"Epoch [{epoch:02d}/{epochs:02d}] "
+                  f"Train Loss: {(train_cls_total+train_reg_total)/n_batches:.4f} (Cls: {train_cls_total/n_batches:.4f}, Reg: {train_reg_total/n_batches:.4f}) | "
+                  f"Val Loss: {val_total:.4f}")
 
     train_dur = time.time() - start_t0
-    print(f"Training completed in {train_dur:.1f}s.")
+    if verbose:
+        print(f"Training completed in {train_dur:.1f}s.")
 
     # Save weights checkpoint
     torch.save(model.state_dict(), ckpt_path)
-    print(f"Saved PyTorch weights to: {ckpt_path}")
+    if verbose:
+        print(f"Saved PyTorch weights to: {ckpt_path}")
 
     # Export to ONNX
-    print("\n=== Exporting Model to ONNX ===")
+    if verbose:
+        print("\n=== Exporting Model to ONNX ===")
     export_net.eval()
-    onnx_dir = os.path.join(base_dir, "android", "app", "src", "main", "python", "recognition", "models")
-    os.makedirs(onnx_dir, exist_ok=True)
-    onnx_path = os.path.join(onnx_dir, "yolo_mahjong.onnx")
+    onnx_path = out_onnx
+    os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
 
     dummy_input = torch.randn(1, 3, STRIP_H, STRIP_W, device=DEVICE)
     torch.onnx.export(
@@ -230,11 +252,11 @@ def train_yolo_mahjong():
         do_constant_folding=True
     )
     onnx_size_kb = os.path.getsize(onnx_path) / 1024.0
-    print(f"Successfully exported ONNX model to: {onnx_path}")
-    print(f"Model File Size: {onnx_size_kb:.1f} KB ({onnx_size_kb/1024.0:.2f} MB)")
+    if verbose:
+        print(f"Successfully exported ONNX model to: {onnx_path}")
+        print(f"Model File Size: {onnx_size_kb:.1f} KB ({onnx_size_kb/1024.0:.2f} MB)")
 
     # Verify ONNX model with OpenCV cv2.dnn
-    print("\n=== Verifying ONNX with OpenCV cv2.dnn ===")
     net = cv2.dnn.readNetFromONNX(onnx_path)
     net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
     net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
@@ -247,10 +269,12 @@ def train_yolo_mahjong():
     out = net.forward()
     t_cost_ms = (time.time() - t_start) * 1000.0
 
-    print(f"cv2.dnn inference successful! Output shape: {out.shape}, Inference latency: {t_cost_ms:.2f} ms")
     assert out.shape == (1, 38, 2100), f"Unexpected output shape: {out.shape}"
-    print("SUCCESS: YOLO-Mahjong-Nano model trained, exported, and verified natively with cv2.dnn!")
+    if verbose:
+        print(f"cv2.dnn inference successful! Output shape: {out.shape}, latency {t_cost_ms:.2f} ms")
+        print("SUCCESS: YOLO-Mahjong-Nano trained, exported, verified with cv2.dnn.")
+    return {"onnx": onnx_path, "ckpt": ckpt_path, "train_sec": train_dur}
 
 
 if __name__ == "__main__":
-    train_yolo_mahjong()
+    train_and_export()

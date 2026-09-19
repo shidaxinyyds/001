@@ -1324,7 +1324,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               padding: const EdgeInsets.only(bottom: 4, top: 1, left: 10),
               child: Row(
                 children: [
-                  _legendDot(const Color(0xFF00E676), '热张(3-4)'),
+                  _legendDot(const Color(0xFF00E676), '多(3-4)'),
                   const SizedBox(width: 7),
                   _legendDot(const Color(0xFF81C784), '充裕(2)'),
                   const SizedBox(width: 7),
@@ -1334,54 +1334,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                 ],
               ),
             ),
-            // 功能B：全场活跃大张快速透视行
-            if (result?['hot_tiles'] is List && (result!['hot_tiles'] as List).isNotEmpty) ...[
-              Padding(
-                padding: const EdgeInsets.only(bottom: 4, left: 2),
-                child: Row(
-                  children: [
-                    const Text(
-                      '🔥热张: ',
-                      style: TextStyle(
-                        color: Color(0xFF69F0AE),
-                        fontSize: 8.5,
-                        fontWeight: FontWeight.bold,
-                        decoration: TextDecoration.none,
-                      ),
-                    ),
-                    Expanded(
-                      child: SingleChildScrollView(
-                        scrollDirection: Axis.horizontal,
-                        child: Row(
-                          children: [
-                            for (final ht in (result!['hot_tiles'] as List).take(6)) ...[
-                              Container(
-                                margin: const EdgeInsets.only(right: 4),
-                                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF0D331A),
-                                  borderRadius: BorderRadius.circular(3),
-                                  border: Border.all(color: const Color(0xFF00E676), width: 0.6),
-                                ),
-                                child: Text(
-                                  '${ht['name']}(${ht['remaining']})',
-                                  style: const TextStyle(
-                                    color: Color(0xFFB9F6CA),
-                                    fontSize: 8,
-                                    fontWeight: FontWeight.bold,
-                                    decoration: TextDecoration.none,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
             buildRow('万', const Color(0xFF1E6B7A), m),
             buildRow('筒', const Color(0xFF1E6B7A), p),
             buildRow('条', const Color(0xFF66BB6A), s),
@@ -2076,10 +2028,16 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       final String hint;
       if (status == 'waiting') {
         hint = '等待牌局开始（进入游戏后自动识别）';
+      } else if (status == 'animation' ||
+          status == 'py_error' ||
+          status == 'decode_error') {
+        // 瞬态帧（动画突变 / 解码失败 / 引擎异常）：绝不把识别抖动归咎于用户遮挡，
+        // 保持中性「识别中」，消除「不需要时却持续显示错误信息」的观感。
+        hint = '画面识别中，请稍候…';
       } else if (count > 0) {
         hint = '手牌识别中，正在推演建议…';
       } else {
-        hint = '等待手牌入镜（请勿遮挡底部手牌）';
+        hint = '未检测到手牌，请让底部手牌区完整入镜';
       }
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -2404,7 +2362,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                                       borderRadius: BorderRadius.circular(3),
                                     ),
                                     child: const Text(
-                                      'PRO v1.2',
+                                      'PRO v1.3',
                                       style: TextStyle(
                                         color: Color(0xFF1E1E1E),
                                         fontSize: 7.5,
