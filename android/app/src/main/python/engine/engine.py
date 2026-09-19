@@ -2375,13 +2375,43 @@ class Engine:
                 if is_dq_phase:
                     self._monotonic_discards.clear()
 
+
             if not is_dq_phase and len(raw_labels) >= 10:
                 self._match_started = True
 
-            discard_labels = []
+            # ===== 任选一张牌阶段检测（血流红中初始摸牌选牌）—— 优先判定 =====
+            # 弹窗特征：屏幕中央出现深色背景+白色牌面横排（1~9万/条/筒选一张）
+            # 任选牌弹窗比换牌按钮更显著，优先判定，避免被 is_swap_phase 误判
+            is_pick_phase = False
+            pick_candidates: List[str] = []
+            if is_dingque_mode(self.mode) and not is_dq_phase:
+                if hasattr(detector, "is_pick_phase") and detector.is_pick_phase(full_for_preview):
+                    is_pick_phase = True
+                    try:
+                        pick_candidates = detector.detect_pick_candidates(full_for_preview)
+                    except Exception:
+                        pick_candidates = []
+
+            # ===== 换牌阶段检测（血流红中换三张）=====
+            # 换牌阶段特征：右侧出现绿色"换牌"/"过"按钮，
+            # 此阶段应立即给出"换哪3张"的换牌建议，并禁止扫描牌河（牌桌尚未有任何弃牌）
+            # 注意：仅在非任选牌阶段才判定（pick阶段的游戏界面右侧也有绿色区域，会误触发）
+            is_swap_phase = False
+            if is_dingque_mode(self.mode) and not is_dq_phase and not is_pick_phase:
+                if hasattr(detector, "is_swap_phase") and detector.is_swap_phase(full_for_preview):
+                    is_swap_phase = True
+                    # 换牌阶段：无任何牌河弃牌，清空单调牌池，确保建议不受旧牌池干扰
+                    self._monotonic_discards.clear()
+                    self._match_started = False  # 换牌阶段还未正式开局
+
+
             ih, _ = image.shape[:2]
-            # 仅在非定缺阶段且进入正式对局后扫描牌河
-            allow_river_scan = not is_dq_phase and (not is_dingque_mode(self.mode) or getattr(self, "_match_started", False) or dingque_suit is not None)
+            discard_labels = []
+            # 仅在非定缺/换牌/任选牌阶段且进入正式对局后扫描牌河
+            allow_river_scan = (
+                not is_dq_phase and not is_swap_phase and not is_pick_phase
+                and (not is_dingque_mode(self.mode) or getattr(self, "_match_started", False) or dingque_suit is not None)
+            )
 
             if allow_river_scan:
                 for _i, row in enumerate(voted_rows):
@@ -2511,6 +2541,10 @@ class Engine:
                 message = "手牌已就绪"
             elif is_dq_phase:
                 message = "定缺推演中"
+            elif is_swap_phase:
+                message = "换牌建议推演中"
+            elif is_pick_phase:
+                message = "选牌建议推演中"
             commentary: Optional[str] = None
             shanten: Optional[int] = None
             advice: List[Dict] = []
@@ -2518,7 +2552,91 @@ class Engine:
             tile_count = 0
             rec_suit_name = None
 
-            if is_dq_phase:
+            if is_swap_phase:
+                # 换三张阶段：立即推算手牌并给出换牌建议（打出哪3张最划算）
+                status = "swap"
+                tile_count = len(hand_mpsz) // 2 if hand_mpsz else 0
+                try:
+                    from sichuan import SichuanAnalyzer
+                    h_indices = SichuanAnalyzer.parse_hand_mpsz(hand_mpsz) if hand_mpsz else []
+                    h_counts = SichuanAnalyzer.counts_from_tiles(h_indices)
+                    swap_rec = SichuanAnalyzer.recommend_huan_san_zhang(h_counts)
+                    if swap_rec and swap_rec.get("viable"):
+                        tiles_to_swap = swap_rec.get("tiles_to_swap", [])
+                        reason_str = swap_rec.get("reason", "换掉最孤立的牌")
+                        message = f"换牌建议：换出 {' '.join(tiles_to_swap)}（{reason_str}）"
+                        # 以每张换出牌为一条advice条目
+                        for t in tiles_to_swap:
+                            advice.append({
+                                "tile": t,
+                                "ukeire": 0,
+                                "shanten": 1,
+                                "ev": 10000.0,
+                                "reason": f"换出{t}（{reason_str}）",
+                                "ting_tiles": [],
+                                "is_swap": True,
+                            })
+                        best = tiles_to_swap[0] if tiles_to_swap else ""
+                    else:
+                        message = "换牌阶段：当前手牌较好，建议过（不换）"
+                        advice = [{"tile": "", "ukeire": 0, "shanten": 1, "ev": 0.0, "reason": "当前手牌较好，过（不换）", "ting_tiles": [], "is_swap": True}]
+                except Exception:
+                    message = "换牌建议推演中…"
+
+            elif is_pick_phase:
+                # 任选一张牌阶段：从候选牌中推荐最优的一张
+                status = "pick"
+                tile_count = len(hand_mpsz) // 2 if hand_mpsz else 0
+                if pick_candidates and hand_mpsz:
+                    try:
+                        from sichuan import SichuanAnalyzer
+                        h_counts = [0] * 34
+                        for i in range(0, len(hand_mpsz), 2):
+                            try:
+                                h_counts[mpsz_to_tile34_index(hand_mpsz[i:i+2])] += 1
+                            except Exception:
+                                pass
+                        # 对每张候选牌计算加入手牌后的向听数变化，选择向听减少最多（或最多进张）的牌
+                        best_cand = None
+                        best_shanten = 8
+                        cand_results = []
+                        for cand in set(pick_candidates):
+                            try:
+                                test_mpsz = hand_mpsz + cand
+                                test_hand_obj = TileCollection.from_mpsz(test_mpsz)
+                                # 计算加入候选牌后手牌（14张）的向听数
+                                from mahjong.shanten import Shanten
+                                sh = Shanten().calculate_shanten(tiles_34=test_hand_obj.tiles34)
+                                cand_results.append((cand, sh))
+                                if sh < best_shanten:
+                                    best_shanten = sh
+                                    best_cand = cand
+                            except Exception:
+                                pass
+                        if best_cand is not None:
+                            cand_str = ' '.join(f"{c}({s}向听)" for c, s in cand_results)
+                            message = f"选牌建议：选 {best_cand}（向听最小={best_shanten}）"
+                            advice = [{
+                                "tile": best_cand,
+                                "ukeire": max(0, 8 - best_shanten),
+                                "shanten": best_shanten,
+                                "ev": 9000.0,
+                                "reason": f"选{best_cand}后向听数最优（{best_shanten}向听）",
+                                "ting_tiles": [],
+                                "is_pick": True,
+                            }]
+                            best = best_cand
+                        else:
+                            message = f"候选牌: {' '.join(pick_candidates)}"
+                    except Exception:
+                        message = f"候选牌: {' '.join(pick_candidates)}" if pick_candidates else "等待选牌…"
+                elif pick_candidates:
+                    message = f"候选牌: {' '.join(pick_candidates)}"
+                else:
+                    message = "等待选牌弹窗识别…"
+
+            elif is_dq_phase:
+
                 status = "dingque"
                 tile_count = len(hand) if hand else (len(hand_mpsz) // 2 if hand_mpsz else 0)
                 try:
@@ -2543,7 +2661,7 @@ class Engine:
                     best = f"1{rec_char}"
                 except Exception:
                     pass
-            elif hand is not None:
+            elif hand is not None and not is_swap_phase and not is_pick_phase:
                 tile_count = len(hand)
                 status = "ok"
                 commentary = self.update_trainer(hand)
@@ -2603,8 +2721,9 @@ class Engine:
                             except Exception:
                                 pass
 
-            # 最终兜底：仅在对局中且手牌合法时推演
-            if getattr(self, "_match_started", False) and not advice and hand_mpsz and tile_count >= 4:
+            # 最终兜底：仅在对局中且手牌合法时推演（换牌/选牌阶段有专用建议，不触发此兜底）
+            if (getattr(self, "_match_started", False) and not advice and hand_mpsz and tile_count >= 4
+                    and not is_swap_phase and not is_pick_phase):
                 advice = self._heuristic_discard_advice(
                     hand_mpsz,
                     mode=self.mode,
@@ -2738,8 +2857,9 @@ class Engine:
                         opponents_danger_suits=opponent_danger_suits,
                     )
 
-                    # 功能2：博弈级换三张推荐（开局阶段且未打出牌）
-                    if (not has_discards) and tile_count in (13, 14) and (dingque_suit is None):
+                    # 功能2：博弈级换三张推荐（换牌阶段 或 开局阶段且未打出牌）
+                    has_any_discards = bool(disc_mpsz_out and len(disc_mpsz_out) > 0)
+                    if is_swap_phase or ((not has_any_discards) and tile_count in (13, 14) and (dingque_suit is None)):
                         swap_advice = SichuanAnalyzer.recommend_huan_san_zhang(hand_counts_final[:27])
 
                     # 附加大牌出牌决策安全评级
@@ -2959,6 +3079,9 @@ class Engine:
                 "dingque": dingque_name,
                 "dingque_suit": dingque_suit,
                 "dingque_phase": is_dq_phase,
+                "swap_phase": is_swap_phase,
+                "pick_phase": is_pick_phase,
+                "pick_candidates": pick_candidates,
                 "diag": {
                     "raw": sum(len(r) for r in rows),
                     "rows": row_stats,

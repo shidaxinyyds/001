@@ -350,7 +350,96 @@ class TencentGridDetector(Detector):
         }
         return max(scores, key=scores.get)
 
+
+    def is_swap_phase(self, image_bgr: np.ndarray) -> bool:
+        """检测腾讯欢乐麻将「换牌中...」换三张阶段（右侧出现大面积绿色换牌按钮）。"""
+        if image_bgr is None or image_bgr.size == 0:
+            return False
+        ih, iw = image_bgr.shape[:2]
+        # 换牌/过 按钮位于右侧中央区域（y: 55%~85%, x: 55%~100%）
+        right = image_bgr[int(ih * 0.55):int(ih * 0.85), int(iw * 0.55):]
+        if right.size == 0:
+            return False
+        hsv = cv2.cvtColor(right, cv2.COLOR_BGR2HSV)
+        # 换牌按钮：饱和高绿（H: 65~95, S>=120, V>=100）
+        green_btn = (
+            (hsv[:, :, 0] >= 65) & (hsv[:, :, 0] <= 95) &
+            (hsv[:, :, 1] >= 120) & (hsv[:, :, 2] >= 100)
+        )
+        green_ratio = float(np.mean(green_btn))
+        return green_ratio >= 0.15
+
+    def is_pick_phase(self, image_bgr: np.ndarray) -> bool:
+        """检测腾讯欢乐麻将「请任选一张牌」弹窗（深色弹窗背景+内嵌白色牌面）。"""
+        if image_bgr is None or image_bgr.size == 0:
+            return False
+        ih, iw = image_bgr.shape[:2]
+        # 任选牌弹窗位于屏幕中央（y: 50%~65%, x: 15%~92%）
+        row = image_bgr[int(ih * 0.50):int(ih * 0.65), int(iw * 0.15):int(iw * 0.92)]
+        if row.size == 0:
+            return False
+        hsv = cv2.cvtColor(row, cv2.COLOR_BGR2HSV)
+        # 弹窗深色背景（V<80, S<60）
+        dark_bg = float(np.mean((hsv[:, :, 2] < 80) & (hsv[:, :, 1] < 60)))
+        # 弹窗内白色牌面（V>180, S<50）
+        white_tiles = float(np.mean((hsv[:, :, 2] > 180) & (hsv[:, :, 1] < 50)))
+        # 需要深色背景>=15% 且 白色牌面>=5%（避免把夜间模式等误判）
+        return dark_bg >= 0.15 and white_tiles >= 0.05
+
+    def detect_pick_candidates(self, image_bgr: np.ndarray) -> List[str]:
+        """识别「请任选一张牌」弹窗中的候选牌列表（1万~9万 或 条/筒 横排）。"""
+        if image_bgr is None or image_bgr.size == 0:
+            return []
+        ih, iw = image_bgr.shape[:2]
+        # 候选牌实际位于屏幕 y: 60%~77%（弹窗主体牌行），x: 15%~92%
+        # 注意：左侧约15%有圆形花色标识（万/条），需要在后续过滤
+        panel = image_bgr[int(ih * 0.60):int(ih * 0.77), int(iw * 0.15):int(iw * 0.92)]
+        if panel.size == 0:
+            return []
+
+        ph, pw = panel.shape[:2]
+        hsv = cv2.cvtColor(panel, cv2.COLOR_BGR2HSV)
+        # 找到弹窗内的白色/浅色牌面区域
+        is_tile = (
+            (hsv[:, :, 2] > 140) & (hsv[:, :, 1] < 60) &
+            (panel[:, :, 0] > 120) & (panel[:, :, 1] > 120) & (panel[:, :, 2] > 120)
+        )
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        mask = cv2.morphologyEx(is_tile.astype(np.uint8) * 255, cv2.MORPH_CLOSE, kernel)
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        tiles = []
+        for c in cnts:
+            x, y, bw, bh = cv2.boundingRect(c)
+            asp = bw / float(max(bh, 1))
+            # 候选牌面：宽>=25px，高>=25px，宽高比 0.8~2.5（弹窗牌面略扁）
+            # 过滤左侧圆形花色标（直径约35px，x < iw*0.12，即 panel x < 77）
+            if bw < 25 or bh < 25 or not (0.7 <= asp <= 2.8):
+                continue
+            # 过滤掉最左侧的圆形花色标（万/条/筒图标）
+            x_abs = int(iw * 0.15) + x
+            if x_abs < int(iw * 0.22):
+                continue
+            crop = panel[y:y + bh, x:x + bw]
+            if crop.size == 0:
+                continue
+            lbl, sc = self.classify_tile(crop)
+            if sc >= 0.38:
+                tiles.append((x, lbl, sc))
+
+        tiles.sort(key=lambda t: t[0])
+        # 去重（同一区域重复检测）
+        result = []
+        prev_x = -999
+        for (tx, lbl, sc) in tiles:
+            if tx - prev_x > 20:  # 间隔>20px视为不同牌
+                result.append(lbl)
+                prev_x = tx
+        return result
+
+
     def detect_hand_strip(self, image_bgr: np.ndarray) -> List[Tuple[Rect, str, float]]:
+
         if image_bgr is None or image_bgr.size == 0 or not self.is_available:
             return []
 
