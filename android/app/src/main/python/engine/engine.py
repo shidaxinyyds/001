@@ -951,15 +951,16 @@ def detect_river_discards(image: np.ndarray, detector, mode: str = "4p", hand_ro
         return []
 
 
-def detect_player_melds(image: np.ndarray, detector, mode: str = "sc_hz", hand_row=None) -> List[str]:
+def detect_player_melds(image: np.ndarray, detector, mode: str = "sc_hz", hand_row=None) -> List[Tuple[str, str, int]]:
     """精准检测全部玩家的副露区域（碰/杠）。
-    涵盖左侧、右侧、上方及本家副露，副露必为 3 张同字（碰）或 4 张同字（杠），准确计入已出牌与剩余活牌。"""
+    涵盖左侧、右侧、上方及本家副露，副露必为 3 张同字（碰）或 4 张同字（杠）。
+    返回结构化条目 (分区名, 牌面 mpsz, 张数)，供上层分账本计入副露可见量。"""
     if image is None or detector is None or image.size == 0:
         return []
     try:
         ih, iw = image.shape[:2]
         avail = available_set(mode)
-        melds = []
+        melds: List[Tuple[str, str, int]] = []
 
         hand_min_x, hand_max_x, hand_min_y = iw, 0, ih
         if hand_row:
@@ -1038,7 +1039,7 @@ def detect_player_melds(image: np.ndarray, detector, mode: str = "sc_hz", hand_r
                     vote_cnt = Counter([c[0] for c in cand_scores])
                     top_lbl, top_votes = vote_cnt.most_common(1)[0]
                     if top_votes >= 2 or max([c[1] for c in cand_scores if c[0] == top_lbl]) >= 0.48:
-                        melds.extend([top_lbl] * num_t)
+                        melds.append((name, top_lbl, num_t))
         return melds
     except Exception:
         return []
@@ -1085,6 +1086,10 @@ class Engine:
         self._discard_history: deque = deque(maxlen=DISCARD_HISTORY_FRAMES)
         self._monotonic_discards: Counter = Counter()
         self._pending_discards: Counter = Counter()  # 视觉牌河连续帧确认投票器
+        # 副露独立账本（34 型）：碰/杠是全场可见信，但不入牌河，避免污染弃牌计数；
+        # 与牌河一样经两帧确认后才递增（碰→杠 3→4 单调递增，同局不回退）。
+        self._meld_counts_34: List[int] = [0] * 34
+        self._pending_melds_34: List[int] = [0] * 34
         self._match_started: bool = False
         self._last_stable_counter: Counter = Counter()
         self._last_stable_n: int = 0
@@ -1215,6 +1220,8 @@ class Engine:
         """重置整局游戏的动态状态（新开局/返回大厅/结算时调用）。"""
         self._monotonic_discards.clear()
         self._pending_discards.clear()
+        self._meld_counts_34 = [0] * 34
+        self._pending_melds_34 = [0] * 34
         self._discard_history.clear()
         self._tile_voter.reset()
         self._hand_stab.reset()
@@ -1440,7 +1447,7 @@ class Engine:
         self.trainer = Trainer(hand, mode=self.mode)
         return None
 
-    def build_advice(self, hand: TileCollection, disc_counts=None):
+    def build_advice(self, hand: TileCollection, disc_counts=None, meld_counts=None):
         """返回 (向听数, 推荐打法列表)。
 
         向听数每帧都算（单次开销很小），保证界面上一直有反馈；
@@ -1458,7 +1465,7 @@ class Engine:
             return None, []
 
         if disc_counts is not None:
-            self.trainer.set_visible(disc_counts, [0] * 34)
+            self.trainer.set_visible(disc_counts, meld_counts if meld_counts is not None else [0] * 34)
 
         shanten = self.trainer.get_shanten()
 
@@ -1488,7 +1495,7 @@ class Engine:
 
         # 缓存键必须带上 min_ukeire 与两个 warn 开关：否则调高/调低"好牌机率"
         # 或切换危险牌预警时会命中旧缓存，界面建议列表纹丝不动 → 表现为开关"没生效"。
-        key = f"{hand}|{shanten}|{min_ukeire}|{warn_deal_in}|{warn_pon_kong}|{hash(tuple(self.trainer.disc_counts))}"
+        key = f"{hand}|{shanten}|{min_ukeire}|{warn_deal_in}|{warn_pon_kong}|{hash(tuple(self.trainer.disc_counts))}|{hash(tuple(self.trainer.meld_counts))}"
         if key == self._advice_key:
             return shanten, self._advice
 
@@ -2090,10 +2097,16 @@ class Engine:
         if is_sichuan_family(mode):
             try:
                 from sichuan import SichuanAnalyzer
+                from sichuan.sichuan_analyzer import pool_remaining_from_visible
                 hand_indices = SichuanAnalyzer.parse_hand_mpsz(hand_mpsz)
                 c28 = SichuanAnalyzer.counts_from_tiles(hand_indices)
+                # 兜底路径必须传 pool_remaining：修复 seen_discard 恒 0 导致防守扣分失效，
+                # 并使进张按牌河/副露真实扣减绝张。
+                pool28 = pool_remaining_from_visible(
+                    c28, disc_counts, getattr(self, "_meld_counts_34", None))
                 sc_res = SichuanAnalyzer.analyze_discards(
                     c28,
+                    pool_remaining=pool28,
                     dingque_suit=dingque_suit,
                     opponent_dingque_suits=opponent_dingque_suits,
                 )
@@ -2637,10 +2650,24 @@ class Engine:
                     except Exception:
                         pass
                     try:
-                        melds = detect_player_melds(image, self._detector, mode=self.mode, hand_row=hand_row)
-                        for md in melds:
-                            if md and mpsz_to_tile34_index(md) in avail:
-                                discard_labels.append(md)
+                        meld_entries = detect_player_melds(image, self._detector, mode=self.mode, hand_row=hand_row)
+                        frame_melds = [0] * 34
+                        for _region, md, n_tiles in meld_entries:
+                            try:
+                                midx = mpsz_to_tile34_index(md)
+                            except Exception:
+                                continue
+                            if md and midx in avail:
+                                frame_melds[midx] += n_tiles
+                        # 副露不再混入牌河 discard_labels，改走独立账本 + 两帧确认递增
+                        for i in range(34):
+                            if frame_melds[i] > self._meld_counts_34[i]:
+                                if self._pending_melds_34[i] >= frame_melds[i]:
+                                    self._meld_counts_34[i] = frame_melds[i]
+                                else:
+                                    self._pending_melds_34[i] = frame_melds[i]
+                            elif frame_melds[i] == 0:
+                                self._pending_melds_34[i] = self._meld_counts_34[i]
                     except Exception:
                         pass
 
@@ -2888,7 +2915,7 @@ class Engine:
                         self.trainer.set_dingque(dingque_suit)
                     if opponent_dingque_suits:
                         self.trainer.set_opponent_dingque(opponent_dingque_suits)
-                shanten, advice = self.build_advice(hand, disc_counts)
+                shanten, advice = self.build_advice(hand, disc_counts, meld_counts=self._meld_counts_34)
                 self._stable_hand_mpsz = hand_mpsz
                 self._stable_hand_count = tile_count
                 self._partial_mpsz = ""
@@ -2931,7 +2958,7 @@ class Engine:
                         if not advice and tile_count >= PARTIAL_MIN_TILES:
                             try:
                                 tentative_hand = TileCollection.from_mpsz(hand_mpsz)
-                                t_shanten, t_adv = self.build_advice(tentative_hand, disc_counts)
+                                t_shanten, t_adv = self.build_advice(tentative_hand, disc_counts, meld_counts=self._meld_counts_34)
                                 if t_adv:
                                     advice = t_adv
                                     if t_shanten is not None:
@@ -2965,14 +2992,15 @@ class Engine:
                             break
 
             # ---- 剩余牌 / 绝张统计（基于当前玩法的可见域）----
-            # 可见域 = 自己手牌 + 牌河所有打出的牌（副露未知，按 0 计）。
+            # 可见域 = 自己手牌 + 牌河所有打出的牌 + 各家副露（碰/杠亮牌）。
             # 墙内剩余 = 该玩法总牌数 - 可见；绝张 = 某型 4 张已全部可见，
             # 这种牌既不可能摸到、也不该被推荐打出（进张已为 0）。
+            meld_counts_out = self._meld_counts_34
             avail_list = sorted(avail)
-            known = sum(hand_counts[i] for i in avail_list) + sum(disc_counts[i] for i in avail_list)
+            known = sum(hand_counts[i] + disc_counts[i] + meld_counts_out[i] for i in avail_list)
             wall_total = len(avail_list) * 4
             remaining = max(0, wall_total - known)
-            dead = sum(1 for i in avail_list if hand_counts[i] + disc_counts[i] >= 4)
+            dead = sum(1 for i in avail_list if hand_counts[i] + disc_counts[i] + meld_counts_out[i] >= 4)
 
             # ===== 牌河稳定性兜底 =====
             # 牌河瞬时漏抓（吃碰杠时对方刚打出的牌被动画遮挡、动画未结束）会让
@@ -3007,10 +3035,10 @@ class Engine:
                     disc_mpsz_out = stable_mpsz
                     disc_counts_out = fc
                     discarded_labels_out = fallback_labels
-                    # 用稳定值重算 known / remaining / dead
-                    known = sum(hand_counts[i] for i in avail_list) + sum(fc[i] for i in avail_list)
+                    # 用稳定值重算 known / remaining / dead（副露账本不变）
+                    known = sum(hand_counts[i] + fc[i] + meld_counts_out[i] for i in avail_list)
                     remaining = max(0, wall_total - known)
-                    dead = sum(1 for i in avail_list if hand_counts[i] + fc[i] >= 4)
+                    dead = sum(1 for i in avail_list if hand_counts[i] + fc[i] + meld_counts_out[i] >= 4)
             self._discard_history.append(disc_mpsz)
 
             # ---- 全场记牌矩阵面板（含万/筒/条，以及字牌/红中，仅在对局开始后生成）----
@@ -3031,7 +3059,7 @@ class Engine:
                         pass
                 if self.mode == "sc_hz":
                     # 血流红中模式：字牌仅有红中 (7z，索引33)，单独呈现
-                    z_counts = [max(0, 4 - (hand_counts_final[33] + disc_counts_out[33]))]
+                    z_counts = [max(0, 4 - (hand_counts_final[33] + disc_counts_out[33] + meld_counts_out[33]))]
                 elif is_sichuan_family(self.mode):
                     # 普通四川麻将（血战到底/血流成河）：无任何字牌
                     z_counts = []
@@ -3040,20 +3068,20 @@ class Engine:
                     # 不在本玩法可用集内的字牌（如广东/长沙仅留红中 7z）恒为 0，
                     # 不得误报成"还剩 4 张"。
                     z_counts = [
-                        max(0, 4 - (hand_counts_final[i] + disc_counts_out[i]))
+                        max(0, 4 - (hand_counts_final[i] + disc_counts_out[i] + meld_counts_out[i]))
                         if i in avail else 0
                         for i in range(27, 34)
                     ]
 
                 remaining_matrix = {
-                    "m": [max(0, 4 - (hand_counts_final[i] + disc_counts_out[i])) for i in range(0, 9)],
-                    "p": [max(0, 4 - (hand_counts_final[i] + disc_counts_out[i])) for i in range(9, 18)],
-                    "s": [max(0, 4 - (hand_counts_final[i] + disc_counts_out[i])) for i in range(18, 27)],
+                    "m": [max(0, 4 - (hand_counts_final[i] + disc_counts_out[i] + meld_counts_out[i])) for i in range(0, 9)],
+                    "p": [max(0, 4 - (hand_counts_final[i] + disc_counts_out[i] + meld_counts_out[i])) for i in range(9, 18)],
+                    "s": [max(0, 4 - (hand_counts_final[i] + disc_counts_out[i] + meld_counts_out[i])) for i in range(18, 27)],
                     "z": z_counts,
                 }
-                known = sum(hand_counts_final[i] for i in avail_list) + sum(disc_counts_out[i] for i in avail_list)
+                known = sum(hand_counts_final[i] + disc_counts_out[i] + meld_counts_out[i] for i in avail_list)
                 remaining = max(0, wall_total - known)
-                dead = sum(1 for i in avail_list if hand_counts_final[i] + disc_counts_out[i] >= 4)
+                dead = sum(1 for i in avail_list if hand_counts_final[i] + disc_counts_out[i] + meld_counts_out[i] >= 4)
 
             # 扩展功能计算：查大叫/查花猪雷达(A)、活牌厚度透视(B)、防点炮雷达(1)、换三张(2)
             tenpai_alert = None
@@ -3066,7 +3094,7 @@ class Engine:
                 try:
                     from sichuan import SichuanAnalyzer
                     pool_rem_27 = [
-                        max(0, 4 - (hand_counts_final[i] + disc_counts_out[i]))
+                        max(0, 4 - (hand_counts_final[i] + disc_counts_out[i] + meld_counts_out[i]))
                         for i in range(27)
                     ]
                     # 功能A：查大叫 / 查花猪生死避坑雷达
@@ -3080,6 +3108,7 @@ class Engine:
                     matrix_data = SichuanAnalyzer.generate_tile_matrix(
                         hand_counts_final[:27],
                         disc_counts=disc_counts_out[:27],
+                        meld_counts=meld_counts_out[:27],
                     )
                     hot_tiles = matrix_data.get("hot_tiles", [])
                     dead_tiles = matrix_data.get("dead_tiles", [])
@@ -3174,13 +3203,15 @@ class Engine:
                     try:
                         from sichuan import SichuanAnalyzer
                         pool_rem_27 = [
-                            max(0, 4 - (hand_counts_final[i] + disc_counts_out[i]))
+                            max(0, 4 - (hand_counts_final[i] + disc_counts_out[i] + meld_counts_out[i]))
                             for i in range(27)
                         ]
-                        w_dict = SichuanAnalyzer.find_waiting_tiles(hand_counts_final[:27], 0, pool_rem_27)
+                        w_dict = SichuanAnalyzer.find_waiting_tiles(
+                            hand_counts_final[:27], 0, pool_rem_27, dingque_suit)
                         for w_t, rem in w_dict.items():
                             w_str = tiles34_index_to_mpsz(w_t)
-                            w_fan = SichuanAnalyzer.calculate_fan(hand_counts_final[:27], w_t, 0)
+                            w_fan = SichuanAnalyzer.calculate_fan(
+                                hand_counts_final[:27], w_t, 0, dingque_suit)
                             ting_details.append({
                                 "tile": w_str,
                                 "name": tile_to_chinese(w_str),

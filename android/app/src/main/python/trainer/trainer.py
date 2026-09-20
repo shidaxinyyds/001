@@ -90,25 +90,14 @@ class Trainer:
         if is_sichuan_family(self.mode):
             try:
                 from sichuan import SichuanAnalyzer
+                from sichuan.sichuan_analyzer import pool_remaining_from_visible
                 hand_mpsz = "".join(str(t) for t in self.hand.all)
                 hand_indices = SichuanAnalyzer.parse_hand_mpsz(hand_mpsz)
                 counts = SichuanAnalyzer.counts_from_tiles(hand_indices)
-                # 牌池物理守恒：真实扣减全场公开可见牌（支持 28 型，含 7z 红中）
-                pool_remaining = [0] * 28
-                for i in range(28):
-                    vis = counts[i] if i < len(counts) else 0
-                    if i < 27:
-                        if i < len(self.disc_counts):
-                            vis += self.disc_counts[i]
-                        if i < len(self.meld_counts):
-                            vis += self.meld_counts[i]
-                    elif i == 27:
-                        # 7z (红中) 在 34 索引系统下是 33
-                        if 33 < len(self.disc_counts):
-                            vis += self.disc_counts[33]
-                        if 33 < len(self.meld_counts):
-                            vis += self.meld_counts[33]
-                    pool_remaining[i] = max(0, 4 - vis)
+                # 牌池物理守恒：真实扣减全场公开可见牌（支持 28 型，含 7z 红中）；
+                # 与 engine 兜底路径共用同一守恒函数，口径统一。
+                pool_remaining = pool_remaining_from_visible(
+                    counts, self.disc_counts, self.meld_counts)
 
                 self.sichuan_results = SichuanAnalyzer.analyze_discards(
                     counts,

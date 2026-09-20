@@ -9,6 +9,7 @@
     mpsz_to_index27,
     index27_to_mpsz,
     index27_to_chinese,
+    pool_remaining_from_visible,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "mpsz_to_index27",
     "index27_to_mpsz",
     "index27_to_chinese",
+    "pool_remaining_from_visible",
 ]

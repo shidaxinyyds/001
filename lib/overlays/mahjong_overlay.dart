@@ -1860,6 +1860,15 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     );
   }
 
+  /// 次选进张标签：引擎算出真实进张时恒 >0；
+  /// `ukeire==0 且 shanten>=2` 表示尚未算得真实进张，显示“—”避免误导“绝张 0 张”。
+  String _ukeireLabel(dynamic item) {
+    final int u = (item['ukeire'] as num? ?? 0).toInt();
+    final int sh = (item['shanten'] as num? ?? 0).toInt();
+    if (u == 0 && sh >= 2) return '—';
+    return '$u张';
+  }
+
   Widget _adviceSection(List<dynamic> advice, String best, int count) {
     final status = result?['status'] as String? ?? '';
     final bool isDingquePhase = (result?['dingque_phase'] == true || status == 'dingque');
@@ -2271,7 +2280,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                           TileChip(tile: (sorted[i]['tile'] ?? '') as String, size: 16),
                           const SizedBox(width: 2),
                           Text(
-                            '${sorted[i]['ukeire'] ?? 0}张',
+                            _ukeireLabel(sorted[i]),
                             style: TextStyle(
                               color: Colors.white.withAlpha(160),
                               fontSize: 9,

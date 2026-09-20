@@ -83,6 +83,35 @@ def index27_to_chinese(idx: int) -> str:
         return f"{idx - 18 + 1}条"
     elif idx == 27:
         return "中"
+
+
+def pool_remaining_from_visible(
+    counts: List[int],
+    disc_counts: Optional[List[int]] = None,
+    meld_counts: Optional[List[int]] = None,
+) -> List[int]:
+    """108 张物理守恒：28 型牌池剩余 = 4 − 己手 − 牌河 − 副露可见量。
+
+    disc_counts / meld_counts 采用 34 型索引（红中 7z 位于索引 33），
+    与引擎/Trainer 的可见牌账本口径一致。trainer 与 engine 兜底路径共用。
+    """
+    pool = [0] * 28
+    for i in range(28):
+        vis = counts[i] if i < len(counts) else 0
+        if i < 27:
+            if disc_counts is not None and i < len(disc_counts):
+                vis += disc_counts[i]
+            if meld_counts is not None and i < len(meld_counts):
+                vis += meld_counts[i]
+        else:
+            # 7z (红中) 在 34 索引系统下是 33
+            if disc_counts is not None and 33 < len(disc_counts):
+                vis += disc_counts[33]
+            if meld_counts is not None and 33 < len(meld_counts):
+                vis += meld_counts[33]
+        pool[i] = max(0, 4 - vis)
+    return pool
+
 @lru_cache(maxsize=16384)
 def _min_wild_melds(c: Tuple[int, ...]) -> int:
     """计算将单门牌 c (9元组) 全部组合为顺子/刻子所需的最少红中赖子数。"""
@@ -139,6 +168,17 @@ def _min_wild_pair_melds(c: Tuple[int, ...]) -> int:
             cl[p] -= 1
             ans = min(ans, 1 + _min_wild_melds(tuple(cl)))
     return ans
+
+
+@lru_cache(maxsize=32768)
+def _is_tenpai_cached(
+    counts_key: Tuple[int, ...], num_fixed_melds: int, dingque_key: int
+) -> bool:
+    """听牌判定记忆层：13 张预摸牌分析中大量 (摸牌场景 × 候选打牌) 组合会
+    产生相同的 13 张中间态，缓存后重复子问题只算一次。"""
+    return SichuanAnalyzer._is_tenpai_impl(
+        list(counts_key), num_fixed_melds,
+        None if dingque_key < 0 else dingque_key)
 
 
 class SichuanAnalyzer:
@@ -281,8 +321,20 @@ class SichuanAnalyzer:
         return False
 
     @classmethod
-    def can_win(cls, counts: List[int], num_fixed_melds: int = 0) -> bool:
-        """川麻胡牌核心判定（分门 DP 极速算法，支持红中赖子万能百搭，必须缺一门）。"""
+    def can_win(
+        cls,
+        counts: List[int],
+        num_fixed_melds: int = 0,
+        dingque_suit: Optional[int] = None,
+    ) -> bool:
+        """川麻胡牌核心判定（分门 DP 极速算法，支持红中赖子万能百搭，必须缺一门）。
+
+        dingque_suit：给定时，手牌仍含定缺花色牌一律判不胜（花猪不算胡）。
+        """
+        if dingque_suit is not None:
+            ds = dingque_suit * 9
+            if any(counts[ds + i] > 0 for i in range(9)):
+                return False
         suits = cls.get_suits_in_hand(counts)
         if len(suits) > 2:
             return False
@@ -340,8 +392,27 @@ class SichuanAnalyzer:
         return protected
 
     @classmethod
-    def is_tenpai(cls, counts: List[int], num_fixed_melds: int = 0) -> bool:
-        """极速听牌判断：只要存在任意一张能胡的牌，立即返回 True"""
+    def is_tenpai(
+        cls,
+        counts: List[int],
+        num_fixed_melds: int = 0,
+        dingque_suit: Optional[int] = None,
+    ) -> bool:
+        """极速听牌判断（带记忆层）：只要存在任意一张能胡的牌，立即返回 True。
+
+        dingque_suit：给定时，试胡牌与手牌均受定缺约束（含定缺牌的手牌不可能听牌）。
+        """
+        return _is_tenpai_cached(
+            tuple(counts), num_fixed_melds,
+            -1 if dingque_suit is None else dingque_suit)
+
+    @classmethod
+    def _is_tenpai_impl(
+        cls,
+        counts: List[int],
+        num_fixed_melds: int = 0,
+        dingque_suit: Optional[int] = None,
+    ) -> bool:
         suits = cls.get_suits_in_hand(counts)
         if len(suits) > 2:
             return False
@@ -350,11 +421,13 @@ class SichuanAnalyzer:
         if total_len % 3 != 1:
             return False
         for test_tile in range(27):
+            if dingque_suit is not None and tile_to_suit(test_tile) == dingque_suit:
+                continue
             test_suit = tile_to_suit(test_tile)
             if len(suits | {test_suit}) > 2:
                 continue
             counts[test_tile] += 1
-            win = cls.can_win(counts, num_fixed_melds)
+            win = cls.can_win(counts, num_fixed_melds, dingque_suit)
             counts[test_tile] -= 1
             if win:
                 return True
@@ -362,9 +435,16 @@ class SichuanAnalyzer:
 
     @classmethod
     def find_waiting_tiles(
-        cls, counts: List[int], num_fixed_melds: int = 0, pool_remaining: Optional[List[int]] = None
+        cls,
+        counts: List[int],
+        num_fixed_melds: int = 0,
+        pool_remaining: Optional[List[int]] = None,
+        dingque_suit: Optional[int] = None,
     ) -> Dict[int, int]:
-        """找出当前手牌能够胡的牌（叫口）及其真实剩余存活数。"""
+        """找出当前手牌能够胡的牌（叫口）及其真实剩余存活数。
+
+        dingque_suit：给定时，定缺花色的牌既不作试胡牌，手牌含定缺牌也无叫口。
+        """
         waiting = {}
         suits = cls.get_suits_in_hand(counts)
         if len(suits) > 2:
@@ -376,12 +456,14 @@ class SichuanAnalyzer:
             return waiting
 
         for test_tile in range(27):
+            if dingque_suit is not None and tile_to_suit(test_tile) == dingque_suit:
+                continue
             test_suit = tile_to_suit(test_tile)
             if len(suits | {test_suit}) > 2:
                 continue
 
             counts[test_tile] += 1
-            if cls.can_win(counts, num_fixed_melds):
+            if cls.can_win(counts, num_fixed_melds, dingque_suit):
                 if pool_remaining is not None and 0 <= test_tile < len(pool_remaining):
                     rem = pool_remaining[test_tile]
                 else:
@@ -393,9 +475,22 @@ class SichuanAnalyzer:
 
     @classmethod
     def calculate_shanten(
-        cls, counts: List[int], num_fixed_melds: int = 0
+        cls,
+        counts: List[int],
+        num_fixed_melds: int = 0,
+        dingque_suit: Optional[int] = None,
     ) -> int:
-        """计算四川麻将向听数（0=听牌/胡牌, 1=1向听, 2=2向听...）。支持红中赖子。"""
+        """计算四川麻将向听数（0=听牌/胡牌, 1=1向听, 2=2向听...）。支持红中赖子与定缺约束。"""
+        num_wild = counts[27] if len(counts) > 27 else 0
+        total_tiles = sum(counts[:27]) + num_wild
+
+        # 定缺硬约束：仍持有定缺花色牌时，向听 = 需打光该门的张数（断门 Prior）
+        if dingque_suit is not None:
+            ds = dingque_suit * 9
+            dq_left = sum(counts[ds + i] for i in range(9))
+            if dq_left > 0:
+                return max(1, dq_left)
+
         suits = cls.get_suits_in_hand(counts)
         extra_dingque_penalty = 0
         if len(suits) > 2:
@@ -407,13 +502,16 @@ class SichuanAnalyzer:
             min_suit = min(suit_counts, key=suit_counts.get)
             extra_dingque_penalty = suit_counts[min_suit]
 
-        num_wild = counts[27] if len(counts) > 27 else 0
-        total_tiles = sum(counts[:27]) + num_wild
         if total_tiles % 3 == 2:
-            if cls.can_win(counts, num_fixed_melds):
+            if cls.can_win(counts, num_fixed_melds, dingque_suit):
                 return 0
         elif total_tiles % 3 == 1:
-            if cls.is_tenpai(counts, num_fixed_melds):
+            if cls.is_tenpai(counts, num_fixed_melds, dingque_suit):
+                return 0
+        else:
+            # 3n 张型（如 13 张打掉一张后的 12 张中间态）：以「补一张即听」为 0 向听
+            # 的正确定义计算，不再落入常量 2 兜底。
+            if cls._predraw_tenpai(counts, num_fixed_melds, dingque_suit):
                 return 0
 
         if extra_dingque_penalty > 0:
@@ -424,24 +522,44 @@ class SichuanAnalyzer:
             for d in range(27):
                 if counts[d] > 0:
                     counts[d] -= 1
-                    ten = cls.is_tenpai(counts, num_fixed_melds)
+                    ten = cls.is_tenpai(counts, num_fixed_melds, dingque_suit)
                     counts[d] += 1
                     if ten:
                         return 1
         elif total_tiles % 3 == 1:
             for t in range(27):
+                if dingque_suit is not None and tile_to_suit(t) == dingque_suit:
+                    continue
                 if len(suits | {tile_to_suit(t)}) > 2:
                     continue
                 counts[t] += 1
                 for d in range(27):
                     if counts[d] > 0:
                         counts[d] -= 1
-                        ten = cls.is_tenpai(counts, num_fixed_melds)
+                        ten = cls.is_tenpai(counts, num_fixed_melds, dingque_suit)
                         counts[d] += 1
                         if ten:
                             counts[t] -= 1
                             return 1
                 counts[t] -= 1
+        else:
+            # 3n 的 1 向听：一个「摸+打」循环后达到「补一张即听」
+            for t in range(27):
+                if dingque_suit is not None and tile_to_suit(t) == dingque_suit:
+                    continue
+                counts[t] += 1
+                reached = False
+                for d in range(27):
+                    if counts[d] > 0:
+                        counts[d] -= 1
+                        if cls._predraw_tenpai(counts, num_fixed_melds, dingque_suit):
+                            reached = True
+                        counts[d] += 1
+                        if reached:
+                            break
+                counts[t] -= 1
+                if reached:
+                    return 1
 
         base_shanten = 2
         if num_wild > 0:
@@ -449,8 +567,38 @@ class SichuanAnalyzer:
         return base_shanten
 
     @classmethod
-    def calculate_fan(cls, counts: List[int], win_tile: int, num_fixed_melds: int = 0) -> int:
-        """估算川麻胡牌番数（清一色、七对、根数）。"""
+    def _predraw_tenpai(
+        cls,
+        counts: List[int],
+        num_fixed_melds: int = 0,
+        dingque_suit: Optional[int] = None,
+    ) -> bool:
+        """3n 张型专用：是否存在一张摸入牌使手牌（+1 后 3n+1）直接听牌。"""
+        for t in range(27):
+            if dingque_suit is not None and tile_to_suit(t) == dingque_suit:
+                continue
+            counts[t] += 1
+            ten = cls.is_tenpai(counts, num_fixed_melds, dingque_suit)
+            counts[t] -= 1
+            if ten:
+                return True
+        return False
+
+    @classmethod
+    def calculate_fan(
+        cls,
+        counts: List[int],
+        win_tile: int,
+        num_fixed_melds: int = 0,
+        dingque_suit: Optional[int] = None,
+    ) -> int:
+        """估算川麻胡牌番数（清一色、七对、根数）。含定缺牌时为非法胡，返 0。"""
+        if dingque_suit is not None:
+            if tile_to_suit(win_tile) == dingque_suit:
+                return 0
+            ds = dingque_suit * 9
+            if any(counts[ds + i] > 0 for i in range(9)):
+                return 0
         fan = 1  # 基础 1 番（平胡）
         c = list(counts)
         c[win_tile] += 1
@@ -518,7 +666,30 @@ class SichuanAnalyzer:
         dingque_suit: Optional[int] = None,
         opponent_dingque_suits: Optional[List[int]] = None,
     ) -> List[Dict]:
-        """核心选叫与出牌分析器（EV 期望价值排序模型，含防点炮风险惩罚）。"""
+        """核心选叫与出牌分析器入口（EV 期望价值排序模型，含防点炮风险惩罚）。
+
+        引擎常态喂 13 张（3n+1，刚打完牌等摸牌）：此时直接打一张会剩 12 张（3n），
+        听牌/叫口搜索全部短路、进张恒 0。对 3n+1 输入自动改走「预摸牌期望」路径，
+        14 张（3n+2）及其他输入沿用完整 EV 流程。
+        """
+        num_wild = counts[27] if len(counts) > 27 else 0
+        total_len = sum(counts[:27]) + num_wild + num_fixed_melds * 3
+        if total_len % 3 == 1:
+            return cls._analyze_discards_predraw(
+                counts, num_fixed_melds, pool_remaining, dingque_suit, opponent_dingque_suits)
+        return cls._analyze_discards_3n2(
+            counts, num_fixed_melds, pool_remaining, dingque_suit, opponent_dingque_suits)
+
+    @classmethod
+    def _analyze_discards_3n2(
+        cls,
+        counts: List[int],
+        num_fixed_melds: int = 0,
+        pool_remaining: Optional[List[int]] = None,
+        dingque_suit: Optional[int] = None,
+        opponent_dingque_suits: Optional[List[int]] = None,
+    ) -> List[Dict]:
+        """14 张（3n+2）完整出牌 EV 分析：打每张后剩 13 张（3n+1），叫口/向听可算。"""
         results = []
         suits = cls.get_suits_in_hand(counts)
 
@@ -550,7 +721,7 @@ class SichuanAnalyzer:
         for discard in candidate_discards:
             original_count = counts[discard]
             counts[discard] -= 1
-            waiting_dict = cls.find_waiting_tiles(counts, num_fixed_melds, pool_remaining)
+            waiting_dict = cls.find_waiting_tiles(counts, num_fixed_melds, pool_remaining, dingque_suit)
             real_ukeire = sum(waiting_dict.values()) if waiting_dict else 0
             ting_mpsz_list = [index27_to_mpsz(w) for w in waiting_dict.keys()]
             ting_cn_list = [index27_to_chinese(w) for w in waiting_dict.keys()]
@@ -562,7 +733,7 @@ class SichuanAnalyzer:
                 shanten = 0
                 fan_sum = 0
                 for w_tile, rem in waiting_dict.items():
-                    w_fan = cls.calculate_fan(counts, w_tile, num_fixed_melds)
+                    w_fan = cls.calculate_fan(counts, w_tile, num_fixed_melds, dingque_suit)
                     fan_sum += rem * (2 ** w_fan)
                 ev_score = 50000.0 + fan_sum * 10.0 + real_ukeire * 5.0
 
@@ -573,7 +744,7 @@ class SichuanAnalyzer:
                 else:
                     reason = f"听 {'/'.join(ting_cn_list[:3])}（绝张）{suffix}"
             else:
-                shanten_raw = cls.calculate_shanten(counts, num_fixed_melds)
+                shanten_raw = cls.calculate_shanten(counts, num_fixed_melds, dingque_suit)
                 shanten = shanten_raw
                 if shanten == 1:
                     incoming_dict, incoming_ukeire = cls.find_1shanten_ukeire(
@@ -678,7 +849,7 @@ class SichuanAnalyzer:
                         "name": index27_to_chinese(w),
                         "remaining": rem,
                         "is_dead": (rem == 0),
-                        "fan": cls.calculate_fan(counts, w, num_fixed_melds),
+                        "fan": cls.calculate_fan(counts, w, num_fixed_melds, dingque_suit),
                     })
 
             results.append({
@@ -696,6 +867,107 @@ class SichuanAnalyzer:
 
             counts[discard] += 1
 
+        results.sort(key=lambda item: item["ev"], reverse=True)
+        return results
+
+    @classmethod
+    def _analyze_discards_predraw(
+        cls,
+        counts: List[int],
+        num_fixed_melds: int = 0,
+        pool_remaining: Optional[List[int]] = None,
+        dingque_suit: Optional[int] = None,
+        opponent_dingque_suits: Optional[List[int]] = None,
+    ) -> List[Dict]:
+        """13 张（3n+1）预摸牌期望分析。
+
+        对每种牌池中剩余 > 0 的摸入牌 t 组成 14 张手牌，复用完整 14 张 EV 流程
+        算各候选打点的进张/向听，再按摸入概率（剩余张数占比）加权聚合成该
+        13 张局面下每张牌的期望值。仅在手牌/牌河变化时由上层缓存控制重算。
+        """
+        draw_opts = []
+        for t in range(28):
+            # 摸入定缺花色的牌只能立即打掉、回到同一 13 张局面，期望自洽，
+            # 不必成场景（剪枝降低算力）；红中赖子（27）保留。
+            if dingque_suit is not None and t < 27 and tile_to_suit(t) == dingque_suit:
+                continue
+            if pool_remaining is not None and t < len(pool_remaining):
+                rem = pool_remaining[t]
+            else:
+                rem = max(0, 4 - (counts[t] if t < len(counts) else 0))
+            if rem > 0:
+                draw_opts.append((t, rem))
+        if not draw_opts:
+            return []
+        total_w = float(sum(w for _, w in draw_opts))
+
+        agg: Dict[int, Dict] = {}
+        for t, w in draw_opts:
+            p = w / total_w
+            counts[t] += 1
+            try:
+                scen = cls._analyze_discards_3n2(
+                    counts, num_fixed_melds, pool_remaining,
+                    dingque_suit, opponent_dingque_suits)
+            finally:
+                counts[t] -= 1
+            for r in scen:
+                idx = r["tile_idx"]
+                a = agg.get(idx)
+                if a is None:
+                    a = {
+                        "tile": r["tile"], "weight": 0.0, "ev": 0.0,
+                        "ukeire": 0.0, "shanten": 0.0, "danger": 0.0,
+                        "is_dingque": False,
+                        "best_p": -1.0, "best_reason": "",
+                        "ting_p": -1.0, "ting_tiles": [], "ting_details": [],
+                    }
+                    agg[idx] = a
+                a["weight"] += p
+                a["ev"] += p * r["ev"]
+                a["ukeire"] += p * r["ukeire"]
+                a["shanten"] += p * r["shanten"]
+                a["danger"] += p * r.get("danger_penalty", 0.0)
+                a["is_dingque"] = a["is_dingque"] or r["is_dingque"]
+                if p > a["best_p"]:
+                    a["best_p"] = p
+                    a["best_reason"] = r.get("reason", "")
+                if r["ting_details"] and p > a["ting_p"]:
+                    a["ting_p"] = p
+                    a["ting_tiles"] = r["ting_tiles"]
+                    a["ting_details"] = r["ting_details"]
+
+        results = []
+        for idx, a in agg.items():
+            # 仅推荐当前 13 张里真实持有的牌（某摸牌场景下刚摸进的牌不作为候选）
+            if counts[idx] <= 0:
+                continue
+            wsum = a["weight"]
+            if wsum <= 0:
+                continue
+            avg_ev = a["ev"] / wsum
+            avg_uke = a["ukeire"] / wsum
+            avg_shanten = int(round(a["shanten"] / wsum))
+            reason = a["best_reason"] or ""
+            if a["ting_details"]:
+                cn_names = [d["name"] for d in a["ting_details"][:3]]
+                reason = f"摸牌后听 {'/'.join(cn_names)}，期望进张 {avg_uke:.1f} 张"
+            elif reason and "期望" not in reason:
+                reason = f"{reason}｜摸牌期望进张 {avg_uke:.1f} 张"
+            elif not reason:
+                reason = f"摸牌期望进张 {avg_uke:.1f} 张"
+            results.append({
+                "tile": a["tile"],
+                "tile_idx": idx,
+                "ukeire": int(round(avg_uke)),
+                "shanten": avg_shanten,
+                "ev": round(avg_ev, 1),
+                "ting_tiles": a["ting_tiles"],
+                "ting_details": a["ting_details"],
+                "reason": reason,
+                "is_dingque": a["is_dingque"],
+                "danger_penalty": round(a["danger"] / wsum, 1),
+            })
         results.sort(key=lambda item: item["ev"], reverse=True)
         return results
 
@@ -735,7 +1007,7 @@ class SichuanAnalyzer:
                 }
 
         # 2. 查大叫叫听预警检测
-        waiting = cls.find_waiting_tiles(counts, num_fixed_melds, pool_remaining)
+        waiting = cls.find_waiting_tiles(counts, num_fixed_melds, pool_remaining, dingque_suit)
         if waiting:
             # 已经听牌，安全无忧
             return {
@@ -749,14 +1021,14 @@ class SichuanAnalyzer:
             }
 
         # 未听牌，必须找出能最快叫听的打法
-        shanten = cls.calculate_shanten(counts, num_fixed_melds)
+        shanten = cls.calculate_shanten(counts, num_fixed_melds, dingque_suit)
         best_discards = []
         best_ukeire = -1
         # 寻找打哪张能进入 1-向听或叫听
         for d in range(27):
             if counts[d] > 0:
                 counts[d] -= 1
-                w = cls.find_waiting_tiles(counts, num_fixed_melds, pool_remaining)
+                w = cls.find_waiting_tiles(counts, num_fixed_melds, pool_remaining, dingque_suit)
                 counts[d] += 1
                 if w:
                     u = sum(w.values())
