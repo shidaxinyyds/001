@@ -3,7 +3,9 @@
 用法（Windows PowerShell）：
     py -3.10 localtest/gen_cards.py --type month --days 30 --count 20
     py -3.10 localtest/gen_cards.py --type week  --days 7  --count 50 --prefix MJ
+    py -3.10 localtest/gen_cards.py --type trial --minutes 10 --count 3 --prefix TRIAL
 
+有效期用 --days 或 --minutes 二选一（分钟适合做体验卡/到期流程测试）。
 产出的明文卡密只显示一次（发客户用），数据库里只存 SHA256(code)，
 即使库泄露也无法反推卡密。把打印出来的 INSERT 贴进 Supabase SQL Editor 执行即可。
 """
@@ -25,13 +27,17 @@ def gen_code(prefix: str) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--type", default="month", help="card_type 标签，如 week/month")
-    ap.add_argument("--days", type=int, required=True, help="有效天数（激活起算）")
+    ap.add_argument("--type", default="month", help="card_type 标签，如 week/month/trial")
+    ap.add_argument("--days", type=int, help="有效天数（激活起算），与 --minutes 二选一")
+    ap.add_argument("--minutes", type=int, help="有效分钟数（体验卡/测试用），与 --days 二选一")
     ap.add_argument("--count", type=int, default=1, help="生成张数")
     ap.add_argument("--prefix", default="MJ", help="卡密前缀，便于区分批次")
     args = ap.parse_args()
 
-    duration_s = args.days * 86400
+    if bool(args.days) == bool(args.minutes):
+        ap.error("--days 与 --minutes 必须二选一（且只能选一个）")
+    duration_s = args.days * 86400 if args.days else args.minutes * 60
+    span = f"{args.days} 天" if args.days else f"{args.minutes} 分钟"
     rows = []
     print("\n===== 明文卡密（只显示一次，发给客户）=====")
     for _ in range(args.count):
@@ -48,7 +54,7 @@ def main() -> None:
         "insert into public.card_keys (code_hash, card_type, duration_s) values\n"
         f"{values};"
     )
-    print(f"\n共 {args.count} 张，{args.type} 卡，有效期 {args.days} 天。")
+    print(f"\n共 {args.count} 张，{args.type} 卡，有效期 {span}。")
 
 
 if __name__ == "__main__":
