@@ -891,6 +891,23 @@ _RIVER_ROT_PREF = {
 }
 _RIVER_CONFIDENT = 0.85   # 达到此分即早停
 
+# 牌河识别可配参数（集中一处）：把原本散落在多处的魔法数字（detect_river_discards
+# 单张 0.42 门槛、voted_rows 牌河 0.78 门槛、中央骰子盒排除框比例、牌河行纵向先验带、
+# 手牌顶保护线）收敛为一套可配参数。默认值与旧硬编码完全一致（不改现有接受/拒绝行为），
+# 仅消除"双门槛漂移"并便于按平台（蜀山/腾讯）整体调参。
+RIVER_CONF = {
+    "min_conf": 0.42,          # detect_river_discards 单张采信下限
+    "vote_conf": 0.78,         # voted_rows 牌河张采信下限（与 min_conf 同属一套配置）
+    "center_x": (0.42, 0.58),  # 中央骰子盒排除框（占屏宽）
+    "center_y": (0.38, 0.62),  # 中央骰子盒排除框（占屏高）
+    "row_yc": (0.20, 0.72),    # 牌河行纵向物理先验带（占屏高）
+    "hand_top": 0.76,          # 手牌顶部保护线
+}
+
+# 视觉牌河多帧一致回退帧数：牌河只增不减，若某张连续这么多帧不再出现于视觉牌河，
+# 才判定此前计数为误检虚高并回退（单帧抖动绝不触发）。
+RIVER_REGRET_FRAMES = 5
+
 
 def _tile_content_key(tile_crop: np.ndarray):
     """切片内容指纹（8x8 缩略 hash）：牌河未变时同一切片命中缓存 → 零分类。"""
@@ -963,9 +980,10 @@ def _classify_tile_fast(detector, tile_crop, avail, pref_rots, cache):
     return result
 
 
-def detect_river_discards(image: np.ndarray, detector, mode: str = "4p", hand_row=None) -> List[str]:
+def detect_river_discards(image: np.ndarray, detector, mode: str = "4p", hand_row=None) -> List[Tuple[str, str]]:
     """高精度牌桌弃牌检测：严格排除中央骰子盒、倒计时、房间名及头像，
-    支持多牌相连自适应切片与多角度归一化，精准提取全场四方牌河弃牌。"""
+    支持多牌相连自适应切片与多角度归一化，精准提取全场四方牌河弃牌。
+    返回 (牌面 mpsz, 分区名) 列表，分区名 ∈ {bottom,top,left,right}。"""
     if image is None or detector is None or image.size == 0:
         return []
     try:
@@ -1009,11 +1027,13 @@ def detect_river_discards(image: np.ndarray, detector, mode: str = "4p", hand_ro
                     continue
 
                 gx, gy = x1 + bx, y1 + by
-                # 排除中央指南针/骰子盒物理区域
-                if (0.42 * iw <= gx + bw / 2 <= 0.58 * iw) and (0.38 * ih <= gy + bh / 2 <= 0.62 * ih):
+                # 排除中央指南针/骰子盒物理区域（比例可配，见 RIVER_CONF）
+                cx_lo, cx_hi = RIVER_CONF["center_x"]
+                cy_lo, cy_hi = RIVER_CONF["center_y"]
+                if (cx_lo * iw <= gx + bw / 2 <= cx_hi * iw) and (cy_lo * ih <= gy + bh / 2 <= cy_hi * ih):
                     continue
                 # 避免切到手牌顶部
-                if gy + bh >= int(ih * 0.76):
+                if gy + bh >= int(ih * RIVER_CONF["hand_top"]):
                     continue
 
                 # 连片牌自适应网格切片（横排与竖排粘连）
@@ -1040,20 +1060,22 @@ def detect_river_discards(image: np.ndarray, detector, mode: str = "4p", hand_ro
                     best_lbl, best_sc = _classify_tile_fast(
                         detector, tile_crop, avail, pref, river_cache)
 
-                    # 牌河弃牌置信度门槛：0.42
-                    if best_lbl and best_sc >= 0.42:
-                        raw_discards.append((sx, sy, sw, sh, best_lbl, best_sc))
+                    # 牌河弃牌置信度门槛（可配，默认 0.42）
+                    if best_lbl and best_sc >= RIVER_CONF["min_conf"]:
+                        raw_discards.append((sx, sy, sw, sh, best_lbl, best_sc, zname))
 
         # 空间非极大值抑制（NMS）
         raw_discards.sort(key=lambda d: d[5], reverse=True)
         final_discards = []
         for d in raw_discards:
-            gx, gy, bw, bh, lbl, sc = d
+            gx, gy, bw, bh, lbl, sc, zn = d
             cx1, cy1 = gx + bw / 2, gy + bh / 2
             if not any(abs(cx1 - (ex[0] + ex[2] / 2)) < 20 and abs(cy1 - (ex[1] + ex[3] / 2)) < 20 for ex in final_discards):
                 final_discards.append(d)
 
-        return [d[4] for d in final_discards]
+        # 按四区返回 (牌面, 分区) 列表：AI 仍消费全局账本（取 label），
+        # 分区信息供上层做"谁打的"归属展示。
+        return [(d[4], d[6]) for d in final_discards]
     except Exception:
         return []
 
@@ -1199,10 +1221,21 @@ class Engine:
         self._discard_history: deque = deque(maxlen=DISCARD_HISTORY_FRAMES)
         self._monotonic_discards: Counter = Counter()
         self._pending_discards: Counter = Counter()  # 视觉牌河连续帧确认投票器
+        # 牌河双账本：视觉累计与手牌差分推断分设两套 Counter，再以逐张 max 合并到
+        # _monotonic_discards 供显示/消费（防同一次弃牌被两路双计，也防瞬时推断被视觉抹掉）。
+        self._visual_discards: Counter = Counter()
+        self._inferred_discards: Counter = Counter()
+        # 视觉牌河连续缺席计标（多帧一致回退用）
+        self._river_absent_streak: Dict[str, int] = {}
+        # 四区牌河归属计数（"谁打的"展示；AI 仍按全局账本消费）
+        self._river_zone_counts: Dict[str, int] = {"bottom": 0, "top": 0, "left": 0, "right": 0}
         # 副露独立账本（34 型）：碰/杠是全场可见信，但不入牌河，避免污染弃牌计数；
         # 与牌河一样经两帧确认后才递增（碰→杠 3→4 单调递增，同局不回退）。
         self._meld_counts_34: List[int] = [0] * 34
         self._pending_melds_34: List[int] = [0] * 34
+        self._visual_discards = Counter()
+        self._inferred_discards = Counter()
+        self._river_zone_counts = {"bottom": 0, "top": 0, "left": 0, "right": 0}
         self._match_started: bool = False
         self._last_stable_counter: Counter = Counter()
         self._last_stable_n: int = 0
@@ -1337,10 +1370,58 @@ class Engine:
 
         return False
 
+    def _update_visual_ledger(self, discard_labels) -> None:
+        """牌河视觉累计账本：两帧确认递增 + 多帧一致最小值回退，再与手牌差分推断
+        账本逐张 max 合并到单调牌池（同局只增不减，但单帧误检虚高可经连续回退）。
+        抽成方法以便离线单测双账本合并/限幅/回退语义。"""
+        current_frame_discards = Counter(discard_labels)
+        for lab, cnt in current_frame_discards.items():
+            if not lab:
+                continue
+            if cnt > self._visual_discards[lab]:
+                if self._pending_discards[lab] >= cnt:
+                    self._visual_discards[lab] = cnt
+                else:
+                    self._pending_discards[lab] = cnt
+        for lab in list(self._pending_discards.keys()):
+            if current_frame_discards[lab] == 0:
+                self._pending_discards[lab] = self._visual_discards[lab]
+        for lab in list(self._visual_discards.keys()):
+            live = current_frame_discards[lab]
+            if live < self._visual_discards[lab] and self._inferred_discards[lab] == 0:
+                st = self._river_absent_streak.get(lab, 0) + 1
+                self._river_absent_streak[lab] = st
+                if st >= RIVER_REGRET_FRAMES:
+                    if live <= 0:
+                        del self._visual_discards[lab]
+                    else:
+                        self._visual_discards[lab] = live
+                    self._river_absent_streak[lab] = 0
+            else:
+                self._river_absent_streak[lab] = 0
+        for lab in set(self._visual_discards) | set(self._inferred_discards) | set(self._monotonic_discards):
+            m = max(self._visual_discards[lab], self._inferred_discards[lab])
+            if m <= 0:
+                self._monotonic_discards.pop(lab, None)
+            else:
+                self._monotonic_discards[lab] = m
+
+    def _clear_discard_ledgers(self) -> None:
+        """清空全部弃牌账本（单调牌池 + 两子账本 + 确认/缺席计标）。"""
+        self._monotonic_discards.clear()
+        self._pending_discards.clear()
+        self._visual_discards.clear()
+        self._inferred_discards.clear()
+        self._river_absent_streak.clear()
+        self._river_zone_counts = {"bottom": 0, "top": 0, "left": 0, "right": 0}
+
     def _reset_game_state(self):
         """重置整局游戏的动态状态（新开局/返回大厅/结算时调用）。"""
         self._monotonic_discards.clear()
         self._pending_discards.clear()
+        self._visual_discards.clear()
+        self._inferred_discards.clear()
+        self._river_zone_counts = {"bottom": 0, "top": 0, "left": 0, "right": 0}
         self._meld_counts_34 = [0] * 34
         self._pending_melds_34 = [0] * 34
         self._discard_history.clear()
@@ -2652,9 +2733,16 @@ class Engine:
                 filtered.append(fr)
 
             if is_grid_det:
-                # TencentGridDetector 是基于整排切片的精密网格识别，手牌行直接提取，
-                # 绝不投入空间坐标投票窗口（避免 13/14 切换时空间错位聚合引入幽灵牌与延迟）
+                # 恢复 grid 主路径的多帧投票：网格切片位置确定、跨帧稳定，把本行投入
+                # _tile_voter 做时间加权多数表决以修正单帧错认。张数切换（13↔ 14）时，
+                # vote() 的"新位置无历史匹配→直接透传"逻辑保证不产生幽灵牌/整帧空白，
+                # 故无旧版空间错位聚合的延迟/幽灵问题（单帧时 vote 亦为透传）。
                 hand_row = filtered[0] if filtered else []
+                try:
+                    self._tile_voter.push(hand_row)
+                    hand_row = self._tile_voter.vote()
+                except Exception:
+                    traceback.print_exc()
                 voted_rows = [hand_row]
                 hand_idx = 0 if hand_row else None
             else:
@@ -2721,8 +2809,7 @@ class Engine:
                 self._prev_raw_n_before_clear += 1
                 if (self._prev_raw_n_before_clear >= 2
                         and sum(self._monotonic_discards.values()) > 0):
-                    self._monotonic_discards.clear()
-                    self._pending_discards.clear()
+                    self._clear_discard_ledgers()
                     self._discard_history.clear()
                     self._meld_counts_34 = [0] * 34
                     self._pending_melds_34 = [0] * 34
@@ -2794,8 +2881,7 @@ class Engine:
                 if is_swap_phase or is_dq_phase:
                     self._phase_confirm_frames += 1
                     if self._phase_confirm_frames >= 2:
-                        self._monotonic_discards.clear()
-                        self._pending_discards.clear()
+                        self._clear_discard_ledgers()
                         self._match_started = False
                 else:
                     self._phase_confirm_frames = 0
@@ -2834,16 +2920,17 @@ class Engine:
             )
 
             if allow_river_scan:
+                yc_lo, yc_hi = RIVER_CONF["row_yc"]
                 for _i, row in enumerate(voted_rows):
                     if _i == hand_idx:
                         continue
-                    # 牌河物理位置先验：牌河只能位于牌桌中央区域（0.20 <= yc <= 0.72）
+                    # 牌河物理位置先验：牌河只能位于牌桌中央区域（比例可配）
                     ys = [d[0][1] for d in row]
                     yc = sum(ys) / len(ys) if ys else 0
-                    if yc < 0.20 * ih or yc > 0.72 * ih:
+                    if yc < yc_lo * ih or yc > yc_hi * ih:
                         continue
                     for (rect, label, conf) in row:
-                        if label is not None and conf >= 0.78:
+                        if label is not None and conf >= RIVER_CONF["vote_conf"]:
                             try:
                                 if mpsz_to_tile34_index(label) in avail:
                                     discard_labels.append(label)
@@ -2854,10 +2941,15 @@ class Engine:
                 _t_river = time.time()
                 if hand_row and (len(hand_row) >= 4 or len(hand_mpsz) >= 4):
                     try:
-                        central_discards = detect_river_discards(image, self._detector, mode=self.mode, hand_row=hand_row)
-                        for cd in central_discards:
+                        river_entries = detect_river_discards(image, self._detector, mode=self.mode, hand_row=hand_row)
+                        # 四区归属计数（仅供展示"谁打的"；AI 仍按全局 discard_labels 消费）
+                        zone_counts: Dict[str, int] = {"bottom": 0, "top": 0, "left": 0, "right": 0}
+                        for cd, zn in river_entries:
                             if cd and mpsz_to_tile34_index(cd) in avail:
                                 discard_labels.append(cd)
+                                if zn in zone_counts:
+                                    zone_counts[zn] += 1
+                        self._river_zone_counts = zone_counts
                     except Exception:
                         pass
                     try:
@@ -2887,15 +2979,17 @@ class Engine:
             curr_n = sum(curr_cnt.values())
 
             # ===== 瞬时出牌感知：手牌张数减少（例如 14->13，玩家刚打出一张牌）=====
-            # 零延迟直接从手牌集合差分 (prev_counter - curr_counter) 捕获刚打出的牌，
-            # 毫秒级写入单调牌池 _monotonic_discards，杜绝牌河视觉延迟导致活牌矩阵滞后
+            # 零延迟从手牌集合差分 (prev_counter - curr_counter) 捕获刚打出的牌，写入
+            # 独立的"手牌差分推断"账本（与视觉累计账本分开），毫秒级响应、杜绝牌河视觉滞后。
+            # 瞬时差分限幅：该分支本身就是"张数减一"的出牌事件，一次最多计 1 张；
+            # 同帧差分出多张必是识别抖动 → 只取一张代表张，其余忽略，杜绝记牌器暴涨。
             if getattr(self, "_last_stable_n", 0) in (14, 11, 8, 5, 2) and curr_n in (13, 10, 7, 4, 1):
                 missing_cnt = self._last_stable_counter - curr_cnt
                 for missing_tile, m_count in missing_cnt.items():
                     if m_count > 0:
-                        self._monotonic_discards[missing_tile] += m_count
-                        self._pending_discards[missing_tile] = self._monotonic_discards[missing_tile]
+                        self._inferred_discards[missing_tile] = min(self._inferred_discards[missing_tile] + 1, 4)
                         self._match_started = True
+                        break
 
             # ===== 瞬时摸牌感知：手牌张数增加（例如 13->14，玩家刚摸到一张牌）=====
             drawn_from_diff = None
@@ -2930,22 +3024,10 @@ class Engine:
                     sorted_hand_by_x = sorted(hand_row, key=lambda d: d[0][0])
                     drawing_tile = sorted_hand_by_x[-1][1]
 
-            # 牌池单调累加器：同局内牌池只增不减，结合两帧确认机制，防止动画/飞牌/气泡导致噪点永久写入
+            # 牌池双账本（视觉累计）：同局内只增不减 + 两帧确认 + 多帧一致回退；
+            # 与手牌差分推断分账，最后逐张 max 合并到单调牌池。
             if allow_river_scan:
-                current_frame_discards = Counter(discard_labels)
-                for lab, cnt in current_frame_discards.items():
-                    if not lab:
-                        continue
-                    if cnt > self._monotonic_discards[lab]:
-                        # 视觉牌河连续两帧验证：必须在连续两帧均观测到该数量，才递增单调牌池，杜绝单帧动画杂斑误入
-                        if self._pending_discards[lab] >= cnt:
-                            self._monotonic_discards[lab] = cnt
-                        else:
-                            self._pending_discards[lab] = cnt
-                # 衰减未确认的孤立噪点
-                for lab in list(self._pending_discards.keys()):
-                    if current_frame_discards[lab] == 0:
-                        self._pending_discards[lab] = self._monotonic_discards[lab]
+                self._update_visual_ledger(discard_labels)
 
 
             # 计算手牌各牌计数
@@ -3639,6 +3721,8 @@ class Engine:
                     "stale": diag_stale,
                     "dup_reject": diag_dup_reject,
                     "empty_frames": hand_empty_frames,
+                    # 四区牌河归属计数（"谁打的"展示）。
+                    "river_zones": dict(getattr(self, "_river_zone_counts", {})),
                     # 分阶段耗时（ms）：decode/detect/river/advice 各自 avg/max，
                     # 悬浮窗诊断行直接可见当前瓶颈段（跳帧帧不重跑，值不变）。
                     "perf": self._perf_snapshot(),

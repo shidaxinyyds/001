@@ -303,6 +303,21 @@ class TencentGridDetector(Detector):
 
         return best_lbl, round(float(best_sc), 3)
 
+    def set_hand_strip_top(self, frac) -> None:
+        """覆盖手牌带上沿比例（[0.3,0.9]）；传 None 恢复默认 0.68 + 自适应兜底。
+        供平台/分辨率差异过大时由上层 set_roi 联动覆盖。"""
+        if frac is None:
+            self._hand_top_frac = 0.68
+            self._hand_top_override = False
+            return
+        try:
+            f = float(frac)
+        except Exception:
+            return
+        if 0.3 <= f <= 0.9:
+            self._hand_top_frac = f
+            self._hand_top_override = True
+
     def _probe_style(self, crop: np.ndarray) -> Optional[str]:
         """用一枚代表牌对全部 bank 打分，返回胜出模板的风格（分不足返 None）。
 
@@ -527,35 +542,42 @@ class TencentGridDetector(Detector):
             return []
 
         ih, iw = image_bgr.shape[:2]
-        y_min = int(ih * 0.68)
-        y_max = int(ih * 0.99)
-        strip = image_bgr[y_min:y_max, :]
-        sh, sw = strip.shape[:2]
 
-        hsv = cv2.cvtColor(strip, cv2.COLOR_BGR2HSV)
-        is_felt = (hsv[:, :, 0] >= 50) & (hsv[:, :, 0] <= 110) & (hsv[:, :, 1] >= 50)
-        is_tile = ~is_felt & (hsv[:, :, 2] > 75) & (strip[:, :, 0] > 110) & (strip[:, :, 1] > 110) & (strip[:, :, 2] > 110)
+        def _scan_window(win_y_min):
+            win_y_max = int(ih * 0.99)
+            win_strip = image_bgr[win_y_min:win_y_max, :]
+            win_sh, win_sw = win_strip.shape[:2]
+            win_hsv = cv2.cvtColor(win_strip, cv2.COLOR_BGR2HSV)
+            win_felt = (win_hsv[:, :, 0] >= 50) & (win_hsv[:, :, 0] <= 110) & (win_hsv[:, :, 1] >= 50)
+            win_tile = ~win_felt & (win_hsv[:, :, 2] > 75) & (win_strip[:, :, 0] > 110) & (win_strip[:, :, 1] > 110) & (win_strip[:, :, 2] > 110)
+            win_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+            win_mask = cv2.morphologyEx(win_tile.astype(np.uint8) * 255, cv2.MORPH_CLOSE, win_kernel)
+            win_contours, _ = cv2.findContours(win_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            win_boxes = []
+            for c in win_contours:
+                x, y, bw, bh = cv2.boundingRect(c)
+                # 立牌高度通常占手牌带 35% 以上，过滤左下角头像区域 (x >= sw * 0.05)
+                if bh > win_sh * 0.35 and x < win_sw * 0.95 and bw >= 25 and x >= win_sw * 0.05:
+                    # 垂直投影修剪：去除边缘粘连的头像徽章、积分标牌、UI阴影等细窄干扰物
+                    sub_mask = win_tile[y:y + bh, x:x + bw]
+                    col_counts = np.sum(sub_mask, axis=0)
+                    thresh = max(15, int(win_sh * 0.25))
+                    valid_cols = np.where(col_counts >= thresh)[0]
+                    if len(valid_cols) >= 20:
+                        refined_x = x + int(valid_cols[0])
+                        refined_bw = int(valid_cols[-1] - valid_cols[0] + 1)
+                        win_boxes.append((refined_x, y + win_y_min, refined_bw, bh))
+                    else:
+                        win_boxes.append((x, y + win_y_min, bw, bh))
+            return win_boxes, win_tile, win_y_min, win_sh
 
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-        mask = cv2.morphologyEx(is_tile.astype(np.uint8) * 255, cv2.MORPH_CLOSE, kernel)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        boxes = []
-        for c in contours:
-            x, y, bw, bh = cv2.boundingRect(c)
-            # 立牌高度通常占手牌带 35% 以上，过滤左下角头像区域 (x >= sw * 0.05)
-            if bh > sh * 0.35 and x < sw * 0.95 and bw >= 25 and x >= sw * 0.05:
-                # 垂直投影修剪：去除边缘粘连的头像徽章、积分标牌、UI阴影等细窄干扰物
-                sub_mask = is_tile[y:y+bh, x:x+bw]
-                col_counts = np.sum(sub_mask, axis=0)
-                thresh = max(15, int(sh * 0.25))
-                valid_cols = np.where(col_counts >= thresh)[0]
-                if len(valid_cols) >= 20:
-                    refined_x = x + int(valid_cols[0])
-                    refined_bw = int(valid_cols[-1] - valid_cols[0] + 1)
-                    boxes.append((refined_x, y + y_min, refined_bw, bh))
-                else:
-                    boxes.append((x, y + y_min, bw, bh))
+        # 手牌带上沿比例：默认 0.68；允许 set_hand_strip_top 覆盖；主块实测自适应兜底
+        # （常量窗口取不到牌时放宽到 0.55 再扫一次，解决手牌整体偏高/分辨率差异导致带上沿移位）。
+        top_frac = getattr(self, "_hand_top_frac", 0.68)
+        overridden = getattr(self, "_hand_top_override", False)
+        boxes, is_tile, y_min, sh = _scan_window(int(ih * top_frac))
+        if not boxes and not overridden:
+            boxes, is_tile, y_min, sh = _scan_window(int(ih * 0.55))
 
         if not boxes:
             return []
@@ -586,7 +608,7 @@ class TencentGridDetector(Detector):
         # 不定→两路候选并集全模板兜底。均分不达标时再全量重扫一次。
         raw_adj = bw / face_w
         raw_tec = bw / (0.0547 * iw)
-        legal_standing = [1, 4, 7, 10, 13] if drawn_box else [1, 2, 4, 5, 7, 8, 10, 11, 13, 14]
+        legal_standing = [1, 3, 4, 6, 7, 9, 10, 13] if drawn_box else [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14]
         c_adj = sorted(legal_standing, key=lambda c: abs(c - raw_adj))[:2]
         c_tec = sorted(legal_standing, key=lambda c: abs(c - raw_tec))[:2]
 
@@ -660,16 +682,21 @@ class TencentGridDetector(Detector):
         top_conf = max([d[2] for d in all_dets], default=0.0)
         self.last_top_score = top_conf
 
-        # 核心防伪与非牌局拦截：
-        # 真实麻将手牌匹配时，最高置信度通常 >= 0.68，均值通常 >= 0.55。
-        # 真机画面可能因分辨率、光线、压缩而使置信度比测试图低约 5-10%，
-        # 因此阈值略低于理论值，在实际设备上保留更多有效帧。
-        # 在大厅、载入中、结算界面等非牌局场景，背景匹配分通常 0.3~0.5，此门槛仍能有效过滤。
-        if best_standing_mean < 0.55 or top_conf < 0.68:
+        # 核心防伪与非牌局拦截（已拆除"全有或全无"断崖）：
+        # 达标行（均值>=0.55 且峰值>=0.68）与旧行为完全一致，整行返回；
+        # 原本会被整行作废的边界场景不再全盘放弃，改逐张置信救援——低于硬地板
+        # （非牌局背景峰值通常 <0.5）仍整行放弃，否则保留达标张（>=0.5），
+        # 低置信张交上层标灰、不进建议，杜绝"少切 1 张整帧空白"式连锁失败。
+        if best_standing_mean >= 0.55 and top_conf >= 0.68:
+            return all_dets
+        if top_conf < 0.5:
             self.last_drawn_tile = None
             return []
-
-        return all_dets
+        rescued = [d for d in all_dets if d[2] >= 0.5]
+        if len(rescued) < 2:
+            self.last_drawn_tile = None
+            return []
+        return rescued
 
     def detect_all_rows(
         self, image: CVImage, classify: bool = True, allow_rotation: bool = False, **kwargs

@@ -64,6 +64,7 @@ def main():
     print("\nENGINE INTEGRATION OK")
     _test_phase2_state_machine()
     _test_phase3_perf()
+    _test_phase4_accuracy()
 
 
 def _test_phase2_state_machine():
@@ -163,6 +164,60 @@ def _test_phase3_perf():
     print("[PASS] 分类快路径：高分早停 + 内容缓存命中")
 
     print("\nPHASE3 PERF OK")
+
+
+def _test_phase4_accuracy():
+    """阶段 4 精度加固纯逻辑断言：双账本合并/两帧确认/多帧一致回退、
+    grid 投票恢复后的防幽灵透传、RIVER_CONF 默认值、set_hand_strip_top 覆盖。"""
+    from engine.engine import _TileVoter, RIVER_CONF, RIVER_REGRET_FRAMES
+    from recognition.tencent_grid_detector import TencentGridDetector
+    print("\n=== 阶段 4 精度断言 ===")
+
+    # 1) 双账本：视觉两帧确认递增 + 手牌差分独立账本 + max 合并 + 多帧一致回退
+    eng = Engine()
+    eng._update_visual_ledger(["1m", "1m"])   # 帧1：cnt=2 → pending，视觉账本未确认
+    assert eng._visual_discards["1m"] == 0 and eng._pending_discards["1m"] == 2
+    eng._update_visual_ledger(["1m", "1m"])   # 帧2：连续确认 → 视觉=2
+    assert eng._visual_discards["1m"] == 2 and eng._monotonic_discards["1m"] == 2
+    # 手牌差分推断独立账本，与视觉 max 合并
+    eng._inferred_discards["5p"] = 3
+    eng._update_visual_ledger([])
+    assert eng._monotonic_discards["5p"] == 3
+    # 1m 无 inferred 支撑、连续缺席 → 回退删除（从单调牌池也同步传播）
+    for _ in range(RIVER_REGRET_FRAMES + 1):
+        eng._update_visual_ledger([])
+    assert "1m" not in eng._monotonic_discards, "虚高视觉计数应经多帧一致回退"
+    assert eng._monotonic_discards["5p"] == 3, "有 inferred 支撑的不得回退"
+    print("[PASS] 双账本：两帧确认+max合并+多帧一致回退")
+
+    # 2) grid 投票恢复：单帧透传 + 位置突变时新位置透传（不整帧空白）
+    v = _TileVoter(window=4)
+    f1 = [((0, 100, 40, 60), "1m", 0.9), ((50, 100, 40, 60), "2m", 0.9)]
+    v.push(f1)
+    assert [d[1] for d in v.vote()] == ["1m", "2m"], "单帧应透传"
+    f2 = [((300, 100, 40, 60), "3m", 0.9), ((350, 100, 40, 60), "4m", 0.9)]
+    v.push(f2)
+    assert [d[1] for d in v.vote()] == ["3m", "4m"], "位置突变应透传而非整帧置空"
+    print("[PASS] grid 投票恢复：透传防幽灵")
+
+    # 3) 门槛统一：可配参数默认值与旧硬编码一致（不改接受/拒绝行为）
+    assert RIVER_CONF["min_conf"] == 0.42 and RIVER_CONF["vote_conf"] == 0.78
+    assert RIVER_CONF["hand_top"] == 0.76 and RIVER_CONF["center_x"] == (0.42, 0.58)
+    print("[PASS] 门槛统一：RIVER_CONF 默认与旧魔法数字一致")
+
+    # 4) 手牌带上沿 set_hand_strip_top 覆盖（含非法入参与恢复默认）
+    class _Stub:
+        pass
+    s = _Stub()
+    TencentGridDetector.set_hand_strip_top(s, 0.6)
+    assert s._hand_top_frac == 0.6 and s._hand_top_override is True
+    TencentGridDetector.set_hand_strip_top(s, None)
+    assert s._hand_top_frac == 0.68 and s._hand_top_override is False
+    TencentGridDetector.set_hand_strip_top(s, 5)  # 超出 [0.3,0.9] → 忽略
+    assert s._hand_top_frac == 0.68 and s._hand_top_override is False
+    print("[PASS] set_hand_strip_top 覆盖/恢复/非法入参防御")
+
+    print("\nPHASE4 ACCURACY OK")
 
 
 if __name__ == "__main__":
