@@ -91,7 +91,13 @@ class TestPregamePhaseGuard(unittest.TestCase):
             for _ in range(3):  # 跨多帧确认：证明牌池真的被物理门控保护
                 _force_full(eng)
                 data = _quiet_process(eng, self.img)
-                self.assertEqual(
+                # 牌池单调只增：静止帧下真实视觉合并可能合法追加牌河弃牌，
+                # 故断言用「初始池完整存活」而非精确相等（被清空才是回归）。
+                for lab, cnt in pool.items():
+                    self.assertGreaterEqual(
+                        eng._monotonic_discards[lab], cnt,
+                        f"牌池 {lab}x{cnt} 被开局前阶段误触发清零/削减了（回归！）")
+                self.assertGreaterEqual(
                     sum(eng._monotonic_discards.values()), sum(pool.values()),
                     "牌池被开局前阶段误触发清空了（回归！）")
 

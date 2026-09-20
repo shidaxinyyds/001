@@ -22,6 +22,11 @@ class TencentGridDetector(Detector):
         self.templates_bgr: Dict[str, np.ndarray] = {}
         self.templates_gray: Dict[str, np.ndarray] = {}
         self.meld_templates: Dict[str, np.ndarray] = {}
+        # 多风格模板条目 [(基础标签, 风格名, 80x120 BGR 模板)]：同标签允许多个视觉
+        # 变体（腾讯主模板 + 各平台 bank），分类按标签聚合取最高分。
+        self.tpl_entries: List[Tuple[str, str, np.ndarray]] = []
+        # (lbl, style, btn_core, plain_core, btn_gray, plain_gray)
+        self._cores: List[Tuple[str, str, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
         self.last_top_score: float = 0.0
         self.last_screen: Tuple[int, int] = (0, 0)
         self.last_drawn_tile: Optional[str] = None
@@ -95,6 +100,38 @@ class TencentGridDetector(Detector):
 
         print(f"[TencentGridDetector] Final active templates: {len(self.templates_bgr)} templates, {len(self.meld_templates)} meld templates.")
 
+        # 4. 附加平台 bank（蜀山等）：键名 '#' 后为变体后缀，按基础标签聚合。
+        #    主库加载失败也不影响附加库——两者独立来源。
+        for mod_name, style in (("recognition.templates_shushan", "shushan"),):
+            try:
+                mod = __import__(mod_name, fromlist=["TEMPLATES_BGR"])
+                added = 0
+                for key, bgr in mod.TEMPLATES_BGR.items():
+                    self.tpl_entries.append((key.split("#")[0], style, np.asarray(bgr, dtype=np.uint8)))
+                    added += 1
+                print(f"[{type(self).__name__}] extra bank {mod_name}: +{added} templates")
+            except Exception as e:
+                print(f"[{type(self).__name__}] extra bank {mod_name} unavailable: {e}")
+
+        self._build_cores()
+
+    def _build_cores(self):
+        """预切片/预归一化匹配核，避免每帧每张牌重复 cvtColor+normalize。
+
+        核区域与旧实现一致：普通 y16:104、带黄色顶标 y44:104、x12:68。
+        每个核带风格标签，运行时可按探针胜出的风格只算该 bank，把多平台
+        开销压回单平台水平。
+        """
+        base = [(k.split("#")[0], "tencent", v) for k, v in self.templates_bgr.items()]
+        self.tpl_entries = base + self.tpl_entries
+        self._cores = []
+        for lbl, style, tmpl in self.tpl_entries:
+            plain = tmpl[16:104, 12:68]
+            btn = tmpl[44:104, 12:68]
+            plain_g = cv2.normalize(cv2.cvtColor(plain, cv2.COLOR_BGR2GRAY), None, 0, 255, cv2.NORM_MINMAX)
+            btn_g = cv2.normalize(cv2.cvtColor(btn, cv2.COLOR_BGR2GRAY), None, 0, 255, cv2.NORM_MINMAX)
+            self._cores.append((lbl, style, btn, plain, btn_g, plain_g))
+
     @property
     def templates(self) -> Dict[str, np.ndarray]:
         return self.templates_gray
@@ -141,7 +178,7 @@ class TencentGridDetector(Detector):
             peaks += 1
         return peaks
 
-    def classify_tile(self, crop: np.ndarray, avail=None) -> Tuple[str, float]:
+    def classify_tile(self, crop: np.ndarray, avail=None, styles=None) -> Tuple[str, float]:
         face = self.extract_face(crop)
         hsv = cv2.cvtColor(face, cv2.COLOR_BGR2HSV)
         is_grey = (np.mean(hsv[:, :, 1]) < 35)
@@ -164,20 +201,21 @@ class TencentGridDetector(Detector):
 
         if is_grey:
             c_face_g = cv2.normalize(cv2.cvtColor(c_face, cv2.COLOR_BGR2GRAY), None, 0, 255, cv2.NORM_MINMAX)
-            for lbl, tmpl in self.templates_bgr.items():
-                if lbl not in valid_tiles:
+            for lbl, style, core_btn, core_plain, gcore_btn, gcore_plain in self._cores:
+                if lbl not in valid_tiles or (styles is not None and style not in styles):
                     continue
-                t_core = tmpl[y_start + 6:104, 12:68]
-                t_core_g = cv2.normalize(cv2.cvtColor(t_core, cv2.COLOR_BGR2GRAY), None, 0, 255, cv2.NORM_MINMAX)
-                res = cv2.matchTemplate(c_face_g, t_core_g, cv2.TM_CCOEFF_NORMED)
-                scores[lbl] = float(res.max())
+                src = gcore_btn if has_btn else gcore_plain
+                s = float(cv2.matchTemplate(c_face_g, src, cv2.TM_CCOEFF_NORMED).max())
+                if s > scores.get(lbl, 0.0):
+                    scores[lbl] = s
         else:
-            for lbl, tmpl in self.templates_bgr.items():
-                if lbl not in valid_tiles:
+            for lbl, style, core_btn, core_plain, _gb, _gp in self._cores:
+                if lbl not in valid_tiles or (styles is not None and style not in styles):
                     continue
-                t_core = tmpl[y_start + 6:104, 12:68]
-                res = cv2.matchTemplate(c_face, t_core, cv2.TM_CCOEFF_NORMED)
-                scores[lbl] = float(res.max())
+                src = core_btn if has_btn else core_plain
+                s = float(cv2.matchTemplate(c_face, src, cv2.TM_CCOEFF_NORMED).max())
+                if s > scores.get(lbl, 0.0):
+                    scores[lbl] = s
 
         if not scores:
             return next(iter(valid_tiles)) if valid_tiles else "7z", 0.0
@@ -264,6 +302,27 @@ class TencentGridDetector(Detector):
                 best_lbl = "9s"
 
         return best_lbl, round(float(best_sc), 3)
+
+    def _probe_style(self, crop: np.ndarray) -> Optional[str]:
+        """用一枚代表牌对全部 bank 打分，返回胜出模板的风格（分不足返 None）。
+
+        同风格自配分通常 0.9+，跨风格 <0.65，门槛 0.60 留安全边距；
+        探针错了也无妨——手牌行均分不达标时会全量兜底重扫。
+        """
+        if crop is None or crop.size == 0 or not self._cores:
+            return None
+        face = self.extract_face(crop)
+        hsv = cv2.cvtColor(face, cv2.COLOR_BGR2HSV)
+        is_yellow_btn = (hsv[:40, :, 0] >= 15) & (hsv[:40, :, 0] <= 35) & (hsv[:40, :, 1] > 100)
+        has_btn = (np.sum(is_yellow_btn) > 80)
+        c_face = face[38 if has_btn else 10:110, 6:74]
+        best_style, best_sc = None, 0.0
+        for _lbl, style, core_btn, core_plain, _gb, _gp in self._cores:
+            src = core_btn if has_btn else core_plain
+            s = float(cv2.matchTemplate(c_face, src, cv2.TM_CCOEFF_NORMED).max())
+            if s > best_sc:
+                best_sc, best_style = s, style
+        return best_style if best_sc >= 0.60 else None
 
     def _classify_face_retry(
         self,
@@ -505,7 +564,10 @@ class TencentGridDetector(Detector):
 
         main_box = max(boxes, key=lambda b: b[2])
         bx, by, bw, bh = main_box
-        std_tw = 0.0547 * iw
+        # 牌面宽度：牌高/1.35 是全平台共性几何（腾讯旧版写死 0.0547*iw，
+        # 换平台/换分辨率/发牌动画压扁时张数估计直接崩掉并整行拒识）。
+        face_w = bh / 1.35 if bh >= 40 else 0.0547 * iw
+        std_tw = face_w
         std_bh = std_tw * 1.35
 
         drawn_box = None
@@ -517,39 +579,67 @@ class TencentGridDetector(Detector):
             if 0 <= gap <= std_tw * 1.2 and bot_diff < 20 and last[2] <= std_tw * 1.5:
                 drawn_box = last
 
-        raw_est = bw / std_tw
+        # 张数估计双模型：相邻排布平台（蜀山等）节距≈牌面宽；重叠排布平台
+        # （腾讯）节距≈0.0547*iw。用主块中央一枚代表牌做风格探针路由：探针
+        # 命中腾讯→只走腾讯节距候选（与旧行为完全等价，零回退）；命中其他
+        # 风格→只走相邻候选并把分类限定在该 bank（开销与单平台同级）；探针
+        # 不定→两路候选并集全模板兜底。均分不达标时再全量重扫一次。
+        raw_adj = bw / face_w
+        raw_tec = bw / (0.0547 * iw)
         legal_standing = [1, 4, 7, 10, 13] if drawn_box else [1, 2, 4, 5, 7, 8, 10, 11, 13, 14]
-        cand_counts = sorted(legal_standing, key=lambda c: abs(c - raw_est))[:2]
+        c_adj = sorted(legal_standing, key=lambda c: abs(c - raw_adj))[:2]
+        c_tec = sorted(legal_standing, key=lambda c: abs(c - raw_tec))[:2]
 
-        best_standing_dets: List[Tuple[Rect, str, float]] = []
-        best_standing_mean = -1.0
+        pcx = int(bx + bw / 2)
+        half = max(10, int(face_w * 0.5))
+        probe_crop = image_bgr[by:by + bh, max(0, pcx - half):min(iw, pcx + half)]
+        style = self._probe_style(probe_crop)
+        if style == "tencent":
+            cand_counts, probe_styles = c_tec, {"tencent"}
+        elif style is not None:
+            cand_counts, probe_styles = c_adj, {style}
+        else:
+            cand_counts, probe_styles = list(dict.fromkeys(c_adj + c_tec)), None
 
-        for k in cand_counts:
-            tw = bw / float(k)
-            dets: List[Tuple[Rect, str, float]] = []
-            for i in range(k):
-                x1 = int(round(bx + i * tw))
-                x2 = int(round(bx + (i + 1) * tw))
-                # 逐列垂直自适应锚定：精准锁定该张牌真正的上下边界（抵抗换牌选中浮起、换牌按钮遮挡）
-                col_mask = is_tile[:, x1:x2]
-                row_counts = np.sum(col_mask, axis=1)
-                valid_y = np.where(row_counts > (x2 - x1) * 0.35)[0]
-                expected_h = int((x2 - x1) * 1.35)
-                if len(valid_y) >= 20:
-                    y_bot_c = y_min + valid_y[-1] + 1
-                    y_top_c = max(0, y_bot_c - expected_h)
-                else:
-                    y_bot_c = min(ih, by + bh)
-                    y_top_c = max(0, y_bot_c - expected_h)
+        def _try_counts(cands: List[int], styles):
+            best_dets: List[Tuple[Rect, str, float]] = []
+            best_mean = -1.0
+            for k in cands:
+                tw = bw / float(k)
+                dets: List[Tuple[Rect, str, float]] = []
+                for i in range(k):
+                    x1 = int(round(bx + i * tw))
+                    x2 = int(round(bx + (i + 1) * tw))
+                    # 逐列垂直自适应锚定：精准锁定该张牌真正的上下边界（抵抗换牌选中浮起、换牌按钮遮挡）
+                    col_mask = is_tile[:, x1:x2]
+                    row_counts = np.sum(col_mask, axis=1)
+                    valid_y = np.where(row_counts > (x2 - x1) * 0.35)[0]
+                    expected_h = int((x2 - x1) * 1.35)
+                    if len(valid_y) >= 20:
+                        y_bot_c = y_min + valid_y[-1] + 1
+                        y_top_c = max(0, y_bot_c - expected_h)
+                    else:
+                        y_bot_c = min(ih, by + bh)
+                        y_top_c = max(0, y_bot_c - expected_h)
 
-                c = image_bgr[y_top_c:y_bot_c, x1:x2]
-                lbl, sc = self.classify_tile(c)
-                rect: Rect = (x1, y_top_c, x2 - x1, y_bot_c - y_top_c)
-                dets.append((rect, lbl, sc))
-            mean_sc = float(np.mean([d[2] for d in dets])) if dets else 0.0
-            if mean_sc > best_standing_mean:
-                best_standing_mean = mean_sc
-                best_standing_dets = dets
+                    c = image_bgr[y_top_c:y_bot_c, x1:x2]
+                    lbl, sc = self.classify_tile(c, styles=styles)
+                    rect: Rect = (x1, y_top_c, x2 - x1, y_bot_c - y_top_c)
+                    dets.append((rect, lbl, sc))
+                mean_sc = float(np.mean([d[2] for d in dets])) if dets else 0.0
+                if mean_sc > best_mean:
+                    best_mean = mean_sc
+                    best_dets = dets
+            return best_dets, best_mean
+
+        best_standing_dets, best_standing_mean = _try_counts(cand_counts, probe_styles)
+
+        # 探针路由失误（风格误判/尺度失配致整行低分）→ 全候选全模板重扫一次
+        if best_standing_mean < 0.55 and probe_styles is not None:
+            fb_dets, fb_mean = _try_counts(
+                list(dict.fromkeys(c_adj + c_tec)), None)
+            if fb_mean > best_standing_mean:
+                best_standing_dets, best_standing_mean = fb_dets, fb_mean
 
         all_dets = list(best_standing_dets)
 

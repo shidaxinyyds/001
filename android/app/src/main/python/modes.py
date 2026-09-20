@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 # 与 Dart 端 (lib/overlays/mahjong_overlay.dart) 完全一致的绝对路径。
 # 这是 Android 上该 App 的「外部私有存储 / files」目录，App 进程内的
@@ -48,7 +48,15 @@ _SANMA_REMOVED = [1, 7, 10, 16, 19, 25, 31]
 _TWOP_REMOVED = list(range(9, 27))
 
 MODES: Dict[str, Dict] = {
-    # 1. 川麻血流系列 (占手游 60%+ 流量)
+    # 规则字段说明（供 std 分析器/引擎消费，缺省即关闭）：
+    # - analyzer: "sichuan"=川麻家族引擎（默认）; "std"=通用地方玩法引擎
+    # - seven_pairs / kokushi: 允许七对 / 国士无双胡型
+    # - sequences: 是否允许顺子（转转/碰碰类玩法只能碰杠不能吃）
+    # - need_all_pungs / need_terminals / need_open: 胡牌结构约束（碰碰胡/
+    #   幺九将/必须开口）；need_open 依赖副露可见性，当前为软提示
+    # - fan_wild_per_use: 每用一张赖子加一番（百搭翻倍类）
+    # 血战到底 vs 血流成河的胡牌后走向差异在结算阶段，手牌分析层两者
+    # 规则同构；但血流成河带 4 张红中赖子（112 张），血战为纯 108 张。
     "sc_hz": {
         "name": "血流红中",
         "players": 4,
@@ -57,33 +65,49 @@ MODES: Dict[str, Dict] = {
         "wall": 112,
         "dingque": True,
         "laizi": 33,  # 7z 红中
+        "analyzer": "sichuan",
+        "sequences": True,
+        "seven_pairs": True,
+        "kokushi": False,
     },
     "sc_xz": {
         "name": "川麻·血战到底",
         "players": 4,
-        "available": list(range(27)),  # 0-26 纯万筒条108张
+        "available": list(range(27)),  # 0-26 纯万筒条108张，无字牌无赖子
         "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
         "wall": 108,
         "dingque": True,
         "laizi": None,
+        "analyzer": "sichuan",
+        "sequences": True,
+        "seven_pairs": True,
+        "kokushi": False,
     },
     "sc_xl": {
         "name": "川麻·血流成河",
         "players": 4,
-        "available": list(range(27)),
+        "available": list(range(27)) + [33],  # 血流成河带 4 张红中赖子
         "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
-        "wall": 108,
+        "wall": 112,
         "dingque": True,
-        "laizi": None,
+        "laizi": 33,  # 红中做赖子，连胡到底
+        "analyzer": "sichuan",
+        "sequences": True,
+        "seven_pairs": True,
+        "kokushi": False,
     },
     "gy_zj": {
         "name": "贵阳捉鸡",
         "players": 4,
-        "available": list(range(27)),
+        "available": list(range(27)) + [33],  # 红中为百搭牌（鸡牌在胡后结算阶段，不入手牌分析）
         "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
-        "wall": 108,
+        "wall": 112,
         "dingque": True,
-        "laizi": None,
+        "laizi": 33,
+        "analyzer": "sichuan",
+        "sequences": True,
+        "seven_pairs": True,
+        "kokushi": False,
     },
 
     # 2. 经典大众系列
@@ -95,6 +119,10 @@ MODES: Dict[str, Dict] = {
         "wall": 136,
         "dingque": False,
         "laizi": None,
+        "analyzer": "std",
+        "sequences": True,
+        "seven_pairs": True,
+        "kokushi": True,
     },
     "wh_kk": {
         "name": "武汉开口翻",
@@ -103,7 +131,12 @@ MODES: Dict[str, Dict] = {
         "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
         "wall": 136,
         "dingque": False,
-        "laizi": None,
+        "laizi": 33,  # 痞子（红中）癞子，不可吃碰打出
+        "analyzer": "std",
+        "sequences": True,
+        "seven_pairs": True,
+        "kokushi": True,
+        "need_open": True,  # 必须开口（吃碰/自摸听）才能胡：软提示，见 engine 消费处
     },
     "db_qh": {
         "name": "东北穷胡",
@@ -113,6 +146,11 @@ MODES: Dict[str, Dict] = {
         "wall": 136,
         "dingque": False,
         "laizi": None,
+        "analyzer": "std",
+        "sequences": True,
+        "seven_pairs": True,
+        "kokushi": True,
+        "need_terminals": True,  # 胡牌必须带幺九牌（穷胡严格判定）
     },
     "hz_bd": {
         "name": "杭州百搭",
@@ -121,7 +159,12 @@ MODES: Dict[str, Dict] = {
         "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
         "wall": 136,
         "dingque": False,
-        "laizi": 31,  # 5z 白板
+        "laizi": 31,  # 5z 白板做万能百搭
+        "analyzer": "std",
+        "sequences": True,
+        "seven_pairs": True,
+        "kokushi": True,
+        "fan_wild_per_use": True,  # 每用一张百搭番数翻倍（爆头大番）
     },
 
     # 3. 地方顶流系列
@@ -130,18 +173,29 @@ MODES: Dict[str, Dict] = {
         "players": 4,
         "available": list(range(27)) + [33],
         "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
-        "wall": 100,
+        # 牌库实为 27×4+4=112（部分台版去部分数牌为 100，牌河物理守恒
+        # 按每种 4 张计算不受 wall 影响，wall 仅作剩余牌数显示基准）
+        "wall": 112,
         "dingque": False,
-        "laizi": 33,  # 7z 红中
+        "laizi": 33,  # 红中做鬼牌（任搭），不可打出
+        "analyzer": "std",
+        "sequences": True,
+        "seven_pairs": True,
+        "kokushi": True,
     },
     "cs_zz": {
         "name": "长沙转转麻将",
         "players": 4,
         "available": list(range(27)) + [33],
         "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
-        "wall": 108,
+        "wall": 112,
         "dingque": False,
-        "laizi": 33,  # 7z 红中
+        "laizi": 33,  # 红中赖子；转转胡=碰碰胡，红中必作将
+        "analyzer": "std",
+        "sequences": False,  # 不能吃，只能碰杠
+        "seven_pairs": True,
+        "kokushi": False,
+        "need_all_pungs": True,  # 转转胡结构：全刻子+将
     },
 
     # 向下兼容历史别名
@@ -211,6 +265,16 @@ def is_sichuan_family(key: str = DEFAULT_MODE) -> bool:
 def get_laizi(key: str = DEFAULT_MODE) -> Optional[int]:
     """返回该模式的万能赖子牌 34 型索引（33 为 7z 红中，31 为 5z 白板），None 表示无赖子。"""
     return get_mode(key).get("laizi", None)
+
+
+def get_analyzer(key: str = DEFAULT_MODE) -> str:
+    """返回该玩法应使用的规则引擎标识：
+
+    - "sichuan" 川麻家族（SichuanAnalyzer，28 型 + 定缺）
+    - "std"     通用地方玩法（StdAnalyzer，34 型数据驱动：赖子/全刻/幺九/开口/七对/国士）
+    - ""        历史 2p/3p 等无规则字段的兼容模式（走通用 Shanten 回退）
+    """
+    return str(get_mode(key).get("analyzer", "") or "")
 
 
 def available_set(key: str = DEFAULT_MODE) -> Set[int]:

@@ -32,9 +32,10 @@ def check(name, cond, detail=""):
 def make_fake_image(h=600, w=1100, seed=0):
     rng = np.random.default_rng(seed)
     img = rng.integers(0, 256, (h, w, 3), dtype=np.uint8)
-    # 画两组横排"牌"（仅用于给帧差签名相似的底色，避免首帧被判定为突变）
+    # 画两组横排"牌"（仅用于给帧差签名相似的底色，避免首帧被判定为突变）；
+    # 牌河带放在画面中部（引擎位置先验：牌河中线的需 0.20–0.72×h）
     cv2.rectangle(img, (100, 460), (100 + 13 * 50, 540), (210, 200, 180), -1)
-    cv2.rectangle(img, (100, 100), (100 + 6 * 50, 180), (160, 150, 130), -1)
+    cv2.rectangle(img, (100, 250), (100 + 6 * 50, 330), (160, 150, 130), -1)
     return img
 
 
@@ -49,8 +50,8 @@ def make_fake_engine(n_tiles_hand=14, hand_labels=None):
         rect = (100 + i * 50, 460, 50, 80)  # x, y, w, h
         hand_dets.append((rect, lbl, 0.92))
     discard_dets = [
-        ((100, 100, 50, 80), "2p", 0.90),
-        ((150, 100, 50, 80), "3p", 0.90),
+        ((100, 250, 50, 80), "2p", 0.90),
+        ((150, 250, 50, 80), "3p", 0.90),
     ]
     rows_all = [hand_dets, discard_dets]
 
@@ -61,12 +62,16 @@ def make_fake_engine(n_tiles_hand=14, hand_labels=None):
             self._glyphs = type("G", (), {"nums": {"a": 1}})()
             self._styles = type("S", (), {"tpls": [1]})()
 
-        def detect_all_rows(self, image):
+        def detect_all_rows(self, image, **_kw):
+            # 现行引擎会带 classify/allow_rotation 关键字（定向探测）；桩体忽略即可
             return rows_all
 
         last_detections = rows_all  # 兼容老接口
 
     eng.get_detector = lambda: FakeDetector()  # type: ignore
+    # 牌桌场景门控（_is_mahjong_table）是独立能力，由 eval_base/eval_shushan 用
+    # 真图验证；本测试只测 process() 跨帧稳定性，合成图无桌布特征，固定放行。
+    eng._is_mahjong_table = lambda image: True  # type: ignore
     # 重置所有内部状态
     eng._tile_voter = engine_mod._TileVoter(window=engine_mod.VOTE_WINDOW)
     eng._frame_skipper = engine_mod._FrameSkipper()
@@ -128,12 +133,13 @@ eng._advice_key = None
 check("tile-voter-empty-after-reset",
        len(eng._tile_voter._frames) == 0)
 
-# ---- 3) 同一画面连跑——_consecutive_skips 越来越多，复用上次结果 ----
+# ---- 3) 同一画面连跑——现行引擎已彻底移除帧差跳帧截断（每帧全量识别）----
 print()
-print("[3] 帧差<阈值时跳过")
+print("[3] 帧差不再跳帧：每帧都完整识别")
 eng = make_fake_engine(n_tiles_hand=14)
 img1 = make_fake_image(seed=7)
-# 跑 10 次同一张图，触发帧差跳过
+# 跑 10 次同一张图：引擎设计已改为绝不跳帧（ScreenStreamer 只推刷新帧，
+# 单帧识别仅数十毫秒），因此 frame_skipped 应恒为 False 且结果稳定。
 skipped = 0
 runs = []
 for _ in range(10):
@@ -142,9 +148,9 @@ for _ in range(10):
     if payload.get("frame_skipped"):
         skipped += 1
     runs.append(payload.get("status"))
-check("frame-skip-mostly",
-       skipped >= 4,
-       f"skipped={skipped}/10")
+check("no-frame-skip-by-design",
+       skipped == 0,
+       f"skipped={skipped}/10 (引擎已移除跳帧截断，不应再 skip)")
 
 # ---- 4) reset 后引擎仍能完整跑一次 process ----
 print()
@@ -220,21 +226,25 @@ hand_labels = ["1m","2m","3m","4m","5m","6m","7m",
 hand_dets = [((100 + i * 50, 460, 50, 80), lbl, 0.92) for i, lbl in enumerate(hand_labels)]
 
 class TwoStageDetector:
-    """前 6 帧返回 20 张牌河；第 7 帧开始返回 4 张牌河，触发兜底。"""
+    """前 6 帧返回 20 张牌河；第 7 帧开始返回 4 张牌河，触发兜底。
+
+    牌河标签用 5 种×4 张循环（单种≤ 4 张，符合物理守恒，不被牌池
+    单调/守恒过滤整行否决）；y=250 落在引擎牌河位置先验区 0.20–0.72×h。"""
     def __init__(self):
         self.last_top_score = 0.85
         self.last_screen = (1100, 600)
         self._glyphs = type("G", (), {"nums": {"a": 1}})()
         self._styles = type("S", (), {"tpls": [1]})()
         self.call_count = 0
-    def detect_all_rows(self, image):
+    def detect_all_rows(self, image, **_kw):
         self.call_count += 1
-        # 牌河：20 张 vs 4 张（用单一 mpsz 复用以便 assertion 简单）
+        # 牌河：20 张 vs 4 张（5 种牌×4 张循环，单种不超物理上限）
+        pool5 = ["2p", "3p", "5m", "7s", "9m"]
         if self.call_count <= 6:
-            discard_labels = ["2p"] * 20
+            discard_labels = pool5 * 4
         else:
-            discard_labels = ["2p"] * 4
-        discard_dets = [((100 + i * 50, 100, 50, 80), lbl, 0.92)
+            discard_labels = pool5[:4]
+        discard_dets = [((100 + i * 50, 250, 50, 80), lbl, 0.92)
                         for i, lbl in enumerate(discard_labels)]
         return [hand_dets, discard_dets]
 

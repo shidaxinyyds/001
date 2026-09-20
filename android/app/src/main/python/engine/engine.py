@@ -38,6 +38,7 @@ from modes import (
     is_sichuan_family,
     get_mode,
     get_laizi,
+    get_analyzer,
 )
 
 # 一局中的合法手牌张数：含摸牌、打牌与吃碰杠副露全合法张数
@@ -1482,13 +1483,18 @@ class Engine:
             if len(hand) in hand_sizes(self.mode):
                 raw = self.trainer.calculate_discards()
 
-                if is_sichuan_family(self.mode) and getattr(self.trainer, "sichuan_results", None):
+                _sc = (self.trainer.sichuan_results
+                       if is_sichuan_family(self.mode) else None)
+                _std = (getattr(self.trainer, "std_results", None)
+                        if getattr(self.trainer, "analyzer", "") == "std" else None)
+                _rule_results = _sc or _std
+                if _rule_results:
                     advice = []
-                    for sr in self.trainer.sichuan_results:
+                    for sr in _rule_results:
                         u = sr.get("ukeire", 0)
                         if min_ukeire > 0 and u < min_ukeire:
                             continue
-                        advice.append({
+                        entry = {
                             "tile": sr.get("tile"),
                             "ukeire": int(u),
                             "shanten": sr.get("shanten", 0),
@@ -1497,7 +1503,10 @@ class Engine:
                             "ting_tiles": sr.get("ting_tiles", []),
                             "ting_details": sr.get("ting_details", []),
                             "is_dingque": sr.get("is_dingque", False),
-                        })
+                        }
+                        if "max_fan" in sr:
+                            entry["max_fan"] = sr["max_fan"]
+                        advice.append(entry)
                         if len(advice) >= 6:
                             break
                 elif getattr(self.trainer, "general_results", None):
@@ -2072,6 +2081,30 @@ class Engine:
                         "ting_details": r.get("ting_details", []),
                         "is_dingque": r["is_dingque"],
                     } for r in sc_res[:6]]
+            except Exception:
+                pass
+
+        # 0b. 通用地方玩法（analyzer="std"）：34 型数据驱动引擎（赖子/全刻/幺九/开口）
+        if get_analyzer(mode) == "std":
+            try:
+                from std import StdAnalyzer
+                rules = get_mode(mode)
+                c34 = TileCollection.from_mpsz(hand_mpsz).tiles34
+                if sum(c34) % 3 == 2:
+                    std_res = StdAnalyzer.analyze_discards(
+                        list(c34), rules, sorted(available_set(mode)))
+                    if std_res:
+                        return [{
+                            "tile": r["tile"],
+                            "ukeire": r["ukeire"],
+                            "shanten": r["shanten"],
+                            "ev": r["ev"],
+                            "reason": r["reason"],
+                            "ting_tiles": r["ting_tiles"],
+                            "ting_details": r.get("ting_details", []),
+                            "max_fan": r.get("max_fan", 0),
+                            "is_dingque": False,
+                        } for r in std_res[:6]]
             except Exception:
                 pass
 
@@ -2871,7 +2904,8 @@ class Engine:
 
             # 标记"最优"那张牌（最高 EV 或最高 ukeire），UI 上加"最优"角标
             if advice:
-                if is_sichuan_family(self.mode):
+                if is_sichuan_family(self.mode) or getattr(self.trainer, "analyzer", "") == "std":
+                    # 规则引擎（川麻/std）已按 EV 排序，advice[0] 即最优
                     best = str(advice[0].get("tile") or "")
                 else:
                     top_ukeire = max((a.get('ukeire') or 0) for a in advice)
@@ -2952,8 +2986,14 @@ class Engine:
                     # 普通四川麻将（血战到底/血流成河）：无任何字牌
                     z_counts = []
                 else:
-                    # 其他包含字牌的玩法（东/南/西/北/白/发/中，共7张）
-                    z_counts = [max(0, 4 - (hand_counts_final[i] + disc_counts_out[i])) for i in range(27, 34)]
+                    # 其他包含字牌的玩法（东/南/西/北/白/发/中，共 7 张）：
+                    # 不在本玩法可用集内的字牌（如广东/长沙仅留红中 7z）恒为 0，
+                    # 不得误报成"还剩 4 张"。
+                    z_counts = [
+                        max(0, 4 - (hand_counts_final[i] + disc_counts_out[i]))
+                        if i in avail else 0
+                        for i in range(27, 34)
+                    ]
 
                 remaining_matrix = {
                     "m": [max(0, 4 - (hand_counts_final[i] + disc_counts_out[i])) for i in range(0, 9)],
@@ -3100,7 +3140,37 @@ class Engine:
                             })
                     except Exception:
                         pass
+                elif get_analyzer(self.mode) == "std":
+                    # 通用地方玩法：用 StdAnalyzer 精确推叫口（赖子/全刻/幺九均参与
+                    # 试胡），绝不得回退到无规则的旧 Shanten 口算；带番数供 UI 展示。
+                    try:
+                        from std import StdAnalyzer
+                        rules_td = get_mode(self.mode)
+                        pool_rem_34 = [
+                            max(0, 4 - (hand_counts_final[i] + disc_counts_out[i]))
+                            for i in range(34)
+                        ]
+                        c_td = list(hand_counts_final)
+                        w_dict = StdAnalyzer.find_waits(
+                            c_td, 0, rules_td, sorted(avail), pool_rem_34)
+                        for w_t in sorted(w_dict):
+                            w_str = tiles34_index_to_mpsz(w_t)
+                            c_test = list(c_td)
+                            c_test[w_t] += 1
+                            w_fan, w_names = StdAnalyzer.calc_fan(
+                                c_test, 0, rules_td)
+                            ting_details.append({
+                                "tile": w_str,
+                                "name": tile_to_chinese(w_str),
+                                "remaining": w_dict[w_t],
+                                "is_dead": (w_dict[w_t] == 0),
+                                "fan": w_fan,
+                                "fan_names": w_names,
+                            })
+                    except Exception:
+                        pass
                 else:
+                    # 历史 2p/3p 兼容玩法（无规则字段）：旧向听逐张估口
                     try:
                         h_tc = TileCollection.from_mpsz(hand_mpsz)
 

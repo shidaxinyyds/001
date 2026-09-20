@@ -5,7 +5,7 @@ from .objects.tile_collection import TileCollection
 from .utils.shanten import calculate_shanten
 from .utils.ukeire import calculate_ukeire_ex, calculate_discards_info
 from .utils.convert import tile_to_chinese
-from modes import DEFAULT_MODE, available_set, is_sichuan_family, get_laizi
+from modes import DEFAULT_MODE, available_set, is_sichuan_family, get_laizi, get_mode, get_analyzer
 
 class Trainer:
     def __init__(self, hand: TileCollection, mode: str = DEFAULT_MODE):
@@ -23,6 +23,10 @@ class Trainer:
 
         self.sichuan_results: List[Dict] = []
         self.general_results: List[Dict] = []
+        self.std_results: List[Dict] = []
+        # 玩法引擎路由："sichuan" / "std" / ""（历史回退）
+        self.analyzer: str = get_analyzer(mode)
+        self.rules: Dict = get_mode(mode)
 
     def set_dingque(self, suit: Optional[int]) -> None:
         """设置四川麻将定缺门（0=万, 1=筒, 2=条）。"""
@@ -40,6 +44,13 @@ class Trainer:
             self.meld_counts = list(meld_counts)
 
     def get_shanten(self):
+        if self.analyzer == "std":
+            try:
+                from std import StdAnalyzer
+                return StdAnalyzer.calculate_shanten(
+                    list(self.hand.tiles34), 0, self.rules)
+            except Exception:
+                pass
         if is_sichuan_family(self.mode):
             try:
                 from sichuan import SichuanAnalyzer
@@ -53,6 +64,29 @@ class Trainer:
 
     def calculate_discards(self) -> Dict[Tile, int]:
         """返回 {候选弃牌: 进张数}，进张已按绝张扣减（见 calculate_ukeire_ex）。"""
+        if self.analyzer == "std":
+            try:
+                from std import StdAnalyzer
+                counts = list(self.hand.tiles34)
+                # 牌池物理守恒（34 型）：扣除手牌 + 牌河 + 副露可见量
+                pool_remaining = [0] * 34
+                for i in range(34):
+                    vis = counts[i]
+                    if i < len(self.disc_counts):
+                        vis += self.disc_counts[i]
+                    if i < len(self.meld_counts):
+                        vis += self.meld_counts[i]
+                    pool_remaining[i] = max(0, 4 - vis)
+                self.std_results = StdAnalyzer.analyze_discards(
+                    counts, self.rules, sorted(self.available),
+                    pool_remaining=pool_remaining, fixed_melds=0,
+                )
+                res: Dict[Tile, int] = {}
+                for item in self.std_results:
+                    res[Tile(item["tile"])] = item["ukeire"]
+                return res
+            except Exception:
+                pass
         if is_sichuan_family(self.mode):
             try:
                 from sichuan import SichuanAnalyzer
