@@ -7,6 +7,7 @@ import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:auto_vision/mode_store.dart';
 import 'package:auto_vision/license/license_service.dart';
+import 'package:auto_vision/license/license_status.dart';
 import 'package:auto_vision/overlays/tile_labels.dart';
 import 'package:auto_vision/server.dart';
 
@@ -523,7 +524,13 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     try {
       final st = await LicenseService.instance.ensureUsable();
       if (!mounted) return;
-      final allows = st.allowsUsage;
+      // 悬浮窗跑在独立 Flutter 引擎，shared_preferences 插件在此常未注册，
+      // ensureUsable 会因读不到本地凭证而返回 notActivated——这并非"真未激活"
+      // （用户没通过主闸门根本打不开悬浮窗）。故子窗只对"确凿失效"(到期/被拒)上锁，
+      // 环境异常一律 fail-open；到期兜底交给主闸门（其所在引擎能读凭证，失权即关闭悬浮窗）。
+      final denied = st.status == LicenseStatus.licenseExpired ||
+          st.status == LicenseStatus.refused;
+      final allows = !denied;
       final days = st.remainingDays;
       if (allows != _licenseAllows || days != _licenseDays) {
         setState(() {

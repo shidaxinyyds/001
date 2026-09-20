@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 
 import 'license_service.dart';
 import 'license_status.dart';
@@ -51,6 +52,15 @@ class _LicenseGateState extends State<LicenseGate> {
       st = const LicenseState(LicenseStatus.notActivated);
     }
     if (!mounted) return;
+    // 主闸门所在引擎能读到本地凭证，是到期的权威判定方；一旦失权
+    // （到期/被拒/被拉黑）立即收起悬浮窗，兜住子窗无法自验签的到期场景。
+    if (!st.allowsUsage) {
+      try {
+        if (await FlutterOverlayWindow.isActive()) {
+          await FlutterOverlayWindow.closeOverlay();
+        }
+      } catch (_) {}
+    }
     setState(() {
       _state = st;
       _checking = false;
