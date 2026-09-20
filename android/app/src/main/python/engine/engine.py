@@ -549,9 +549,14 @@ class _HandStabilizer:
         self._recent.clear()
         self.pending = False
         self._empty_streak = 0
+        self._empty_frames = 0
 
     def observe(self, labels, valid_sizes, avail=None) -> str:
-        """喂入本帧手牌行的标签列表，返回应当对外输出的从左到右稳定 mpsz。"""
+        """喂入本帧手牌行的标签列表，返回应当对外输出的从左到右稳定 mpsz。
+
+        空帧宽限：n==0 不再立即清空稳定手牌，而是保留上一稳定值并把
+        _empty_frames 计数交给引擎（由引擎降级为 partial 呈现）；连续
+        EMPTY_GRACE_FRAMES(4) 帧空才真正重置，杜绝单帧漏识别闪"未检测到手牌"。"""
         cnt: Counter = Counter()
         ordered_list = []
         for lab in labels:
@@ -570,8 +575,13 @@ class _HandStabilizer:
         ordered_mpsz = "".join(ordered_list)
 
         if n == 0:
-            self.reset()
-            return ""
+            # 空帧宽限：保留上一稳定手牌，连续 EMPTY_GRACE_FRAMES 帧空才彻底重置
+            self._empty_frames = getattr(self, "_empty_frames", 0) + 1
+            if getattr(self, "_empty_frames", 0) >= 4:
+                self.reset()
+            return self.stable_mpsz
+
+        self._empty_frames = 0
 
         if n not in valid_sizes and n < 4:
             self._empty_streak = getattr(self, "_empty_streak", 0) + 1
@@ -638,7 +648,10 @@ class _HandStabilizer:
         is_count_move = abs(n - hand_len) in (1, 2, 3, 4) and (n in valid_sizes)
         is_tile_swap = (n == hand_len and (n in valid_sizes) and _hand_diff_count(key, getattr(self, "_stable_key", "")) <= 4)
         mode_hits = self._recent.count(key)
-        if is_count_move or is_tile_swap or self._streak >= 1 or mode_hits >= 2:
+        # 注：旧实现的 `self._streak >= 1` 短路使 HAND_CONFIRM_FRAMES=2 共识形同虚设
+        # （任意新牌型首帧即采纳），删除后由"张数切换/换牌/窗口众数"三条快速通道
+        # 保证响应，陌生突变须连续 2 帧一致才采纳，杜绝单帧坏牌型直接上屏。
+        if is_count_move or is_tile_swap or mode_hits >= 2:
             self.stable_mpsz = ordered_mpsz
             self._stable_key = key
             self.pending = False
@@ -1094,6 +1107,11 @@ class Engine:
         self._last_stable_counter: Counter = Counter()
         self._last_stable_n: int = 0
         self._prev_raw_n: int = 0
+        # 阶段检测"命中即清池"的连续帧确认计数器 + 新局指纹跳变检测
+        self._phase_confirm_frames: int = 0
+        self._prev_raw_n_before_clear: int = 0
+        # 单帧识别失败时沿用的上一可信记牌矩阵（stale 呈现，绝不整体清零）
+        self._last_trusted_matrix: Optional[Dict] = None
         # ===== 方向自检（旋转鲁棒性）=====
         # 真机截屏：竖屏手机 + 横屏麻将游戏时，MediaProjection 的 VirtualDisplay
         # 被强制成横屏缓冲，横屏游戏在里面被系统旋转 90° 塞入。结果所有牌都"横过来"，
@@ -1232,6 +1250,9 @@ class Engine:
         self._last_stable_counter = Counter()
         self._last_stable_n = 0
         self._prev_raw_n = 0
+        self._phase_confirm_frames = 0
+        self._prev_raw_n_before_clear = 0
+        self._last_trusted_matrix = None
         self._partial_mpsz = ""
         self._partial_ttl = 0
         self._last_hand_y = None
@@ -2532,6 +2553,44 @@ class Engine:
             else:
                 hand_mpsz = self._hand_stab.observe(raw_labels, hsizes, avail)
 
+            # 稳定器空帧宽限期内（本帧 0 牌但尚保留上帧稳定值）：引擎层降级为 partial 呈现
+            hand_empty_frames = getattr(self._hand_stab, "_empty_frames", 0)
+
+            # ===== 互斥校验接回：同字 >4 判本帧不可信，沿用上一稳定手牌 =====
+            # （_check_dup_explosion 定义后曾被长期弃用；白板刷屏误判一旦进了稳定器
+            # 会直接污染建议与记牌，这里在出口处把整帧判否。）
+            if hand_mpsz and self._check_dup_explosion(hand_mpsz):
+                hand_mpsz = self._stable_hand_mpsz or ""
+                self._hand_stab.pending = True
+                diag_dup_reject = True
+            else:
+                diag_dup_reject = False
+
+            # ===== 新局指纹（旧 river_locked 死锁的对侧保险）=====
+            # 上一帧还确信在手牌区可见 ≥4 张牌，本帧骤减为 0（定缺徽章消失由下方
+            # 阶段检测无门控+两帧确认负责）：连续 2 帧确认已彻底离开对局
+            # （结算/换局/回大厅）→ 清池与副露账本，绝不跨局残留。此路径不清
+            # _match_started 之前的建议缓存以外的稳定器状态，不干扰空帧宽限。
+            if (self._match_started and self._prev_raw_n >= 4 and curr_raw_n == 0):
+                self._prev_raw_n_before_clear += 1
+                if (self._prev_raw_n_before_clear >= 2
+                        and sum(self._monotonic_discards.values()) > 0):
+                    self._monotonic_discards.clear()
+                    self._pending_discards.clear()
+                    self._discard_history.clear()
+                    self._meld_counts_34 = [0] * 34
+                    self._pending_melds_34 = [0] * 34
+                    self._match_started = False
+                    self._last_stable_counter = Counter()
+                    self._last_stable_n = 0
+                    self._last_trusted_matrix = None
+                    self._advice_key = None
+                    self._advice = []
+                    self._prev_raw_n_before_clear = 0
+                    self._prev_raw_n = -1  # 哨兵：复位比较基线，防新局首帧误判 0->n 跳变
+            else:
+                self._prev_raw_n_before_clear = 0
+
             # 手牌行的逐张标签与稳定手牌对齐（避免"显示的牌"和"建议打的牌"对不上）
             if hand_idx is not None and hand_mpsz:
                 voted_rows[hand_idx] = _reconcile_hand_tiles(
@@ -2559,11 +2618,12 @@ class Engine:
                     self._dq_scan_cache = detect_dingque(full_for_preview)
             else:
                 self._dq_scan_cache = (None, None)
-            curr_my_dq, _ = self._dq_scan_cache
-            river_locked = (sum(self._monotonic_discards.values()) > 0 and curr_my_dq is not None)
-            if is_dingque_mode(self.mode) and not river_locked:
-                # 阶段物理特征检测同为全图模板匹配：每 2 帧重检一次。
-                # 弹窗驻留期长达数秒，1 帧滞后无感知；清池操作幂等，照常执行。
+            # ===== 开局前阶段检测：无死锁门控 + 命中需连续帧确认 =====
+            # 旧实现用 river_locked（牌池>0 且定缺徽章存在）反向锁死阶段检测唯一入口：
+            # 血流成河一家定缺后永不打缺 → 牌池永不清 → 换三张/定缺/新局永不识别。
+            # 现在：阶段检测无条件运行（保留 %2 节流）；"命中阶段即清池"改为需连续
+            # ≥2 次检测命中才生效，杜绝单帧误检误清新局牌池。
+            if is_dingque_mode(self.mode):
                 self._phase_scan_tick += 1
                 if self._phase_scan_tick % 2 == 1:
                     swap_p = dq_p = pick_p = False
@@ -2586,9 +2646,13 @@ class Engine:
                 is_swap_phase, is_dq_phase, is_pick_phase = self._phase_cache
                 pick_candidates = list(self._pick_cand_cache)
                 if is_swap_phase or is_dq_phase:
-                    self._monotonic_discards.clear()
-                    self._pending_discards.clear()
-                    self._match_started = False
+                    self._phase_confirm_frames += 1
+                    if self._phase_confirm_frames >= 2:
+                        self._monotonic_discards.clear()
+                        self._pending_discards.clear()
+                        self._match_started = False
+                else:
+                    self._phase_confirm_frames = 0
 
             # 定缺状态判定：
             # 若正处于定缺选门交互中（中央出现三色大圆盘），此时玩家正在选门，尚未敲定，保持 None；
@@ -2775,6 +2839,10 @@ class Engine:
                     pass
 
             status = "waiting" if not getattr(self, "_match_started", False) else "no_tiles"
+            # 空帧宽限期（稳定手牌仍在，仅本帧 0 牌）：降级 partial 呈现，杜绝"未检测到手牌"闪现
+            if (status == "no_tiles" and hand_empty_frames >= 1
+                    and (self._stable_hand_mpsz or self._hand_stab.stable_mpsz)):
+                status = "partial"
             message: str = "等待牌局开始" if status == "waiting" else ""
             if hand is not None:
                 message = "手牌已就绪"
@@ -3018,23 +3086,33 @@ class Engine:
                 max_hist = max(history_lens)
                 # 牌河只增不减；若当前帧少于历史最大值 ≥MIN_DROP_DELTA，视为漏抓
                 if max_hist - current_disc_len >= MIN_DROP_DELTA and max_hist > current_disc_len:
-                    # 选最长历史 disc_mpsz
+                    # 选最长历史 disc_mpsz，但只按逐张差额回补（最多 2 张），绝不整串替换：
+                    # 整串替换会把两帧间真实的出牌抹掉，造成牌河"回退又前进"式漂移
                     best_idx = history_lens.index(max_hist)
                     stable_mpsz = self._discard_history[best_idx]
-                    # 按 mpsz 重新算 disc_counts 与 discard_labels
-                    fallback_labels = []
+                    cur_c: Counter = Counter()
+                    for k in range(0, len(disc_mpsz), 2):
+                        if k + 2 <= len(disc_mpsz):
+                            cur_c[disc_mpsz[k:k + 2]] += 1
+                    fix_c: Counter = Counter()
                     for k in range(0, len(stable_mpsz), 2):
                         if k + 2 <= len(stable_mpsz):
-                            fallback_labels.append(stable_mpsz[k:k + 2])
-                    fc = [0] * 34
+                            fix_c[stable_mpsz[k:k + 2]] += 1
+                    restore = fix_c - cur_c
+                    if sum(restore.values()) > 2:
+                        restore = Counter()  # 差异过大视为历史失真，不回补
+                    fallback_labels = []
+                    for lab, cnt_r in restore.items():
+                        fallback_labels.extend([lab] * cnt_r)
+                    fc = list(disc_counts)
                     for lab in fallback_labels:
                         try:
                             fc[mpsz_to_tile34_index(lab)] += 1
                         except Exception:
                             pass
-                    disc_mpsz_out = stable_mpsz
+                    disc_mpsz_out = disc_mpsz + "".join(fallback_labels)
                     disc_counts_out = fc
-                    discarded_labels_out = fallback_labels
+                    discarded_labels_out = list(discard_labels) + fallback_labels
                     # 用稳定值重算 known / remaining / dead（副露账本不变）
                     known = sum(hand_counts[i] + fc[i] + meld_counts_out[i] for i in avail_list)
                     remaining = max(0, wall_total - known)
@@ -3042,14 +3120,31 @@ class Engine:
             self._discard_history.append(disc_mpsz)
 
             # ---- 全场记牌矩阵面板（含万/筒/条，以及字牌/红中，仅在对局开始后生成）----
+            # 废除"显示级整体清零"：对局中单帧识别失败不再把记牌器/牌河清空，
+            # 而是沿用上一可信矩阵并打 stale 标记（Dart 侧另有去抖+信号中断双重保险）。
+            in_grace = (status == "partial" and hand_empty_frames >= 1)
             if tile_count == 0 or status in ("waiting", "no_tiles") or not hand_mpsz:
-                remaining_matrix = {}
-                disc_mpsz_out = ""
-                disc_counts_out = [0] * 34
-                discarded_labels_out = []
-                remaining = get_mode(self.mode).get("wall", 108)
-                dead = 0
+                if self._last_trusted_matrix is not None and (in_grace or self._match_started):
+                    stale = self._last_trusted_matrix
+                    remaining_matrix = stale.get("matrix") or {}
+                    disc_mpsz_out = stale.get("discards", "")
+                    discarded_labels_out = [lab for lab in _mpsz_to_counter(
+                        disc_mpsz_out).elements()]
+                    remaining = stale.get("remaining", remaining)
+                    dead = stale.get("dead", dead)
+                    # disc_counts_out 沿用本帧（已基于单调池重算，与 stale 牌河同源一致）
+                    diag_stale = True
+                else:
+                    remaining_matrix = {}
+                    disc_mpsz_out = ""
+                    disc_counts_out = [0] * 34
+                    discarded_labels_out = []
+                    remaining = get_mode(self.mode).get("wall", 108)
+                    dead = 0
+                    self._last_trusted_matrix = None
+                    diag_stale = False
             else:
+                diag_stale = False
                 # 重新精准计算当前生效手牌的计数，杜绝 partial 或未归一态导致的 hand_counts 漏计全 4 bug
                 hand_counts_final = [0] * 34
                 for i in range(0, len(hand_mpsz), 2):
@@ -3082,8 +3177,13 @@ class Engine:
                 known = sum(hand_counts_final[i] + disc_counts_out[i] + meld_counts_out[i] for i in avail_list)
                 remaining = max(0, wall_total - known)
                 dead = sum(1 for i in avail_list if hand_counts_final[i] + disc_counts_out[i] + meld_counts_out[i] >= 4)
-
-            # 扩展功能计算：查大叫/查花猪雷达(A)、活牌厚度透视(B)、防点炮雷达(1)、换三张(2)
+                self._last_trusted_matrix = {
+                    "matrix": remaining_matrix,
+                    "discards": disc_mpsz_out,
+                    "discard_count": len(discarded_labels_out),
+                    "remaining": remaining,
+                    "dead": dead,
+                }
             tenpai_alert = None
             swap_advice = None
             defense_radar = []
@@ -3386,6 +3486,9 @@ class Engine:
                     "raw_hand": len(raw_labels),
                     "stab": bool(self._hand_stab.stable_mpsz),
                     "orient": self._orient,
+                    "stale": diag_stale,
+                    "dup_reject": diag_dup_reject,
+                    "empty_frames": hand_empty_frames,
                 },
                 "hand": hand_mpsz,
                 "count": tile_count,

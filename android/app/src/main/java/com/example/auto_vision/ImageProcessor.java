@@ -162,6 +162,11 @@ public class ImageProcessor {
     }
 
     private Timer timer;
+    // 真固定 2s 心跳 Timer：与采集自调度循环完全独立。
+    // 旧心跳只在采集循环路过时顺带发——画面静止/采集线程卡死时一条都发不出，
+    // 悬浮窗无从区分"画面没变"与"链路死了"，永远假显"实时"。
+    private Timer heartbeatTimer;
+    private volatile long lastCaptureTickAt = 0;
 
     // ===== 流水线自诊断 =====
     // 此前所有故障（收不到画面/Python异常/发送失败）都只进 logcat，
@@ -220,6 +225,21 @@ public class ImageProcessor {
 
     public void start() {
         timer = new Timer();
+        lastCaptureTickAt = System.currentTimeMillis();
+        // 真固定 2s 心跳：无论采集循环是否在跑，每 2s 必发一帧状态；
+        // 采集线程自己卡死（超 6s 没路过）时改报 pipeline_stalled。
+        heartbeatTimer = new Timer("heartbeat", true);
+        heartbeatTimer.schedule(new TimerTask() {
+            public void run() {
+                long silent = System.currentTimeMillis() - lastCaptureTickAt;
+                if (silent >= 6000) {
+                    sendHeartbeatJson("pipeline_stalled",
+                        "采集线程已停止响应（静默 " + (silent / 1000) + "s），请停止后重新开始");
+                } else {
+                    heartbeat("capturing");
+                }
+            }
+        }, 2000, 2000);
         // 改为自调度（见 scheduleNextCapture）：固定 period 无法逐帧改间隔，
         // 防封号开启时需要随机抖动间隔，故每帧跑完再排下一帧。
         scheduleNextCapture(0);
@@ -270,6 +290,7 @@ public class ImageProcessor {
 
     // 单帧采集 + 识别（原函数体从 TimerTask.run 抽出，便于自调度复用）。
     private void runCaptureOnce() {
+        lastCaptureTickAt = System.currentTimeMillis();
         if (!busy.compareAndSet(false, true)) {
             return;
         }
@@ -469,6 +490,10 @@ public class ImageProcessor {
             timer.cancel();
             timer = null;
         }
+        if (heartbeatTimer != null) {
+            heartbeatTimer.cancel();
+            heartbeatTimer = null;
+        }
         if (client != null) {
             client.close();
         }
@@ -602,6 +627,17 @@ public class ImageProcessor {
         lastHeartbeatAt = now;
         String json = NetworkClient.statusJson(status, null);
         // 注入采集/处理/发送计数，界面能区分"画面断了"和"识别断了"
+        json = json.substring(0, json.length() - 1)
+                + ",\"frames\":" + framesAcquired
+                + ",\"proc\":" + framesProcessed
+                + ",\"send_fail\":" + sendFailures + "}";
+        sendStatus(json);
+    }
+
+    // 固定心跳 Timer 专用：不受 lastHeartbeatAt 节流（它本身就是 2s 节奏），
+    // 带同样的采集计数，悬浮窗据此区分"画面静止"与"链路死亡"。
+    private void sendHeartbeatJson(String status, String message) {
+        String json = NetworkClient.statusJson(status, message);
         json = json.substring(0, json.length() - 1)
                 + ",\"frames\":" + framesAcquired
                 + ",\"proc\":" + framesProcessed

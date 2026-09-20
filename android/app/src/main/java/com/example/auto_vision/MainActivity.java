@@ -41,8 +41,11 @@ public class MainActivity extends FlutterActivity {
   private MethodChannel channel;
 
   private MediaProjectionManager mMediaProjectionManager;
-  private ScreenStreamer streamer;
-  private ImageProcessor processor;
+  // volatile：streamer/processor 在后台线程（startStream/stopCaptureOnly）读写，
+  // 主线程（onConfigurationChanged）与采帧 Supplier 也在读；非 volatile 时
+  // 后台线程新建的对象可能对其它线程不可见（读到旧引用/半发布对象）。
+  private volatile ScreenStreamer streamer;
+  private volatile ImageProcessor processor;
 
   // 最近一次请求录屏时的屏幕参数，startStream() 重建 ScreenStreamer 时复用
   private int mStreamWidth;
@@ -72,9 +75,11 @@ public class MainActivity extends FlutterActivity {
 
       Runnable toRun = null;
       if (call.method.equals("startProcessing")) {
-        toRun = () -> {
-          result.success(prepareStream());
-        };
+        // prepareStream 内部调用 startActivityForResult/startForegroundService，
+        // 必须在主线程执行；旧实现经 CompletableFuture.runAsync 丢到后台线程，
+        // 属线程违规（部分 ROM 上静默失败/抛异常，表现为"点了开始没反应"）。
+        runOnUiThread(() -> result.success(prepareStream()));
+        return;
       }
       if (call.method.equals("stopProcessing")) {
         toRun = () -> {
@@ -138,6 +143,20 @@ public class MainActivity extends FlutterActivity {
         String key = (aKey instanceof String) ? (String) aKey : "";
         ImageProcessor.setConfig(key, val);
         result.success(0);
+        return;
+      }
+
+      if (call.method.equals("getVersion")) {
+        // 悬浮窗版本徽章：返回真实构建版本（取代旧版硬编码的 "PRO v1.4.5"）。
+        // 不依赖 BuildConfig（AGP 8 默认不生成），走 PackageManager 读 versionName。
+        String vn = "";
+        try {
+          vn = getApplicationContext().getPackageManager()
+              .getPackageInfo(getApplicationContext().getPackageName(), 0)
+              .versionName;
+        } catch (Throwable ignore) {
+        }
+        result.success(vn == null ? "" : vn);
         return;
       }
 
@@ -366,6 +385,9 @@ public class MainActivity extends FlutterActivity {
     // 都会走到这里。此前没有判空，未开始识别就点停止会直接 NPE 崩掉。
     stopCaptureOnly();
     stopService(new Intent(this, MediaProjectionService.class));
+    // 主动停止也上报 stopped 态：悬浮窗据此进入明确“已停止”，
+    // 而不是断流后永远假显“实时分析”。
+    sendCaptureStatus(NetworkClient.statusJson("stopped", "已手动停止识别"));
   }
 
   // 设备最大显示区域：API 30+ 用 getMaximumWindowMetrics（不受本 App

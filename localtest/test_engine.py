@@ -14,6 +14,8 @@ PYROOT = os.path.join(REPO, "android", "app", "src", "main", "python")
 sys.path.insert(0, PYROOT)
 
 from engine.engine import Engine  # noqa: E402
+from engine.engine import _HandStabilizer, _counter_to_mpsz  # noqa: E402
+from collections import Counter  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_SHOT = os.path.join(HERE, "screenshot.jpg")
@@ -60,6 +62,50 @@ def main():
 
     assert ok_hand and ok_count and ok_status and ok_tiles, "ENGINE INTEGRATION FAILED"
     print("\nENGINE INTEGRATION OK")
+    _test_phase2_state_machine()
+
+
+def _test_phase2_state_machine():
+    """阶段 2 状态机纯逻辑断言：空帧宽限 / 互斥校验 / 稳定器 2 帧共识。
+    不依赖真实图像，直接测 _HandStabilizer 与 Engine._check_dup_explosion。"""
+    print("\n=== 阶段 2 状态机断言 ===")
+
+    # 1) 空帧宽限：建立稳定手牌后单帧空不立即清空，连续 4 帧空才重置
+    stab = _HandStabilizer()
+    hand = ["3m", "9m", "1s", "6s", "7s", "9s", "9s",
+            "1p", "3p", "3p", "4p", "4p", "5p"]  # 13 张
+    first = stab.observe(hand, {1, 2, 4, 5, 7, 8, 10, 11, 13, 14})
+    assert first == "".join(hand), f"冷启动首帧未立住稳定手牌: {first!r}"
+    kept = stab.observe([], {1, 2, 4, 5, 7, 8, 10, 11, 13, 14})
+    assert kept == first, f"单帧空应宽限保留稳定手牌，实得 {kept!r}"
+    for _ in range(3):
+        stab.observe([], {1, 2, 4, 5, 7, 8, 10, 11, 13, 14})
+    cleared = stab.observe([], {1, 2, 4, 5, 7, 8, 10, 11, 13, 14})
+    assert cleared == "", f"连续>=4帧空应彻底重置，实得 {cleared!r}"
+    print("[PASS] 空帧宽限：单帧保留稳定手牌，连续4帧空才重置")
+
+    # 2) 2 帧共识：陌生突变牌型首帧不得直接上屏（_streak>=1 短路已删）
+    stab2 = _HandStabilizer()
+    stab2.observe(["1m", "2m", "3m", "4m", "5m", "6m", "7m",
+                   "8m", "9m", "1p", "2p", "3p", "4p"],
+                  {1, 2, 4, 5, 7, 8, 10, 11, 13, 14})
+    # 换成完全不同的 13 张（张数相同、diff>4）：首帧应被拒（返回旧稳定值）
+    new_hand = ["5s", "6s", "7s", "8s", "9s", "1s", "2s",
+                "3s", "4s", "7p", "8p", "9p", "6p"]
+    r = stab2.observe(new_hand, {1, 2, 4, 5, 7, 8, 10, 11, 13, 14})
+    assert r != "".join(new_hand), "陌生大改牌型首帧不应立即采纳（2帧共识失效）"
+    r2 = stab2.observe(new_hand, {1, 2, 4, 5, 7, 8, 10, 11, 13, 14})
+    assert r2 == "".join(new_hand), "连续 2 帧一致后应采纳新牌型"
+    print("[PASS] 稳定器 2 帧共识：陌生大改需连续 2 帧才采纳")
+
+    # 3) 互斥校验 _check_dup_explosion：同字 >4 判 True
+    eng = Engine()
+    assert eng._check_dup_explosion(_counter_to_mpsz(Counter(["5z"] * 5))), "同字5张应判爆屏"
+    assert not eng._check_dup_explosion(_counter_to_mpsz(Counter(["5z"] * 4 + ["1m"] * 4))), "各4张合法"
+    assert not eng._check_dup_explosion(""), "空串不判爆屏"
+    print("[PASS] 互斥校验：同字>4判本帧不可信")
+
+    print("\nPHASE2 STATE MACHINE OK")
 
 
 if __name__ == "__main__":

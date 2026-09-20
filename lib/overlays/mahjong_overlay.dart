@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:auto_vision/mode_store.dart';
+import 'package:auto_vision/channel.dart';
 import 'package:auto_vision/license/license_service.dart';
 import 'package:auto_vision/license/license_status.dart';
 import 'package:auto_vision/overlays/tile_labels.dart';
@@ -471,6 +472,37 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   int _licenseDays = 0;
   Timer? _licenseTimer;
 
+  // ── socket 服务生命周期：旧实现 Server 建完即丢引用，dispose 不关监听，
+  //    关窗重开后旧 State 的监听与新监听共存抢连接丢帧（server.dart 已去 shared）。
+  Server? _server;
+
+  // ── 假活治理：区分"数据帧到了 / 仅 Java 心跳 / 彻底断流 / 采集已停止"。
+  //    旧实现状态条恒显"实时"，采集断流后 UI 永远假活。Java 侧每 2s 必发
+  //    流水线心跳帧，据此把"画面静止"与"链路死亡"分开呈现。
+  DateTime? _lastFrameAt;
+  DateTime? _lastPipelineAt;
+  bool _signalLost = false;
+  bool _projectionStopped = false;
+  Timer? _signalWatchdog;
+
+  // ── 版本徽章：读真实构建版本，取代硬编码 "PRO v1.4.5"（版本漂移误导用户）。
+  String _appVersion = '';
+
+  // ── 清空型帧去抖：waiting/no_tiles/错误态等"清空帧"需连续 ≥2 帧或持续 ~400ms
+  //    才采纳，ok 帧立即上屏；杜绝引擎瞬态坏帧造成文案闪烁。
+  static const Set<String> _kClearStatuses = {
+    'waiting', 'no_tiles', 'py_error', 'decode_error', 'animation',
+  };
+  // Java 采集层流水线状态帧（同一 schema，只当信标，不参与画面数据替换）
+  static const Set<String> _kPipelineStatuses = {
+    'capturing', 'paused_foreground', 'send_error', 'capture_error',
+    'engine_ready', 'start_failed', 'java_error', 'projection_stopped',
+    'pipeline_stalled', 'stopped',
+  };
+  int _pendingClearRun = 0;
+  DateTime? _firstPendingClearAt;
+  Map<String, dynamic>? _pendingClearJson;
+
   @override
   void initState() {
     super.initState();
@@ -481,7 +513,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     // 监听原生层通过本地 socket 发来的每帧分析结果（端口 12345 与 ImageProcessor 发送端一致）。
     // 即便 socket 启动失败也不能让悬浮窗引擎崩溃（否则按钮永远不渲染），因此整体 try/catch 兜底。
     try {
-      Server(
+      _server = Server(
         callback: (data) {
           final json = parseEngineResult(data);
           if (json == null) return;
@@ -494,6 +526,14 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     } catch (e) {
       print("悬浮窗分析服务初始化失败（不影响按钮显示）：$e");
     }
+
+    // 假活看门狗：每 500ms 检查数据帧/心跳到达间隔；Java 固定 2s 心跳下，
+    // 引擎死但采集活 → 心跳仍在（不算中断，避免误报）；彻底断流 >2s → 信号中断。
+    _signalWatchdog =
+        Timer.periodic(const Duration(milliseconds: 500), _checkSignalLost);
+
+    // 版本徽章：从原生 BuildConfig 读真实版本号（失败静默，徽章不渲染）。
+    _loadAppVersion();
 
     // 插件 showOverlay 时把 width/height 当作物理像素使用（未做 dp 转换），
     // 56dp 的按钮在 3 倍密度屏上会被画成 56 像素（约 7mm，几乎看不见）。
@@ -516,8 +556,41 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   @override
   void dispose() {
     _licenseTimer?.cancel();
+    _signalWatchdog?.cancel();
+    // 必须关闭 socket 监听：旧实现泄漏 Server，旧 State 继续抢接 Java 短连接丢帧。
+    _server?.close();
+    _server = null;
     _panelScrollController.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadAppVersion() async {
+    try {
+      final v = await const MethodChannel(CHANNEL_NAME).invokeMethod<String>('getVersion');
+      if (v != null && v.isNotEmpty && mounted) {
+        setState(() => _appVersion = v);
+      }
+    } catch (_) {
+      // 通道不可用时徽章不渲染，绝不再显示假版本号。
+    }
+  }
+
+  void _checkSignalLost(Timer t) {
+    if (!mounted) return;
+    final now = DateTime.now();
+    bool lost;
+    if (_projectionStopped) {
+      lost = true;
+    } else if (_lastFrameAt == null) {
+      lost = false; // 尚未收到过任何帧：保持原"等待/实时"文案，不误报
+    } else {
+      final frameGap = now.difference(_lastFrameAt!).inMilliseconds;
+      final statusGap = _lastPipelineAt == null
+          ? 1 << 40
+          : now.difference(_lastPipelineAt!).inMilliseconds;
+      lost = frameGap > 2000 && statusGap > 2000;
+    }
+    if (lost != _signalLost) setState(() => _signalLost = lost);
   }
 
   Future<void> _refreshLicense() async {
@@ -552,14 +625,79 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   bool _renderScheduled = false;
 
   void _ingestEngineResult(Map<String, dynamic> json) {
-    _pendingJson = json;
-    if (_renderScheduled) return;
-    _applyPendingResult(); // 前沿：立即上屏
-    _renderScheduled = true;
-    Future<void>.delayed(const Duration(milliseconds: 120), () {
-      _renderScheduled = false;
-      if (!mounted) return;
-      if (_pendingJson != null) _applyPendingResult(); // 尾部：应用窗口内最新一帧
+    final status = json['status'];
+    // Java 采集层流水线帧（capturing 心跳等）：只当信标更新，绝不拿它的
+    // 空 hand/advice 覆盖当前画面数据（旧行为会让心跳把建议清空闪现）。
+    if (status is String && _kPipelineStatuses.contains(status)) {
+      _lastPipelineAt = DateTime.now();
+      if (_signalLost && mounted) setState(() => _signalLost = false);
+      if (status == 'projection_stopped' || status == 'stopped' || status == 'start_failed') {
+        if (!_projectionStopped && mounted) {
+          setState(() => _projectionStopped = true);
+        }
+      } else if (_projectionStopped) {
+        if (mounted) setState(() => _projectionStopped = false);
+      }
+      return;
+    }
+    final isClear = status is String && _kClearStatuses.contains(status);
+    if (!isClear) {
+      // ok/partial/dingque/swap/pick 等有数据帧：前沿立即应用，并打断待确认的清空帧
+      _pendingClearRun = 0;
+      _firstPendingClearAt = null;
+      _pendingClearJson = null;
+      _lastFrameAt = DateTime.now();
+      if (_signalLost && mounted) setState(() => _signalLost = false);
+      _pendingJson = json;
+      if (_renderScheduled) return;
+      _applyPendingResult(); // 前沿：立即上屏
+      _renderScheduled = true;
+      Future<void>.delayed(const Duration(milliseconds: 120), () {
+        _renderScheduled = false;
+        if (!mounted) return;
+        if (_pendingJson != null) _applyPendingResult(); // 尾部：应用窗口内最新一帧
+      });
+      return;
+    }
+    // 清空帧去抖：当前正显示好数据 → 首帧仍立即采纳（真离开对局要快速响应），
+    // 但后续同类清空帧必须连续 ≥2 帧或持续 ~400ms 才再次替换画面，
+    // 瞬态坏帧（引擎单帧 waiting/no_tiles）永远到不了屏幕。
+    _pendingClearRun++;
+    _firstPendingClearAt ??= DateTime.now();
+    final last = _pendingJson;
+    final showingGood =
+        last != null && !_kClearStatuses.contains(last['status'] as String? ?? '');
+    final sustained = DateTime.now()
+            .difference(_firstPendingClearAt!)
+            .inMilliseconds >= 400;
+    if (showingGood || _pendingClearRun >= 2 || sustained) {
+      _pendingClearRun = 0;
+      _firstPendingClearAt = null;
+      _pendingClearJson = null;
+      _lastFrameAt = DateTime.now();
+      _pendingJson = json;
+      _applyPendingResult();
+    } else {
+      // 未达采纳条件：暂存，到期由看门狗兜底提交（持续清空说明确实该清）
+      _pendingClearJson = json;
+      _scheduleClearCommit();
+    }
+  }
+
+  bool _clearCommitScheduled = false;
+
+  void _scheduleClearCommit() {
+    if (_clearCommitScheduled) return;
+    _clearCommitScheduled = true;
+    Future<void>.delayed(const Duration(milliseconds: 420), () {
+      _clearCommitScheduled = false;
+      if (!mounted || _pendingClearJson == null) return;
+      _lastFrameAt = DateTime.now();
+      _pendingJson = _pendingClearJson;
+      _pendingClearJson = null;
+      _pendingClearRun = 0;
+      _firstPendingClearAt = null;
+      _applyPendingResult();
     });
   }
 
@@ -621,11 +759,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // 让主界面也能确认"后端确实在识别"，而不是每帧刷屏。
   String _lastSharedKey = '';
 
-  // 弹窗顶部状态条：**恒定**显示「● 实时」。
-  //
-  // 不再切「等待画面 / x.xs 无更新」。原因不只是观感：
-  // 悬浮窗每几百毫秒就收到一帧，3 秒超时判据本身就在临界值附近抖，
-  // 状态条会忽而「实时」忽而「无更新」，用户据此以为识别在断断续续地挂。
+  // 弹窗顶部状态与假活治理：不再恒显"实时"。数据帧与 Java 流水线心跳都断 >2s
+  // → 「信号中断」并灰化数据区；采集被系统/用户停止 → 「采集已停止」。
+  // 旧实现把状态条固定成"实时"只是掩盖断流观感，用户永远不知道链路已死。
 
 
 
@@ -935,6 +1071,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
   // 收起态：胶囊微缩模式（横向微缩条，不遮挡牌局，实时展示听牌/最优打法）
   Widget _miniCapsule() {
+    final bool signalLost = _signalLost || _projectionStopped;
     final shanten = result?['shanten'];
     final int count = ((result?['count'] as num?)?.toInt() ?? 0);
     final String status = (result?['status'] as String?) ?? '';
@@ -1066,10 +1203,14 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             ] else ...[
               Flexible(
                 child: Text(
-                  result?['status'] == 'waiting' ? '等待对局…' : '实时分析…',
+                  _projectionStopped
+                      ? '采集已停止，请重新开始识别'
+                      : (signalLost
+                          ? '信号中断，等待画面…'
+                          : (result?['status'] == 'waiting' ? '等待对局…' : '实时分析…')),
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white38,
+                  style: TextStyle(
+                    color: signalLost ? Colors.white24 : Colors.white38,
                     fontSize: 9.5,
                     decoration: TextDecoration.none,
                   ),
@@ -2323,6 +2464,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       final bool inMatch = status != 'waiting' &&
           status != 'no_tiles' &&
           count >= 4;
+      // 假活/断流信标：采集停止或信号中断，此时灰化数据区（屏上数据已非实时）。
+      final bool signalLost = _signalLost || _projectionStopped;
 
       current = SizedBox.expand(
         child: Stack(
@@ -2399,9 +2542,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                                       ),
                                       borderRadius: BorderRadius.circular(3),
                                     ),
-                                    child: const Text(
-                                      'PRO v1.4.5',
-                                      style: TextStyle(
+                                    child: Text(
+                                      _appVersion.isEmpty
+                                          ? 'PRO'
+                                          : 'PRO v$_appVersion',
+                                      style: const TextStyle(
                                         color: Color(0xFF1E1E1E),
                                         fontSize: 7.5,
                                         fontWeight: FontWeight.w900,
@@ -2477,8 +2622,12 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                 ),
                 const SizedBox(height: 5),
                 // 核心卡片滚动流：全包裹于 SingleChildScrollView，彻底杜绝 RenderFlex overflow
+                // 假活/断流时灰化数据区（降透明度+不可交互误导降至最低），
+                // 让用户一眼看出屏上数据已不是实时。
                 Expanded(
-                  child: SingleChildScrollView(
+                  child: Opacity(
+                    opacity: signalLost ? 0.45 : 1.0,
+                    child: SingleChildScrollView(
                     controller: _panelScrollController,
                     physics: const AlwaysScrollableScrollPhysics(
                       parent: BouncingScrollPhysics(),
@@ -2546,6 +2695,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                         // 底部安全留白：确保可以顺畅滑到最底部且不被右下角缩放手柄遮挡
                         const SizedBox(height: 26),
                       ],
+                    ),
                     ),
                   ),
                 ),

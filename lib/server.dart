@@ -4,6 +4,7 @@ import 'dart:io';
 // 每帧数据格式：8 字节长度前缀（十进制，前补 0）+ 负载（JSON + '\n' + PNG 图片）。
 class Server {
   void Function(List<int>) callback;
+  ServerSocket? _server;
 
   Server({
     required this.callback,
@@ -12,13 +13,17 @@ class Server {
   }) {
     print("分析服务已启动，监听 $host:$port");
     // 监听本机回环地址即可（ImageProcessor 发送到 127.0.0.1），无需监听所有网卡。
-    // shared: true -> SO_REUSEADDR，悬浮窗关闭后重新打开可复用端口，避免 TIME_WAIT 占用。
+    // shared: false —— 端口独占绑定。旧实现 shared:true（SO_REUSEADDR）允许
+    // 新旧两个悬浮窗 State 同时监听同一端口，Java 的短连接被旧监听器抢走，
+    // 造成关窗重开后丢帧。现在残留监听未释放时绑定直接失败报错（可见可诊断），
+    // 绝不再静默抢连接。配合 dispose 里的 close()，正常路径不会占用端口。
     Future<ServerSocket> serverFuture = ServerSocket.bind(
       InternetAddress.loopbackIPv4,
       port,
-      shared: true,
+      shared: false,
     );
     serverFuture.then((ServerSocket server) {
+      _server = server;
       server.listen((Socket socket) {
         try {
           socket.setOption(SocketOption.tcpNoDelay, true);
@@ -80,5 +85,14 @@ class Server {
     }).catchError((e) {
       print("分析服务启动失败：$e");
     });
+  }
+
+  /// 关闭监听（State.dispose 时必须调用）：否则旧 State 的 Server 泄漏，
+  /// 端口被占、后续重开绑定失败或旧监听抢走 Java 侧短连接。
+  void close() {
+    try {
+      _server?.close();
+    } catch (_) {}
+    _server = null;
   }
 }
