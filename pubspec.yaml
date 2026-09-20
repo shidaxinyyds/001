@@ -20,7 +20,9 @@ dependencies:
   # 本地设置与调试状态持久化
   shared_preferences: ^2.2.0
   # 卡密授权：联网激活/续签 + 本地短期凭证 HMAC 验签
-  http: ^1.2.0
+  # 钉死 1.1.0：CI 的 Flutter 3.13 自带 Dart 3.1，而 http ≥1.2 要求 Dart ≥3.2。
+  # 不钉死会在 CI 上 version solving failed（本地新 SDK 感知不到这个坑）。
+  http: 1.1.0
   crypto: ^3.0.3
   # chaquopy:
   #   git:
