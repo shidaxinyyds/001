@@ -148,6 +148,9 @@ class LicenseService {
         pastGraceRefused ||
         (st.status == LicenseStatus.valid && _dueRenew(tk, now));
     if (renewTrigger) {
+      // 悬浮窗等独立引擎拿不到设备指纹（deviceId 为空）：服务端按 device 定位授权，
+      // 空号会被拒（no_device）导致误锁。续签交给主 App 做，这里只信本地验签结果。
+      if (deviceId.isEmpty) return st;
       st = await _tryRenew(tk, st, now);
     }
     return st;

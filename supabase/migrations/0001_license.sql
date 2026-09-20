@@ -48,7 +48,7 @@ create or replace function public.sp_activate(p_code text, p_device text)
 returns jsonb
 language plpgsql
 security definer
-set search_path = public
+set search_path = public, extensions
 as $$
 declare
   v_hash   text := encode(digest(p_code, 'sha256'), 'hex');
@@ -104,7 +104,7 @@ create or replace function public.sp_renew(p_device text, p_token_s bigint)
 returns jsonb
 language plpgsql
 security definer
-set search_path = public
+set search_path = public, extensions
 as $$
 declare
   v_lic record;
@@ -137,5 +137,9 @@ end;
 $$;
 
 -- 供 Edge Function 内部调用（service_role 绕过 RLS）。不暴露给 anon。
+-- 注意：revoke from public 会拿掉包 service_role 在内的一切角色权限（PUBLIC 是
+-- 隐式成员），所以必须紧接着把执行权显式授回 service_role，否则 RPC 直接 42501。
 revoke execute on function public.sp_activate(text, text)         from public, anon, authenticated;
 revoke execute on function public.sp_renew(text, bigint)          from public, anon, authenticated;
+grant  execute on function public.sp_activate(text, text)         to service_role;
+grant  execute on function public.sp_renew(text, bigint)          to service_role;
