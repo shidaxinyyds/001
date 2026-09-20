@@ -63,6 +63,7 @@ def main():
     assert ok_hand and ok_count and ok_status and ok_tiles, "ENGINE INTEGRATION FAILED"
     print("\nENGINE INTEGRATION OK")
     _test_phase2_state_machine()
+    _test_phase3_perf()
 
 
 def _test_phase2_state_machine():
@@ -106,6 +107,62 @@ def _test_phase2_state_machine():
     print("[PASS] 互斥校验：同字>4判本帧不可信")
 
     print("\nPHASE2 STATE MACHINE OK")
+
+
+def _test_phase3_perf():
+    """阶段 3 性能重构纯逻辑断言：向量化帧差与原循环逐块相等；
+    分类快路径的高分早停与内容缓存命中。不依赖真实模板库。"""
+    from engine.engine import (
+        _block_diff_signature, _classify_tile_fast,
+        FRAME_DIFF_BLOCK, _RIVER_ROT_PREF,
+    )
+    print("\n=== 阶段 3 性能断言 ===")
+
+    # 1) 向量化 _block_diff_signature 必须与旧逐块循环逐元素相等（非整除尺寸）
+    def _ref_loop(g, bh):
+        h, w = g.shape[:2]
+        rows = max(1, h // bh)
+        cols = max(1, w // bh)
+        sig = np.zeros((rows * cols,), dtype=np.float32)
+        for r in range(rows):
+            for c in range(cols):
+                patch = g[r * bh:(r + 1) * bh, c * bh:(c + 1) * bh]
+                sig[r * cols + c] = float(patch.mean()) if patch.size else 0.0
+        return sig
+
+    rng = np.random.default_rng(7)
+    img = rng.integers(0, 256, size=(100, 140), dtype=np.uint8)
+    vec = _block_diff_signature(img)
+    ref = _ref_loop(img, FRAME_DIFF_BLOCK)
+    assert vec.shape == ref.shape and np.allclose(vec, ref), "向量化帧差与循环不等价"
+    # 极小图（小于一个块）走兜底循环，仍等价
+    tiny = rng.integers(0, 256, size=(10, 10), dtype=np.uint8)
+    assert np.allclose(_block_diff_signature(tiny), _ref_loop(tiny, FRAME_DIFF_BLOCK))
+    print("[PASS] 向量化帧差与旧循环逐块相等（含非整除/极小图）")
+
+    # 2) _classify_tile_fast：高分首旋转即早停（1 次分类）+ 同切片命中缓存（第 2 次 0 次分类）
+    class _StubDetector:
+        def __init__(self):
+            self.calls = 0
+        def _probe_style(self, crop):
+            return "tencent"
+        def classify_tile(self, crop, avail=None, styles=None):
+            self.calls += 1
+            return ("1m", 0.95)
+
+    det = _StubDetector()
+    crop = rng.integers(0, 256, size=(30, 24, 3), dtype=np.uint8)
+    avail = {0}  # 1m 的 tile34 索引
+    pref = _RIVER_ROT_PREF["bottom"]
+    cache = {}
+    lbl, sc = _classify_tile_fast(det, crop, avail, pref, cache)
+    assert lbl == "1m" and sc >= 0.9, f"分类快路径结果异常: {lbl},{sc}"
+    assert det.calls == 1, f"高分应早停只分类1次，实得 {det.calls}"
+    _classify_tile_fast(det, crop, avail, pref, cache)
+    assert det.calls == 1, f"同切片应命中缓存不再分类，实得 {det.calls}"
+    print("[PASS] 分类快路径：高分早停 + 内容缓存命中")
+
+    print("\nPHASE3 PERF OK")
 
 
 if __name__ == "__main__":

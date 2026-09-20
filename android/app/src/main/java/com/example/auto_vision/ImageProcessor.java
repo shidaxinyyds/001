@@ -626,11 +626,12 @@ public class ImageProcessor {
         }
         lastHeartbeatAt = now;
         String json = NetworkClient.statusJson(status, null);
-        // 注入采集/处理/发送计数，界面能区分"画面断了"和"识别断了"
+        // 注入采集/处理/发送计数，界面能区分"画面断了"和"识别断了"。
+        // send_fail 取异步 writer 线程累计的真实 socket 失败数（send() 已改非阻塞入队）。
         json = json.substring(0, json.length() - 1)
                 + ",\"frames\":" + framesAcquired
                 + ",\"proc\":" + framesProcessed
-                + ",\"send_fail\":" + sendFailures + "}";
+                + ",\"send_fail\":" + client.getSendErrors() + "}";
         sendStatus(json);
     }
 
@@ -641,7 +642,7 @@ public class ImageProcessor {
         json = json.substring(0, json.length() - 1)
                 + ",\"frames\":" + framesAcquired
                 + ",\"proc\":" + framesProcessed
-                + ",\"send_fail\":" + sendFailures + "}";
+                + ",\"send_fail\":" + client.getSendErrors() + "}";
         sendStatus(json);
     }
 

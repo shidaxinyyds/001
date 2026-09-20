@@ -77,6 +77,12 @@ FRAME_DIFF_THRESHOLD = 2.0
 # 帧差块边长（像素，工作分辨率上）。32 块 = 256 块覆盖整屏，约每块 12x12 work px。
 FRAME_DIFF_BLOCK = 32
 
+# 智能跳帧阈值（块均值 L1 距离）：低于此值视为画面冻结。
+# 静止画面每块噪声极小、求和后仍很低；任何出牌/摸牌/换 UI 都会让牌河或手牌区
+# 突变，求和 diff 远超此值。取值刻意保守——宁可不跳也不错跳，避免旧版本"跳到
+# 死在旧建议"的回归；且仅在手牌已稳定、稳定器无待确认变化的对局静默期才启用。
+FRAME_SKIP_DIFF_THRESH = 3.0
+
 # 突变帧检测：本帧 diff 与最近 N 帧 diff 均值的比值，若超过该倍数视为"动画中"
 # （如吃碰杠的牌移动动画），整帧丢弃（不做投票也不出结果）。
 MOTION_SPIKE_RATIO = 3.0
@@ -230,6 +236,13 @@ def _block_diff_signature(work_gray: np.ndarray) -> float:
     # 计算行块数与列块数；图小则整图退化为一块也行
     rows = max(1, h // bh)
     cols = max(1, w // bh)
+    # 向量化：正常尺寸（>= 一个块）时一次 reshape+mean 完成全部块均值，
+    # 消除旧实现每帧 rows*cols（~500+）次 Python patch.mean 循环解释器开销。
+    if h >= bh and w >= bh:
+        block = np.ascontiguousarray(work_gray[:rows * bh, :cols * bh])
+        sig = block.reshape(rows, bh, cols, bh).mean(axis=(1, 3))
+        return sig.ravel().astype(np.float32)
+    # 极小图（罕见，仅兜底路径）退回逐块循环，保持与原实现一致的部分块语义。
     sig = np.zeros((rows * cols,), dtype=np.float32)
     for r in range(rows):
         for c in range(cols):
@@ -867,6 +880,89 @@ def infer_opponents_from_discards(disc_counts: List[int]) -> Tuple[List[int], Li
         return [], []
 
 
+# 各分区牌河/副露的优先旋转顺序：把最可能朝向的放前面，配合高分早停，
+# 使常见朝向一枪命中（省掉其余旋转的全 bank 扫描），罕见朝向仍会回退尝试。
+# 输出仍等价于"逐旋转取 max"：早停仅在已高度自信（自配 bank 通常 0.9+）时触发。
+_RIVER_ROT_PREF = {
+    "bottom": (None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE),
+    "top":    (None, cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.ROTATE_90_CLOCKWISE),
+    "left":   (cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.ROTATE_90_CLOCKWISE, None),
+    "right":  (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE, None),
+}
+_RIVER_CONFIDENT = 0.85   # 达到此分即早停
+
+
+def _tile_content_key(tile_crop: np.ndarray):
+    """切片内容指纹（8x8 缩略 hash）：牌河未变时同一切片命中缓存 → 零分类。"""
+    try:
+        if tile_crop is None or tile_crop.size == 0:
+            return None
+        small = cv2.resize(tile_crop, (8, 8), interpolation=cv2.INTER_AREA)
+        return hash((small.shape, small.tobytes()))
+    except Exception:
+        return None
+
+
+def _probe_styles(detector, cur: np.ndarray):
+    """探测代表牌胜出的模板风格，返回限制 classify_tile 扫描的 styles 集合；
+    探测不可用或不确定时返回 None（= 全量扫描）。"""
+    if not hasattr(detector, "_probe_style"):
+        return None
+    try:
+        st = detector._probe_style(cur)
+        return {st} if st else None
+    except Exception:
+        return None
+
+
+def _classify_tile_fast(detector, tile_crop, avail, pref_rots, cache):
+    """带风格探针 + 高分早停 + 内容缓存的单张分类。
+
+    与"3 旋转 × 全 104 bank 取 max"输出等价（早停只在自信时触发，低分兜底重扫），
+    但常见路径把 104 次/张降到单 bank（~34）且多数牌一旋转即止；牌河签名不变时
+    命中内容缓存直接零分类。返回 (label, score)，label 保证在 avail 内否则 None。
+    """
+    key = _tile_content_key(tile_crop)
+    if key is not None and key in cache:
+        return cache[key]
+
+    best_lbl, best_sc = None, 0.0
+    for r in pref_rots:
+        cur = tile_crop if r is None else cv2.rotate(tile_crop, r)
+        styles = _probe_styles(detector, cur)
+        if hasattr(detector, "classify_tile"):
+            lbl, sc = detector.classify_tile(cur, avail=avail, styles=styles)
+        else:
+            lbl, sc = None, 0.0
+        try:
+            if lbl and mpsz_to_tile34_index(lbl) in avail and sc > best_sc:
+                best_sc, best_lbl = sc, lbl
+        except Exception:
+            pass
+        if best_sc >= _RIVER_CONFIDENT:
+            break
+
+    # 探针路由失误致全低分（本就低于门槛会被丢弃）→ 全量 bank 兜底重扫一次
+    if best_sc < 0.42 and hasattr(detector, "classify_tile"):
+        for r in pref_rots:
+            cur = tile_crop if r is None else cv2.rotate(tile_crop, r)
+            lbl, sc = detector.classify_tile(cur, avail=avail, styles=None)
+            try:
+                if lbl and mpsz_to_tile34_index(lbl) in avail and sc > best_sc:
+                    best_sc, best_lbl = sc, lbl
+            except Exception:
+                pass
+            if best_sc >= _RIVER_CONFIDENT:
+                break
+
+    result = (best_lbl, best_sc)
+    if key is not None:
+        if len(cache) >= 4096:
+            cache.clear()
+        cache[key] = result
+    return result
+
+
 def detect_river_discards(image: np.ndarray, detector, mode: str = "4p", hand_row=None) -> List[str]:
     """高精度牌桌弃牌检测：严格排除中央骰子盒、倒计时、房间名及头像，
     支持多牌相连自适应切片与多角度归一化，精准提取全场四方牌河弃牌。"""
@@ -876,6 +972,14 @@ def detect_river_discards(image: np.ndarray, detector, mode: str = "4p", hand_ro
         ih, iw = image.shape[:2]
         avail = available_set(mode)
         raw_discards = []
+        # 分类缓存挂在 detector 上跨帧复用（牌河未变时命中即零分类）。
+        river_cache = getattr(detector, "_river_cls_cache", None)
+        if river_cache is None:
+            river_cache = {}
+            try:
+                detector._river_cls_cache = river_cache
+            except Exception:
+                pass
 
         # 四方牌河扫描区（避开中央指南针/骰子盒与外围UI）：
         zones = [
@@ -931,20 +1035,10 @@ def detect_river_discards(image: np.ndarray, detector, mode: str = "4p", hand_ro
                 for sx, sy, sw, sh, tile_crop in sub_crops:
                     if tile_crop.size == 0:
                         continue
-                    rots = [None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE]
-                    best_lbl, best_sc = None, 0.0
-
-                    for r in rots:
-                        cur = tile_crop if r is None else cv2.rotate(tile_crop, r)
-                        if hasattr(detector, "classify_tile"):
-                            lbl, sc = detector.classify_tile(cur, avail=avail)
-                        else:
-                            lbl, sc = None, 0.0
-                        try:
-                            if lbl and mpsz_to_tile34_index(lbl) in avail and sc > best_sc:
-                                best_sc, best_lbl = sc, lbl
-                        except Exception:
-                            pass
+                    pref = _RIVER_ROT_PREF.get(
+                        zname, (None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE))
+                    best_lbl, best_sc = _classify_tile_fast(
+                        detector, tile_crop, avail, pref, river_cache)
 
                     # 牌河弃牌置信度门槛：0.42
                     if best_lbl and best_sc >= 0.42:
@@ -1022,9 +1116,13 @@ def detect_player_melds(image: np.ndarray, detector, mode: str = "sc_hz", hand_r
                         t = cv2.rotate(t, rot)
 
                     best_lbl, best_sc = None, 0.0
-                    # 1. 分类器
+                    # 1. 分类器（副露区已按分区单向旋转，再用风格探针把全 104 bank 降到单 bank）
                     if hasattr(detector, "classify_tile"):
-                        lbl, sc = detector.classify_tile(t, avail=avail)
+                        styles = _probe_styles(detector, t)
+                        lbl, sc = detector.classify_tile(t, avail=avail, styles=styles)
+                        if not (lbl and mpsz_to_tile34_index(lbl) in avail) and styles is not None:
+                            # 探针失误致低分 → 全量 bank 兜底重扫一次
+                            lbl, sc = detector.classify_tile(t, avail=avail, styles=None)
                         if lbl and mpsz_to_tile34_index(lbl) in avail:
                             best_lbl, best_sc = lbl, sc
                     # 2. 紧凑模板匹配补充（针对俯视平躺牌）
@@ -1092,6 +1190,8 @@ class Engine:
         self._prev_mode: str = ""
         # 给主界面"知道什么时候画面没动"的提示用
         self._consecutive_skips: int = 0
+        # 本帧帧差（在 process 每帧重算，供跳帧决策与分阶段诊断读取）
+        self._cur_frame_diff: float = float("inf")
         # 启动帧计数：首 WARMUP_FRAMES 帧走保守策略（参见 WARMUP_FRAMES 注释），
         # 避免 _MotionGuard 历史为空导致动画过渡帧漏过。
         self._warmup_left: int = WARMUP_FRAMES
@@ -1190,6 +1290,9 @@ class Engine:
         # 单帧耗时诊断：最近 30 帧滚动窗口，每 60 帧打印一次均值/峰值
         self._proc_ms: deque = deque(maxlen=30)
         self._proc_frames: int = 0
+        # 分阶段耗时滚动窗口（decode/detect/river/advice）：每 20 帧输出一行
+        # [perf] 并塞进 diag，悬浮窗诊断行直接可见哪一段是瓶颈。
+        self._perf_ms = {k: deque(maxlen=20) for k in ("decode", "detect", "river", "advice")}
 
     def _is_mahjong_table(self, image: np.ndarray) -> bool:
         """检测当前画面是否为真实的麻将牌桌对局场景（排除大厅/主菜单/结算界面/加载画面）。
@@ -1701,6 +1804,7 @@ class Engine:
 
     def process_bytes(self, image_data) -> Optional[EngineResult]:
         _t0 = time.time()
+        _td = _t0
         try:
             arr = _to_uint8_buffer(image_data)
             image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -1711,20 +1815,27 @@ class Engine:
             # 进入 cv2 前再用纯 numpy 校验一次，避免 C 层段错误闪退。
             if not _is_valid_image(image):
                 return _error_result("decode_error", "解码成功但图像数据非法，已安全跳过")
+            try:
+                self._perf_ms["decode"].append((time.time() - _td) * 1000.0)
+            except Exception:
+                pass
             return self.process(image)
         except Exception as e:
             traceback.print_exc()
             return _error_result("py_error", f"process_bytes 异常: {e}")
         finally:
-            # 单帧耗时诊断：真机上"建议出得慢"时凭此日志定位是识别慢还是节流未生效，
-            # 每 60 帧打印一次最近 30 帧的均值/峰值（logcat 可搜 [perf]）。
+            # 单帧耗时诊断：真机上"建议出得慢"时凭此日志定位哪一段是瓶颈，
+            # 每 20 帧打印一行总数 + 分阶段 avg/max（logcat 可搜 [perf]）。
             try:
                 self._proc_ms.append((time.time() - _t0) * 1000.0)
                 self._proc_frames += 1
-                if self._proc_frames % 60 == 0 and self._proc_ms:
+                if self._proc_frames % 20 == 0 and self._proc_ms:
                     _ms = list(self._proc_ms)
+                    _st = self._perf_snapshot()
+                    _brk = " ".join(
+                        f"{k}={v['avg']:.0f}/{v['max']:.0f}ms" for k, v in _st.items())
                     print(f"[perf] process avg={sum(_ms) / len(_ms):.0f}ms "
-                          f"max={max(_ms):.0f}ms (last {len(_ms)} frames)")
+                          f"max={max(_ms):.0f}ms (last {len(_ms)}f) | {_brk}")
             except Exception:
                 pass
 
@@ -1745,6 +1856,21 @@ class Engine:
         for t in tiles:
             counts[t] = counts.get(t, 0) + 1
         return any(c > MAX_DUP_PER_TILE for c in counts.values())
+
+    def _perf_snapshot(self) -> Dict[str, Dict[str, float]]:
+        """把各阶段滚动窗口汇成 {stage: {avg, max}}，供 diag 与 logcat [perf] 共用。"""
+        out: Dict[str, Dict[str, float]] = {}
+        try:
+            for k, dq in self._perf_ms.items():
+                if dq:
+                    vals = list(dq)
+                    out[k] = {
+                        "avg": round(sum(vals) / len(vals), 1),
+                        "max": round(max(vals), 1),
+                    }
+        except Exception:
+            pass
+        return out
 
     def _build_skip_result(self, image: CVImage, prev_payload: str) -> EngineResult:
         """画面无变化时复用上一帧结果，但保持 EngineResult 的合约。"""
@@ -2408,10 +2534,9 @@ class Engine:
             except Exception:
                 diff = float("inf")  # 帧差算不出来就当不动也跑完整识别
 
-            # 彻底移除 _FrameSkipper 帧差跳帧截断：
-            # Android 端 ScreenStreamer 仅在画面刷新时推送新帧，且单帧完整识别仅需数十毫秒。
-            # 跳帧会导致摸打阶段界面死锁在开局旧建议（如换三张）并带来秒级滞后，因此强制每帧均执行完整推演，实现毫秒级跟随。
-            self._consecutive_skips = 0
+            # 帧差 diff 已在上方算出；跳帧决策延后到玩法 reload 与 detector 就绪
+            # 之后再判（见下方“智能跳帧”块），确保玩法切换能即时生效、跳帧只发生在牌桌静默帧。
+            self._cur_frame_diff = diff
 
             # ===== 动画突变帧检测（记录 diff，交由稳定器平滑，不再丢弃截断） =====
             # 注：过往版本在此直接丢弃 spike 帧并返回 animation 错误，导致换牌/定缺/选牌
@@ -2447,15 +2572,36 @@ class Engine:
                 print("No templates available")
                 return _error_result("py_error", "识别器初始化失败（模板库为空）")
 
+            # ===== 智能跳帧（已恢复，语义安全） =====
+            # 仅当同时满足全部前提才复用上一 payload：已过 warmup、有缓存、画面冻结
+            # （diff < 阈值）、本局已开始且手牌已稳定（_stable_hand_count>0）、稳定器无
+            # 待确认变化（_hand_stab.pending=False）。任一不满足都强制完整识别。
+            # 这样跳帧只会发生在“牌桌静默、建议已定”的帧上，杜绝旧版本跳帧死锁在开局
+            # 旧建议的回归；frame_skipped 如实置位，让 Java 的 25/80ms 动态采集节奏
+            # 真正生效（静默期降频采集，端到端省 CPU）。
+            if (
+                self._warmup_left <= 0
+                and self._frame_skipper.cached is not None
+                and self._cur_frame_diff < FRAME_SKIP_DIFF_THRESH
+                and getattr(self, "_match_started", False)
+                and self._stable_hand_count > 0
+                and not self._hand_stab.pending
+            ):
+                self._consecutive_skips += 1
+                return self._build_skip_result(image, self._frame_skipper.cached)
+            self._consecutive_skips = 0
+
             # 取「所有牌行」（含各家牌河），不再只取手牌行。
             # 复用方向探测/快路径已经算好的结果，避免同帧重复检测。
             # 方向已由 _apply_orientation 锁定，也不需要再让识别器
             # 内部做旋转重试（每次重试都是一次完整检测，很贵）。
+            _t_detect = time.time()
             if self._cached_rows is not None:
                 rows = self._cached_rows
                 self._cached_rows = None
             else:
                 rows = detector.detect_all_rows(image, allow_rotation=False)
+            self._perf_ms["detect"].append((time.time() - _t_detect) * 1000.0)
 
             # 置信过滤 + 牌形降权（低置信牌直接丢弃，宁可不识别也不臆测）。
             #
@@ -2705,6 +2851,7 @@ class Engine:
                                 pass
 
                 # 融合牌桌中央区域四方牌河的多角度弃牌检测（仅在已识别出有效手牌时提取，杜绝非对局/大厅/未开局误报）
+                _t_river = time.time()
                 if hand_row and (len(hand_row) >= 4 or len(hand_mpsz) >= 4):
                     try:
                         central_discards = detect_river_discards(image, self._detector, mode=self.mode, hand_row=hand_row)
@@ -2734,6 +2881,7 @@ class Engine:
                                 self._pending_melds_34[i] = self._meld_counts_34[i]
                     except Exception:
                         pass
+                self._perf_ms["river"].append((time.time() - _t_river) * 1000.0)
 
             curr_cnt = _mpsz_to_counter(hand_mpsz) if hand_mpsz else Counter()
             curr_n = sum(curr_cnt.values())
@@ -2977,6 +3125,7 @@ class Engine:
             elif hand is not None and not is_swap_phase and not is_pick_phase:
                 tile_count = len(hand)
                 status = "ok"
+                _t_advice = time.time()
                 commentary = self.update_trainer(hand)
                 if is_sichuan_family(self.mode) and self.trainer is not None:
                     if dingque_suit is not None:
@@ -2984,6 +3133,7 @@ class Engine:
                     if opponent_dingque_suits:
                         self.trainer.set_opponent_dingque(opponent_dingque_suits)
                 shanten, advice = self.build_advice(hand, disc_counts, meld_counts=self._meld_counts_34)
+                self._perf_ms["advice"].append((time.time() - _t_advice) * 1000.0)
                 self._stable_hand_mpsz = hand_mpsz
                 self._stable_hand_count = tile_count
                 self._partial_mpsz = ""
@@ -3489,6 +3639,9 @@ class Engine:
                     "stale": diag_stale,
                     "dup_reject": diag_dup_reject,
                     "empty_frames": hand_empty_frames,
+                    # 分阶段耗时（ms）：decode/detect/river/advice 各自 avg/max，
+                    # 悬浮窗诊断行直接可见当前瓶颈段（跳帧帧不重跑，值不变）。
+                    "perf": self._perf_snapshot(),
                 },
                 "hand": hand_mpsz,
                 "count": tile_count,
@@ -3543,8 +3696,6 @@ class Engine:
                 result=payload,
                 stage=None,
             )
-            print(result)
-            print(f"Processed in {time.time() - start_time}")
             return res
         except Exception as e:
             traceback.print_exc()
