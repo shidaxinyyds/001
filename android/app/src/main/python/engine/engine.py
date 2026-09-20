@@ -1153,6 +1153,20 @@ class Engine:
         self._river_saved: int = 0
         # YOLO 影子对比实例：None=未创建，False=创建失败（不再重试），对象=可用
         self._yolo_shadow = None
+        # ===== 全图辅助检测节流（响应提速）=====
+        # 定缺徽章 / 对手徽章 / 开局阶段物理特征都是"局中几乎不变"的场景特征，
+        # 旧实现每帧（25~80ms 一帧）都跑一遍全图检测，挤占主识别链路 CPU，
+        # 表现为建议出得慢。节流后：每 N 帧重检一次，期间直接复用缓存值。
+        self._dq_scan_tick: int = 0
+        self._dq_scan_cache: Tuple[Optional[int], Optional[str]] = (None, None)
+        self._opdq_scan_tick: int = 0
+        self._opdq_cache: List[int] = []
+        self._phase_scan_tick: int = 0
+        self._phase_cache: Tuple[bool, bool, bool] = (False, False, False)
+        self._pick_cand_cache: List[str] = []
+        # 单帧耗时诊断：最近 30 帧滚动窗口，每 60 帧打印一次均值/峰值
+        self._proc_ms: deque = deque(maxlen=30)
+        self._proc_frames: int = 0
 
     def _is_mahjong_table(self, image: np.ndarray) -> bool:
         """检测当前画面是否为真实的麻将牌桌对局场景（排除大厅/主菜单/结算界面/加载画面）。
@@ -1658,6 +1672,7 @@ class Engine:
             self._dingque_override = None
 
     def process_bytes(self, image_data) -> Optional[EngineResult]:
+        _t0 = time.time()
         try:
             arr = _to_uint8_buffer(image_data)
             image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -1672,6 +1687,18 @@ class Engine:
         except Exception as e:
             traceback.print_exc()
             return _error_result("py_error", f"process_bytes 异常: {e}")
+        finally:
+            # 单帧耗时诊断：真机上"建议出得慢"时凭此日志定位是识别慢还是节流未生效，
+            # 每 60 帧打印一次最近 30 帧的均值/峰值（logcat 可搜 [perf]）。
+            try:
+                self._proc_ms.append((time.time() - _t0) * 1000.0)
+                self._proc_frames += 1
+                if self._proc_frames % 60 == 0 and self._proc_ms:
+                    _ms = list(self._proc_ms)
+                    print(f"[perf] process avg={sum(_ms) / len(_ms):.0f}ms "
+                          f"max={max(_ms):.0f}ms (last {len(_ms)} frames)")
+            except Exception:
+                pass
 
     def _check_dup_explosion(self, mpsz: str) -> bool:
         """互斥校验：返回 True 表示这手牌"同字刷屏"，必是识别错乱。
@@ -2510,28 +2537,45 @@ class Engine:
             # 真实定缺/换牌阶段铁证：全场无确认定缺徽章（尚未敲定选门），且检测到定缺三色色盘或金色换牌按钮；
             # 局中防护：当本局已有确凿弃牌且已有确认定缺徽章时，认定处于局中，屏蔽误触清空；
             # 但若进入真实新对局开局（全场无定缺徽章且出现定缺/换牌物理特征），立即重置旧局残留牌池。
-            curr_my_dq, _ = detect_dingque(full_for_preview)
+            # 定缺徽章节流：徽章一局至多变一次，非川麻玩法更是没有定缺概念——
+            # 旧实现每帧无条件全图检测（含 std 六款），纯烧 CPU 拖慢主链路响应。
+            # 现在：非川麻直接 None；川麻每 4 帧重检一次，期间复用缓存。
+            if is_dingque_mode(self.mode):
+                self._dq_scan_tick += 1
+                if self._dq_scan_tick % 4 == 1:
+                    self._dq_scan_cache = detect_dingque(full_for_preview)
+            else:
+                self._dq_scan_cache = (None, None)
+            curr_my_dq, _ = self._dq_scan_cache
             river_locked = (sum(self._monotonic_discards.values()) > 0 and curr_my_dq is not None)
             if is_dingque_mode(self.mode) and not river_locked:
-                # 1. 优先检测换三张阶段（右侧金色换牌大圆按钮 / 过按钮）
-                if hasattr(detector, "is_swap_phase") and detector.is_swap_phase(full_for_preview):
-                    is_swap_phase = True
+                # 阶段物理特征检测同为全图模板匹配：每 2 帧重检一次。
+                # 弹窗驻留期长达数秒，1 帧滞后无感知；清池操作幂等，照常执行。
+                self._phase_scan_tick += 1
+                if self._phase_scan_tick % 2 == 1:
+                    swap_p = dq_p = pick_p = False
+                    cands: List[str] = []
+                    # 1. 优先检测换三张阶段（右侧金色换牌大圆按钮 / 过按钮）
+                    if hasattr(detector, "is_swap_phase") and detector.is_swap_phase(full_for_preview):
+                        swap_p = True
+                    # 2. 定缺选门阶段（中央万/条/筒三色大圆盘）
+                    elif hasattr(detector, "is_dingque_phase") and detector.is_dingque_phase(full_for_preview):
+                        dq_p = True
+                    # 3. 选一张牌阶段（屏幕中央大牌确认 或 候选横排）
+                    elif hasattr(detector, "is_pick_phase") and detector.is_pick_phase(full_for_preview):
+                        pick_p = True
+                        try:
+                            cands = detector.detect_pick_candidates(full_for_preview)
+                        except Exception:
+                            cands = []
+                    self._phase_cache = (swap_p, dq_p, pick_p)
+                    self._pick_cand_cache = cands
+                is_swap_phase, is_dq_phase, is_pick_phase = self._phase_cache
+                pick_candidates = list(self._pick_cand_cache)
+                if is_swap_phase or is_dq_phase:
                     self._monotonic_discards.clear()
                     self._pending_discards.clear()
                     self._match_started = False
-                # 2. 定缺选门阶段（中央万/条/筒三色大圆盘）
-                elif hasattr(detector, "is_dingque_phase") and detector.is_dingque_phase(full_for_preview):
-                    is_dq_phase = True
-                    self._monotonic_discards.clear()
-                    self._pending_discards.clear()
-                    self._match_started = False
-                # 3. 选一张牌阶段（屏幕中央大牌确认 或 候选横排）
-                elif hasattr(detector, "is_pick_phase") and detector.is_pick_phase(full_for_preview):
-                    is_pick_phase = True
-                    try:
-                        pick_candidates = detector.detect_pick_candidates(full_for_preview)
-                    except Exception:
-                        pick_candidates = []
 
             # 定缺状态判定：
             # 若正处于定缺选门交互中（中央出现三色大圆盘），此时玩家正在选门，尚未敲定，保持 None；
@@ -2547,7 +2591,9 @@ class Engine:
                         dingque_name = ['万', '筒', '条'][dingque_suit]
                         self._match_started = True
                     elif len(raw_labels) >= 4 or getattr(self, "_match_started", False):
-                        dingque_suit, dingque_name = detect_dingque(full_for_preview)
+                        # 复用本帧节流缓存（detect_dingque 已在上方按 4 帧节奏跑过），
+                        # 不再同帧二次全图检测
+                        dingque_suit, dingque_name = self._dq_scan_cache
                         if dingque_suit is not None:
                             self._match_started = True
 
@@ -2690,7 +2736,11 @@ class Engine:
             opponent_danger_suits: List[int] = []
             if is_dingque_mode(self.mode):
                 try:
-                    op_dq = detect_opponents_dingque(full_for_preview)
+                    # 对手定缺徽章同样"局中几乎不变"：每 4 帧重检一次，期间复用缓存
+                    self._opdq_scan_tick += 1
+                    if self._opdq_scan_tick % 4 == 1:
+                        self._opdq_cache = detect_opponents_dingque(full_for_preview)
+                    op_dq = list(self._opdq_cache)
                     disc_safe, disc_danger = infer_opponents_from_discards(disc_counts)
                     opponent_dingque_suits = list(dict.fromkeys(op_dq + disc_safe))
                     opponent_danger_suits = disc_danger

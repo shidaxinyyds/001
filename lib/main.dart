@@ -2,6 +2,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:auto_vision/home_page.dart';
+import 'package:auto_vision/license/license_gate.dart';
 import 'package:auto_vision/overlays/mahjong_overlay.dart';
 
 void main() {
@@ -106,7 +107,7 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: _appTheme,
-      home: const HomePage(),
+      home: const LicenseGate(child: HomePage()),
     );
   }
 }

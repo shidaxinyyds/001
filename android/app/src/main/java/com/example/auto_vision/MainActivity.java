@@ -8,6 +8,7 @@ import android.media.projection.MediaProjectionConfig;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.util.DisplayMetrics;
 import android.view.WindowMetrics;
 import androidx.annotation.NonNull;
@@ -18,6 +19,8 @@ import io.flutter.plugin.common.MethodChannel;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.concurrent.CompletableFuture;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
@@ -136,6 +139,12 @@ public class MainActivity extends FlutterActivity {
         ImageProcessor.setConfig(key, val);
         result.success(0);
         return;
+      }
+
+      if (call.method.equals("getDeviceId")) {
+        // 卡密设备指纹：ANDROID_ID + 机型指纹做 SHA-256，返回 hex。
+        // 不取 IMEI/序列号（权限受限），ANDROID_ID 在 8.0+ 按签名稳定。
+        toRun = () -> result.success(computeDeviceId());
       }
 
       if (call.method.equals("exportRiverFrames")) {
@@ -377,6 +386,32 @@ public class MainActivity extends FlutterActivity {
   // 故缓冲必须横屏；否则游戏画面被压成竖条、几何裁剪全部错位、识别必然全挂。
   // 授权时本 App 在前台是竖屏，getBounds() 返回竖屏序（高>宽），
   // 用 max/min 归一成横屏，保证 prepareStream 与旋转回调拿到完全一致的结果。
+  // 计算设备指纹：ANDROID_ID + 机型/构建指纹拼接后 SHA-256，返回十六进制串。
+  // 失败时回退到 ANDROID_ID 原文，绝不抛异常（通道稳健优先）。
+  private String computeDeviceId() {
+    try {
+      String androidId = Settings.Secure.getString(
+          getContentResolver(), Settings.Secure.ANDROID_ID);
+      String raw = (androidId == null ? "" : androidId)
+          + "|" + Build.MANUFACTURER
+          + "|" + Build.MODEL
+          + "|" + Build.BRAND;
+      MessageDigest md = MessageDigest.getInstance("SHA-256");
+      byte[] digest = md.digest(raw.getBytes(StandardCharsets.UTF_8));
+      StringBuilder sb = new StringBuilder();
+      for (byte b : digest) sb.append(String.format("%02x", b));
+      return sb.toString();
+    } catch (Throwable t) {
+      try {
+        String androidId = Settings.Secure.getString(
+            getContentResolver(), Settings.Secure.ANDROID_ID);
+        return androidId == null ? "" : androidId;
+      } catch (Throwable t2) {
+        return "";
+      }
+    }
+  }
+
   // 读取玩法共享文件。仅做非常宽松的解析：必须是 {"mode":"2p|3p|4p"} 形式，
   // 否则一律回退到 "4p"，避免任何一端写脏数据后另一端爆炸。
   private String readModeFile() {

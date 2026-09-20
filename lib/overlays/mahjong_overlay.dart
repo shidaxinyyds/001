@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:auto_vision/mode_store.dart';
+import 'package:auto_vision/license/license_service.dart';
 import 'package:auto_vision/overlays/tile_labels.dart';
 import 'package:auto_vision/server.dart';
 
@@ -78,29 +79,67 @@ class TileChip extends StatelessWidget {
         : (dead ? const Color(0xFF00695C) : const Color(0xFFB7A98F));
     final double tileBorderW = (dead || isDrawing) ? 1.2 : 0.6;
 
+    // 角标独立透明层：badge 行放在牌面正上方（固定高、透明底），
+    // 彻底告别旧版 Positioned(-4,-4) 溢出压住邻牌牌面的遮挡问题。
+    // 左槽：摸（优先）或 危；右槽：绝。无角标时占空位，保证整行牌顶对齐。
+    final String? leftBadge = isDrawing ? '摸' : (
+        defenseLevel == 'DANGER' && !dead ? '危' : null);
+
     return Opacity(
       opacity: dim ? 0.45 : 1.0,
-      child: Container(
-        width: size,
-        height: size * 1.18,
-        margin: const EdgeInsets.only(right: 2),
-        decoration: BoxDecoration(
-          color: tileBg,
-          borderRadius: BorderRadius.circular(3),
-          border: Border.all(color: tileBorder, width: tileBorderW),
-          boxShadow: [
-            BoxShadow(
-              color: isDrawing ? const Color(0x66FFD54F) : Colors.black.withAlpha(40),
-              blurRadius: isDrawing ? 3 : 1,
-              offset: const Offset(0, 0.5),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: size,
+            height: size * 0.40,
+            child: Padding(
+              padding: const EdgeInsets.only(right: 2),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  if (leftBadge != null)
+                    _TileBadge(
+                      text: leftBadge,
+                      bg: isDrawing ? const Color(0xFF2E7D32) : const Color(0xFFB71C1C),
+                      fg: Colors.white,
+                      border: isDrawing
+                          ? const Color(0xFFFFD54F)
+                          : const Color(0xFFFF8A80),
+                    )
+                  else
+                    const SizedBox.shrink(),
+                  if (dead)
+                    _TileBadge(
+                      text: '绝',
+                      bg: const Color(0xFFE0F2F1), // 青绿浅底，与主色统一
+                      fg: const Color(0xFF00695C),
+                      border: const Color(0xFF00695C),
+                    )
+                  else
+                    const SizedBox.shrink(),
+                ],
+              ),
             ),
-          ],
-        ),
-        alignment: Alignment.center,
-        child: Stack(
-          clipBehavior: Clip.none,
-          children: [
-            FittedBox(
+          ),
+          Container(
+            width: size,
+            height: size * 1.18,
+            decoration: BoxDecoration(
+              color: tileBg,
+              borderRadius: BorderRadius.circular(3),
+              border: Border.all(color: tileBorder, width: tileBorderW),
+              boxShadow: [
+                BoxShadow(
+                  color: isDrawing ? const Color(0x66FFD54F) : Colors.black.withAlpha(40),
+                  blurRadius: isDrawing ? 3 : 1,
+                  offset: const Offset(0, 0.5),
+                ),
+              ],
+            ),
+            alignment: Alignment.center,
+            child: FittedBox(
               fit: BoxFit.scaleDown,
               child: Text(
                 cn,
@@ -112,73 +151,43 @@ class TileChip extends StatelessWidget {
                 ),
               ),
             ),
-            if (isDrawing)
-              Positioned(
-                left: -4,
-                top: -4,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 2.5, vertical: 0.5),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF2E7D32),
-                    borderRadius: BorderRadius.circular(3),
-                    border: Border.all(color: const Color(0xFFFFD54F), width: 0.8),
-                  ),
-                  child: const Text(
-                    '摸',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 7,
-                      fontWeight: FontWeight.bold,
-                      height: 1.0,
-                    ),
-                  ),
-                ),
-              ),
-            if (dead)
-              Positioned(
-                right: -4,
-                top: -4,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFE0F2F1), // 青绿浅底，与主色统一
-                    borderRadius: BorderRadius.circular(3),
-                    border: Border.all(color: const Color(0xFF00695C), width: 0.5),
-                  ),
-                  child: const Text(
-                    '绝',
-                    style: TextStyle(
-                      color: Color(0xFF00695C),
-                      fontSize: 7,
-                      fontWeight: FontWeight.bold,
-                      height: 1.0,
-                    ),
-                  ),
-                ),
-              ),
-            if (defenseLevel == 'DANGER' && !isDrawing && !dead)
-              Positioned(
-                left: -4,
-                top: -4,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 2.5, vertical: 0.5),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFB71C1C),
-                    borderRadius: BorderRadius.circular(2.5),
-                    border: Border.all(color: const Color(0xFFFF8A80), width: 0.5),
-                  ),
-                  child: const Text(
-                    '危',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 6.5,
-                      fontWeight: FontWeight.bold,
-                      height: 1.0,
-                    ),
-                  ),
-                ),
-              ),
-          ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// TileChip 顶部的悬浮角标（摸/危/绝），画在牌面之外的透明层上，不遮牌。
+class _TileBadge extends StatelessWidget {
+  final String text;
+  final Color bg;
+  final Color fg;
+  final Color border;
+
+  const _TileBadge({
+    required this.text,
+    required this.bg,
+    required this.fg,
+    required this.border,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 2.5, vertical: 0.5),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(2.5),
+        border: Border.all(color: border, width: 0.5),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          color: fg,
+          fontSize: 6.5,
+          fontWeight: FontWeight.bold,
+          height: 1.0,
         ),
       ),
     );
@@ -211,7 +220,8 @@ class HandChipRow extends StatelessWidget {
     }
     final drawingIndex = drawingTile != null ? tiles.lastIndexOf(drawingTile!) : -1;
     return Wrap(
-      spacing: 1,
+      // TileChip 自身不再有 margin，间距在此统一控制
+      spacing: 3,
       runSpacing: 3,
       children: tiles.asMap().entries
           .map((entry) => TileChip(
@@ -455,6 +465,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   bool _isResizing = false;
   bool _hitLimitFeedback = false;
 
+  // ── 授权自守护（悬浮窗独立引擎也本地验签，到期即不显示建议）──
+  bool _licenseAllows = true; // 乐观默认，首次异步核验后纠正
+  int _licenseDays = 0;
+  Timer? _licenseTimer;
+
   @override
   void initState() {
     super.initState();
@@ -469,25 +484,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         callback: (data) {
           final json = parseEngineResult(data);
           if (json == null) return;
-          if (mounted) {
-            setState(() {
-              result = json;
-              if (json['status'] == 'waiting') {
-                _shownAdvice = const [];
-                _shownBest = '';
-              } else {
-                _shownAdvice = (json['advice'] ?? const []) as List<dynamic>;
-                _shownBest = (json['best'] ?? '') as String;
-              }
-              ready = true;
-              // 引擎已读到玩法文件并回传，与本地选择不一致时以回传为准，保持两端同步。
-              // 引擎回传的 mode 与本地一致即可，不再校验 kModeOptions。
-              final m = json['mode'];
-              if (m is String && m != selectedMode) {
-                selectedMode = m;
-              }
-            });
-          }
+          _ingestEngineResult(json);
           _maybeShareStatus(json);
         },
         host: "127.0.0.1",
@@ -507,14 +504,110 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       _ensureSize(w, h);
     });
 
+    // 授权核验：异步本地验签，之后每 30 分钟静默复核。到期即收起建议、只显提示。
+    _refreshLicense();
+    _licenseTimer = Timer.periodic(const Duration(minutes: 30), (_) => _refreshLicense());
+
     // 玩法文件已改由主页通过 Java MethodChannel 写入；这里不再读 dart:io 文件。
     // （注：本 Flutter 端的 selectedMode 仍保留，仅用于把当前模式透传给主界面。）
   }
 
   @override
   void dispose() {
+    _licenseTimer?.cancel();
     _panelScrollController.dispose();
     super.dispose();
+  }
+
+  Future<void> _refreshLicense() async {
+    try {
+      final st = await LicenseService.instance.ensureUsable();
+      if (!mounted) return;
+      final allows = st.allowsUsage;
+      final days = st.remainingDays;
+      if (allows != _licenseAllows || days != _licenseDays) {
+        setState(() {
+          _licenseAllows = allows;
+          _licenseDays = days;
+        });
+      }
+    } catch (_) {
+      // 核验异常绝不让悬浮窗引擎崩溃；保持当前状态。
+    }
+  }
+
+  // ===== 渲染节流：前沿立即 + 尾部合并（降低 UI 重建频率，不增加反馈延迟）=====
+  // 引擎每 25~80ms 推一帧，逐帧 setState 会让整棵大型 widget 树以 40Hz 重建，
+  // UI 线程被重建本身占满，反而拖慢"最新结果"的上屏。策略：
+  // 新数据到达时**第一帧立即应用**（零额外感知延迟），120ms 窗口内的后续帧
+  // 合并为一次，窗口收尾时应用最新一帧（保证尾部数据不丢）。
+  Map<String, dynamic>? _pendingJson;
+  bool _renderScheduled = false;
+
+  void _ingestEngineResult(Map<String, dynamic> json) {
+    _pendingJson = json;
+    if (_renderScheduled) return;
+    _applyPendingResult(); // 前沿：立即上屏
+    _renderScheduled = true;
+    Future<void>.delayed(const Duration(milliseconds: 120), () {
+      _renderScheduled = false;
+      if (!mounted) return;
+      if (_pendingJson != null) _applyPendingResult(); // 尾部：应用窗口内最新一帧
+    });
+  }
+
+  void _applyPendingResult() {
+    final json = _pendingJson;
+    if (json == null || !mounted) return;
+    _pendingJson = null;
+    setState(() {
+      result = json;
+      if (json['status'] == 'waiting') {
+        _shownAdvice = const [];
+        _shownBest = '';
+      } else {
+        _shownAdvice = (json['advice'] ?? const []) as List<dynamic>;
+        _shownBest = (json['best'] ?? '') as String;
+      }
+      ready = true;
+      // 引擎已读到玩法文件并回传，与本地选择不一致时以回传为准，保持两端同步。
+      // 引擎回传的 mode 与本地一致即可，不再校验 kModeOptions。
+      final m = json['mode'];
+      if (m is String && m != selectedMode) {
+        selectedMode = m;
+      }
+    });
+  }
+
+  // 授权到期/被停用时的悬浮占位胶囊：不给出任何牌建议。
+  Widget _licenseDisabled() {
+    return Center(
+      child: Container(
+        margin: const EdgeInsets.all(8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+        decoration: BoxDecoration(
+          color: const Color(0xF51A1D24),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: const Color(0xFFFF8A80), width: 1),
+        ),
+        child: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.lock_outline, size: 15, color: Color(0xFFFF8A80)),
+            SizedBox(width: 6),
+            Text(
+              '授权已到期，请续费',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 12.5,
+                fontWeight: FontWeight.w700,
+                decoration: TextDecoration.none,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   // 只在识别内容真正变化时回传一次摘要给主 App，
@@ -2192,6 +2285,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
   @override
   Widget build(BuildContext context) {
+    // 授权不可用：不渲染任何识别建议，只显一个极简提示胶囊。
+    if (!_licenseAllows) {
+      return SizedBox.expand(child: _licenseDisabled());
+    }
     final Widget current;
     if (!panelVisible) {
       current = SizedBox.expand(

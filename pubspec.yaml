@@ -1,6 +1,6 @@
 name: auto_vision
 description: 实时麻将训练器：通过屏幕录制与机器学习识别牌面，并在悬浮窗中给出弃牌策略建议。
-version: 1.4.5+10
+version: 1.4.6+11
 publish_to: "none"
 
 environment:
@@ -19,6 +19,9 @@ dependencies:
   flutter_overlay_window: ^0.4.3
   # 本地设置与调试状态持久化
   shared_preferences: ^2.2.0
+  # 卡密授权：联网激活/续签 + 本地短期凭证 HMAC 验签
+  http: ^1.2.0
+  crypto: ^3.0.3
   # chaquopy:
   #   git:
   #     url: https://github.com/heyzec/chaquopy_flutter.git

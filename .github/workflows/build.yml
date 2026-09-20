@@ -50,9 +50,20 @@ jobs:
         run: flutter analyze --no-fatal-infos --no-fatal-warnings
 
       - name: 构建 APK（release，使用 debug 签名，可直接安装）
+        env:
+          LICENSE_TOKEN_SECRET: ${{ secrets.LICENSE_TOKEN_SECRET }}
+          LICENSE_FUNCTION_URL: ${{ secrets.LICENSE_FUNCTION_URL }}
         run: |
           set -euo pipefail
-          flutter build apk --release --no-shrink
+          # 公开仓库里绝不能有授权密钥：两个 Secret 缺任何一个都直接拒建，
+          # 避免发布出一个"激活必失败"的坏包。
+          if [ -z "$LICENSE_TOKEN_SECRET" ] || [ -z "$LICENSE_FUNCTION_URL" ]; then
+            echo "::error::仓库 Settings→Secrets 缺少 LICENSE_TOKEN_SECRET 或 LICENSE_FUNCTION_URL，拒绝构建无授权注入的坏包"
+            exit 1
+          fi
+          flutter build apk --release --no-shrink \
+            --dart-define=LICENSE_TOKEN_SECRET="$LICENSE_TOKEN_SECRET" \
+            --dart-define=LICENSE_FUNCTION_URL="$LICENSE_FUNCTION_URL"
 
       # 防「绿灯但无 APK」假成功：构建步骤即便异常返回 0，也必须在此处
       # 断言产物真实存在且非空，否则显式失败，避免误以为发布成功。
@@ -77,13 +88,13 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         with:
-          tag_name: v1.4.5
-          name: "雀神助手 全平台与多玩法通用版 v1.4.5 APK"
+          tag_name: v1.4.6
+          name: "雀神助手 全平台与多玩法通用版 v1.4.6 APK"
           body: |
-            ## 雀神助手 全平台与多玩法通用版 v1.4.5 安装包
-            - **新增多平台视觉适配**：支持蜀山四川麻将，引入风格探针智能路由与精确模板库，单帧开销不随平台增加；
-            - **通用地方麻将规则引擎**：新增通用规则驱动核心（std 引擎），扩展支持红中百搭、武汉开饭、广东红中王、长沙转转、东北穷胡、大众麻将等多种地方玩法；
-            - **极致响应与零延迟架构**：延续毫秒级分析与实时跟手更新，保持 100% 真实对局手牌识别率。
+            ## 雀神助手 全平台与多玩法通用版 v1.4.6 安装包
+            - **新增卡密授权系统**：一次性卡密在线激活、一机一卡、到期/拉黑自动停用；离线宽限期内正常使用；
+            - **响应延迟优化**：引擎节流与渲染限帧，出牌建议更快更稳；
+            - **界面优化**：牌面角标（摸/绝/危）不再遮挡相邻牌；
             - 手机端直接点击下方 `app-release.apk` 即可下载安装！
           files: build/app/outputs/flutter-apk/app-release.apk
           draft: false
