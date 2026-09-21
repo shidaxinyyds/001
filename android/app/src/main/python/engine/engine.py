@@ -1310,6 +1310,9 @@ class Engine:
         # ===== 低置信手牌帧采集（见 _maybe_collect_lowconf_hand）=====
         self._lowconf_saved: int = 0
         self._lowconf_last_ts: float = 0.0
+        # 纯色底手牌实证缓存（见 _is_mahjong_table）：重检测 4 帧限频
+        self._table_ev_tick: int = 0
+        self._table_ev_verdict: bool = False
         # YOLO 影子对比实例：None=未创建，False=创建失败（不再重试），对象=可用
         self._yolo_shadow = None
         # ===== 全图辅助检测节流（响应提速）=====
@@ -1359,10 +1362,23 @@ class Engine:
 
         # 【v4 防误判】纯色背景排除：速配/加载/ splash 页常是铺满全屏的单一
         # 绿底，桌布占比可高达 90%+；而真实牌桌中央必有牌河/副露/玩家头像/
-        # 桌面花纹，单一桌布色占比极少超过 90%。占比高到接近铺满时不当牌桌，
-        # 落入下方手牌实证兜底，杜绝速配页被误判为对局而显示残留手牌。
+        # 桌面花纹，单一桌布色占比极少超过 90%。占比高到接近铺满时不再廉价
+        # 早退，改由手牌实证兜底；无实证能力的检测器保守判非牌桌（宁漏报
+        # 不误显残留）。兜底重检测按 4 帧限频并缓存结论，避免纯色页停留意
+        # 义每帧挤占识别线程。
         if max_felt >= 0.90:
-            max_felt = 0.0
+            tick = getattr(self, "_table_ev_tick", 0) + 1
+            self._table_ev_tick = tick
+            if tick % 4 == 1:
+                ev = False
+                det = getattr(self, "_detector", None)
+                if det is not None and hasattr(det, "detect_hand_strip"):
+                    try:
+                        ev = len(det.detect_hand_strip(image)) >= 7
+                    except Exception:
+                        ev = False
+                self._table_ev_verdict = ev
+            return bool(getattr(self, "_table_ev_verdict", False))
 
         # 真实牌桌中央桌布单色占比通常达到 18% 以上
         if max_felt >= 0.18:
@@ -1481,6 +1497,9 @@ class Engine:
         self._river_dump_dir = p
         self._river_last_sig = None
         self._river_saved = 0
+        # 重推目录 = 新一轮采集（与 Java 侧同步清理动作配套），低置信配额一并重置
+        self._lowconf_saved = 0
+        self._lowconf_last_ts = 0.0
         if p:
             try:
                 os.makedirs(p, exist_ok=True)
@@ -1559,7 +1578,8 @@ class Engine:
 
     LOWCONF_SCORE_GATE = 0.80   # 最高模板分低于此 = 当前 bank 对平台样式覆盖不足
     LOWCONF_MIN_INTERVAL = 3.0  # 秒，限流防风暴写盘
-    LOWCONF_LIMIT = 300         # 单引擎会话上限（≈ 60MB）
+    LOWCONF_LIMIT = 300         # 单引擎会话上限（q92 整帧 ≈ 0.3-0.8MB/帧，最坏 ≈ 百MB 量级；
+                                # 目录由调试页清理/重推复位，只在该目录存在期间累积）
 
     def _maybe_collect_lowconf_hand(self, image, result: Dict) -> None:
         """低置信手牌帧采集：真机遇到模板 bank 未覆盖的平台牌面样式（漏检/
@@ -1572,6 +1592,10 @@ class Engine:
             status = result.get("status")
             if status not in ("ok", "partial", "incomplete", "no_tiles"):
                 return
+            # no_tiles（本帧 0 牌）多为方向锁错/ROI 设错而非 bank 覆盖问题，
+            # 且 top_score 恒 0 必过门槛——必须本帧真的切出了牌候选才值得回收。
+            if status == "no_tiles" and not (result.get("tiles") or []):
+                return
             top = float(result.get("top_score") or 0.0)
             if top >= self.LOWCONF_SCORE_GATE:
                 return
@@ -1582,7 +1606,7 @@ class Engine:
             if not isinstance(image, np.ndarray) or image.size == 0:
                 return
             ok, buf = cv2.imencode(
-                ".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+                ".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
             if not ok:
                 return
             out_dir = os.path.join(self._river_dump_dir, "hand_lowconf")

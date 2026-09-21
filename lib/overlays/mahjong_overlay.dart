@@ -2677,31 +2677,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        // 0. 空态占位：未开局/无手牌时给出明确指引，
-                        //    避免展开面板只剩大片黑底被误认为变灰/故障。
-                        if (!inMatch && !isDingquePhase && !isSwapPhase && !isPickPhase && hand.isEmpty) ...[
-                          const SizedBox(height: 34),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: const [
-                              Icon(Icons.sports_esports_outlined, color: Colors.white30, size: 15),
-                              SizedBox(width: 5),
-                              Flexible(
-                                child: Text(
-                                  '等待牌局开始，进入游戏后自动识别…',
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    color: Colors.white38,
-                                    fontSize: 10,
-                                    decoration: TextDecoration.none,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 10),
-                        ],
-                        // 1. 核心建议（出牌决策）
+                        // 1. 核心建议（出牌决策）；空态提示由 _adviceSection 统一
+                        //    给出（waiting/无牌/识别中各有贴切文案），不另加占位，
+                        //    避免同义/矛盾文案叠加。
                         _adviceSection(advice, best, count),
                         const SizedBox(height: 5),
                         // 2. 当前手牌（仅在确认对局内或定缺阶段才显示，杜绝大厅与非对局干扰）

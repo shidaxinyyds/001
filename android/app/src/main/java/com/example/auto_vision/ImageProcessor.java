@@ -436,6 +436,17 @@ public class ImageProcessor {
         return new File(dir, "river_frames");
     }
 
+    // 递归删除：采集目录下除顶层 jpg/json 外还有 hand_lowconf/ 子目录（低置信
+    // 样本回收），非递归 delete() 对非空目录静默失败 → 只增不减的存储泄漏。
+    private static void deleteRecursive(File f) {
+        if (f == null) return;
+        File[] cs = f.listFiles();
+        if (cs != null) {
+            for (File c : cs) deleteRecursive(c);
+        }
+        try { f.delete(); } catch (Exception ignore) { }
+    }
+
     // 清空牌河采集目录（仅用户手动拨开「牌河采集」开关时触发，与 clear_frames
     // 同一防误删约定）。Python 引擎侧重置由 set_frame_dump_dir 被下一次清目录
     // 后的引擎重建完成；即使计数不同步也无害——文件名带时间戳不会碰撞。
@@ -446,7 +457,7 @@ public class ImageProcessor {
             File[] old = dir.listFiles();
             if (old != null) {
                 for (File f : old) {
-                    try { f.delete(); } catch (Exception ignore) { }
+                    deleteRecursive(f);
                 }
             }
             //noinspection ResultOfMethodCallIgnored
