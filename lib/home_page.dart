@@ -7,15 +7,15 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:auto_vision/channel.dart';
 import 'package:auto_vision/debug_page.dart';
 import 'package:auto_vision/mode_store.dart';
+import 'package:auto_vision/theme/app_tokens.dart';
 
-/// 极简现代配色
-const Color _kPrimary = Color(0xFF0F172A); // slate-900 沉稳黑灰
-const Color _kAccent = Color(0xFF0D9488); // teal-600 现代翡翠青
-const Color _kAccentBg = Color(0xFFF0FDFA); // teal-50 极淡青底色
-const Color _kTextMain = Color(0xFF0F172A);
-const Color _kTextMuted = Color(0xFF64748B);
-const Color _kBorder = Color(0xFFE2E8F0);
-const Color _kBg = Color(0xFFF8FAFC);
+/// 配色统一读设计 token（明亮现代商务）。
+const Color _kAccent = AppTokens.brand; // teal-600 现代翡翠青
+const Color _kAccentBg = AppTokens.brandSoft; // teal-50 极淡青底色
+const Color _kTextMain = AppTokens.ink;
+const Color _kTextMuted = AppTokens.muted;
+const Color _kBorder = AppTokens.border;
+const Color _kBg = AppTokens.bg;
 
 class HomePage extends StatefulWidget {
   const HomePage({Key? key}) : super(key: key);
@@ -323,7 +323,7 @@ class _HomePageState extends State<HomePage> {
     return Scaffold(
       backgroundColor: _kBg,
       appBar: AppBar(
-        backgroundColor: Colors.white,
+        backgroundColor: AppTokens.surface,
         elevation: 0,
         scrolledUnderElevation: 0,
         titleSpacing: 20,
@@ -340,25 +340,33 @@ class _HomePageState extends State<HomePage> {
               ),
             ),
             const Spacer(),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 260),
+              curve: Curves.easeOut,
+              padding: const EdgeInsets.symmetric(
+                  horizontal: AppTokens.s12, vertical: 5),
               decoration: BoxDecoration(
-                color: isProcessing ? const Color(0xFFECFDF5) : const Color(0xFFF1F5F9),
-                borderRadius: BorderRadius.circular(20),
+                color: isProcessing ? AppTokens.successBg : AppTokens.pillBg,
+                borderRadius: BorderRadius.circular(AppTokens.rPill),
                 border: Border.all(
-                  color: isProcessing ? const Color(0xFFA7F3D0) : const Color(0xFFE2E8F0),
+                  color: isProcessing
+                      ? AppTokens.successBorder
+                      : AppTokens.border,
                   width: 0.8,
                 ),
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Container(
-                    width: 6,
-                    height: 6,
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 260),
+                    width: 7,
+                    height: 7,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      color: isProcessing ? const Color(0xFF10B981) : const Color(0xFF94A3B8),
+                      color: isProcessing
+                          ? AppTokens.success
+                          : AppTokens.faint,
                     ),
                   ),
                   const SizedBox(width: 6),
@@ -366,8 +374,10 @@ class _HomePageState extends State<HomePage> {
                     isProcessing ? "识别中" : "待命",
                     style: TextStyle(
                       fontSize: 12,
-                      fontWeight: FontWeight.w500,
-                      color: isProcessing ? const Color(0xFF047857) : const Color(0xFF64748B),
+                      fontWeight: FontWeight.w600,
+                      color: isProcessing
+                          ? AppTokens.successDark
+                          : AppTokens.muted,
                     ),
                   ),
                 ],
@@ -385,17 +395,17 @@ class _HomePageState extends State<HomePage> {
       ),
       bottomNavigationBar: Container(
         decoration: const BoxDecoration(
-          color: Colors.white,
+          color: AppTokens.surface,
           border: Border(
-            top: BorderSide(color: Color(0xFFE2E8F0), width: 0.8),
+            top: BorderSide(color: _kBorder, width: 0.8),
           ),
         ),
         child: BottomNavigationBar(
           currentIndex: _tab,
           onTap: (i) => setState(() => _tab = i),
           selectedItemColor: _kAccent,
-          unselectedItemColor: const Color(0xFF94A3B8),
-          backgroundColor: Colors.white,
+          unselectedItemColor: AppTokens.faint,
+          backgroundColor: AppTokens.surface,
           elevation: 0,
           selectedFontSize: 12,
           unselectedFontSize: 12,
@@ -436,19 +446,38 @@ class _HomePageState extends State<HomePage> {
 
     return SafeArea(
       child: SingleChildScrollView(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+        padding: const EdgeInsets.symmetric(
+            horizontal: AppTokens.s20, vertical: AppTokens.s16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // 分类切换栏
             _buildCategorySelector(),
-            const SizedBox(height: 12),
+            const SizedBox(height: AppTokens.s12),
 
-            // 玩法卡片列表
-            ...categoryModes.map((info) {
-              final bool sel = info.key == mode;
-              return _buildModeCard(info, sel);
-            }),
+            // 玩法卡片列表：切分类时淡入+上移过渡
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 240),
+              switchInCurve: Curves.easeOut,
+              switchOutCurve: Curves.easeIn,
+              transitionBuilder: (child, anim) => FadeTransition(
+                opacity: anim,
+                child: SlideTransition(
+                  position: Tween<Offset>(
+                          begin: const Offset(0, 0.03), end: Offset.zero)
+                      .animate(anim),
+                  child: child,
+                ),
+              ),
+              child: Column(
+                key: ValueKey<String>(_selectedCategory),
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: categoryModes.map((info) {
+                  final bool sel = info.key == mode;
+                  return _buildModeCard(info, sel);
+                }).toList(),
+              ),
+            ),
 
             const SizedBox(height: 14),
 
@@ -478,38 +507,33 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  // 分类切换栏（干净精炼分段器）
+  // 分类切换栏（M3 风分段器，选中胶囊平滑滑动）
   Widget _buildCategorySelector() {
     return Container(
       padding: const EdgeInsets.all(3),
       decoration: BoxDecoration(
-        color: const Color(0xFFF1F5F9),
-        borderRadius: BorderRadius.circular(10),
+        color: AppTokens.pillBg,
+        borderRadius: BorderRadius.circular(AppTokens.r12),
       ),
       child: Row(
         children: GameMode.categories.map((cat) {
           final bool sel = cat == _selectedCategory;
           return Expanded(
             child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
               onTap: () {
                 if (_selectedCategory != cat) {
                   setState(() => _selectedCategory = cat);
                 }
               },
-              child: Container(
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                curve: Curves.easeOutCubic,
                 padding: const EdgeInsets.symmetric(vertical: 9),
                 decoration: BoxDecoration(
-                  color: sel ? Colors.white : Colors.transparent,
-                  borderRadius: BorderRadius.circular(8),
-                  boxShadow: sel
-                      ? const [
-                          BoxShadow(
-                            color: Color(0x0D000000),
-                            blurRadius: 4,
-                            offset: Offset(0, 1),
-                          ),
-                        ]
-                      : null,
+                  color: sel ? AppTokens.surface : Colors.transparent,
+                  borderRadius: BorderRadius.circular(AppTokens.r8),
+                  boxShadow: sel ? AppTokens.soft : null,
                 ),
                 alignment: Alignment.center,
                 child: Text(
@@ -528,59 +552,83 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  // 玩法卡片（极简大气，纯粹利落）
+  // 玩法卡片（M3 Card 风 + tonal 选中态 + 按压波纹）
   Widget _buildModeCard(MahjongModeInfo info, bool isSelected) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      decoration: BoxDecoration(
-        color: isSelected ? _kAccentBg : Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: isSelected ? _kAccent : _kBorder,
-          width: isSelected ? 1.5 : 1.0,
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+        decoration: BoxDecoration(
+          color: isSelected ? _kAccentBg : AppTokens.surface,
+          borderRadius: AppTokens.radius16,
+          border: Border.all(
+            color: isSelected ? _kAccent : _kBorder,
+            width: isSelected ? 1.5 : 1.0,
+          ),
+          boxShadow: isSelected ? null : AppTokens.soft,
         ),
-      ),
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(12),
-          onTap: () => _selectMode(info.key),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        info.name,
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600,
-                          color: isSelected ? _kAccent : _kTextMain,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        info.brief,
-                        style: const TextStyle(
-                          fontSize: 13,
-                          color: _kTextMuted,
-                          height: 1.2,
-                        ),
-                      ),
-                    ],
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            borderRadius: AppTokens.radius16,
+            onTap: () => _selectMode(info.key),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                  horizontal: AppTokens.s16, vertical: AppTokens.s16),
+              child: Row(
+                children: [
+                  // 左侧图标徒章：选中时填色，形成 tonal 呼应。
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 200),
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: isSelected
+                          ? AppTokens.brandContainer
+                          : AppTokens.pillBg,
+                      borderRadius: BorderRadius.circular(AppTokens.r12),
+                    ),
+                    child: Icon(
+                      Icons.spa_outlined,
+                      size: 22,
+                      color: isSelected ? _kAccent : AppTokens.muted,
+                    ),
                   ),
-                ),
-                Icon(
-                  isSelected
-                      ? Icons.radio_button_checked_rounded
-                      : Icons.radio_button_unchecked_rounded,
-                  color: isSelected ? _kAccent : const Color(0xFFCBD5E1),
-                  size: 22,
-                ),
-              ],
+                  const SizedBox(width: AppTokens.s12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          info.name,
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                            color: isSelected ? _kAccent : _kTextMain,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          info.brief,
+                          style: const TextStyle(
+                            fontSize: 13,
+                            color: _kTextMuted,
+                            height: 1.2,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Icon(
+                    isSelected
+                        ? Icons.radio_button_checked_rounded
+                        : Icons.radio_button_unchecked_rounded,
+                    color: isSelected ? _kAccent : AppTokens.borderStrong,
+                    size: 22,
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -594,26 +642,27 @@ class _HomePageState extends State<HomePage> {
     String btnText;
 
     if (isProcessing) {
-      btnColor = const Color(0xFFDC2626);
+      btnColor = AppTokens.danger;
       btnText = '停止悬浮窗';
     } else if (canStart) {
-      btnColor = _kPrimary;
+      btnColor = _kAccent;
       btnText = '开启悬浮窗';
     } else {
-      btnColor = const Color(0xFFCBD5E1);
+      btnColor = AppTokens.borderStrong;
       btnText = mode.isEmpty ? '请先选择上方玩法' : '开启悬浮窗';
     }
 
     return SizedBox(
       height: 50,
-      child: ElevatedButton(
+      child: FilledButton(
         onPressed: (canStart || isProcessing) ? _toggleProcessing : null,
-        style: ElevatedButton.styleFrom(
+        style: FilledButton.styleFrom(
           backgroundColor: btnColor,
-          disabledBackgroundColor: const Color(0xFFCBD5E1),
+          disabledBackgroundColor: AppTokens.borderStrong,
+          foregroundColor: Colors.white,
           elevation: 0,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: AppTokens.radius12,
           ),
         ),
         child: Text(
@@ -629,50 +678,61 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  // 状态 / 提示卡片
+  // 状态 / 提示卡片（待命↔运行 淡入过渡）
   Widget _buildStatusCard() {
-    if (!isProcessing) {
-      return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: _kBorder, width: 0.8),
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: const [
-            Padding(
-              padding: EdgeInsets.only(top: 2),
-              child: Icon(
-                Icons.info_outline_rounded,
-                size: 16,
-                color: Color(0xFF94A3B8),
-              ),
-            ),
-            SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                '选定玩法后点击开启，悬浮窗将自动浮于牌局之上实时推演向听与最优出牌。',
-                style: TextStyle(
-                  fontSize: 13,
-                  color: _kTextMuted,
-                  height: 1.4,
-                ),
-              ),
-            ),
-          ],
-        ),
-      );
-    }
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 220),
+      switchInCurve: Curves.easeOut,
+      switchOutCurve: Curves.easeIn,
+      child: isProcessing ? _buildRunningCard() : _buildIdleCard(),
+    );
+  }
 
-    // 运行态卡片：展示实时推演状态
+  Widget _buildIdleCard() {
     return Container(
-      padding: const EdgeInsets.all(16),
+      key: const ValueKey<String>('idle'),
+      padding: const EdgeInsets.symmetric(
+          horizontal: AppTokens.s16, vertical: AppTokens.s16),
       decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFFA7F3D0), width: 1),
+        color: AppTokens.surface,
+        borderRadius: AppTokens.radius12,
+        border: Border.all(color: _kBorder, width: 0.8),
+      ),
+      child: const Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: EdgeInsets.only(top: 2),
+            child: Icon(
+              Icons.info_outline_rounded,
+              size: 16,
+              color: AppTokens.faint,
+            ),
+          ),
+          SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              '选定玩法后点击开启，悬浮窗将自动浮于牌局之上实时推演向听与最优出牌。',
+              style: TextStyle(
+                fontSize: 13,
+                color: _kTextMuted,
+                height: 1.4,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRunningCard() {
+    return Container(
+      key: const ValueKey<String>('running'),
+      padding: const EdgeInsets.all(AppTokens.s16),
+      decoration: BoxDecoration(
+        color: AppTokens.surface,
+        borderRadius: AppTokens.radius12,
+        border: Border.all(color: AppTokens.successBorder, width: 1),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -684,7 +744,7 @@ class _HomePageState extends State<HomePage> {
                 height: 8,
                 decoration: const BoxDecoration(
                   shape: BoxShape.circle,
-                  color: Color(0xFF10B981),
+                  color: AppTokens.success,
                 ),
               ),
               const SizedBox(width: 8),
@@ -693,7 +753,7 @@ class _HomePageState extends State<HomePage> {
                 style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
-                  color: Color(0xFF047857),
+                  color: AppTokens.successDark,
                 ),
               ),
               const Spacer(),

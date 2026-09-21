@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 
+import 'package:auto_vision/theme/app_tokens.dart';
 import 'license_service.dart';
 import 'license_status.dart';
 
@@ -21,7 +22,6 @@ class LicenseGate extends StatefulWidget {
 }
 
 class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
-  static const Color _accent = Color(0xFF0D9488);
   // 常规定期轮询间隔；短卡到期由精确 one-shot 定时器兜住。
   static const Duration _pollInterval = Duration(minutes: 30);
 
@@ -123,7 +123,10 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     if (_checking) {
       return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
+        backgroundColor: AppTokens.bg,
+        body: Center(
+            child: CircularProgressIndicator(
+                color: AppTokens.brand, strokeWidth: 3)),
       );
     }
     final st = _state;
@@ -138,107 +141,174 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
     final isExpired =
         st != null && st.status != LicenseStatus.notActivated;
     return Scaffold(
-      backgroundColor: Colors.white,
+      // 明亮商务底：极淡的品牌青向下过渡到近白，营造高级感而不喧宾夺主。
+      backgroundColor: AppTokens.bg,
       body: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const Icon(Icons.workspace_premium_outlined,
-                    size: 56, color: _accent),
-                const SizedBox(height: 16),
-                const Text(
-                  '激活授权',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w800,
-                      color: Color(0xFF0F172A)),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  isExpired
-                      ? (st.message ??
-                          '授权已到期，请输入新卡密激活')
-                      : '输入卡密开始使用（一卡绑一台设备）',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(fontSize: 13, color: Color(0xFF64748B)),
-                ),
-                if (isExpired && remaining > 0) ...[
-                  const SizedBox(height: 4),
-                  Text(
-                    '剩余 $remaining 天',
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(fontSize: 12, color: _accent),
+        child: DecoratedBox(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: <Color>[AppTokens.brandSoft, AppTokens.bg],
+            ),
+          ),
+          child: Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.symmetric(
+                  horizontal: AppTokens.s24, vertical: AppTokens.s24),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 420),
+                child: Container(
+                  padding: const EdgeInsets.all(AppTokens.s24),
+                  decoration: BoxDecoration(
+                    color: AppTokens.surface,
+                    borderRadius: AppTokens.radius20,
+                    border: Border.all(color: AppTokens.border),
+                    boxShadow: AppTokens.raised,
                   ),
-                ],
-                const SizedBox(height: 24),
-                TextField(
-                  controller: _code,
-                  enabled: !_busy,
-                  autocorrect: false,
-                  enableSuggestions: false,
-                  textCapitalization: TextCapitalization.characters,
-                  keyboardType: TextInputType.text,
-                  inputFormatters: [
-                    // 仅放行字母/数字/连字符，杜绝输入法塞入中文或空白。
-                    FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9\-]')),
-                  ],
-                  decoration: InputDecoration(
-                    hintText: '例如 MJ-XXXX-XXXX-XXXX-XXXX',
-                    border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(10)),
-                    enabledBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(10),
-                        borderSide: const BorderSide(color: Color(0xFFE2E8F0))),
-                    focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(10),
-                        borderSide: const BorderSide(color: _accent, width: 2)),
-                    contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 14, vertical: 14),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      // 品牌标识：圆形 tonal 容器承托图标，形成记忆点。
+                      Align(
+                        alignment: Alignment.center,
+                        child: Container(
+                          width: 72,
+                          height: 72,
+                          decoration: const BoxDecoration(
+                            color: AppTokens.brandContainer,
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(Icons.workspace_premium_outlined,
+                              size: 38, color: AppTokens.brandDark),
+                        ),
+                      ),
+                      const SizedBox(height: AppTokens.s20),
+                      const Text(
+                        '激活授权',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                            fontSize: 24,
+                            fontWeight: FontWeight.w800,
+                            color: AppTokens.ink,
+                            letterSpacing: 0.5),
+                      ),
+                      const SizedBox(height: AppTokens.s8),
+                      Text(
+                        '专业麻将实时分析 · 一卡绑定一台设备',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                            fontSize: 13, color: AppTokens.muted),
+                      ),
+                      const SizedBox(height: AppTokens.s8),
+                      Text(
+                        isExpired
+                            ? (st.message ?? '授权已到期，请输入新卡密激活')
+                            : '输入卡密开始使用（一卡绑一台设备）',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                            fontSize: 13, color: AppTokens.muted),
+                      ),
+                      if (isExpired && remaining > 0) ...[
+                        const SizedBox(height: AppTokens.s12),
+                        Center(
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: AppTokens.s16, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: AppTokens.successBg,
+                              borderRadius:
+                                  BorderRadius.circular(AppTokens.rPill),
+                              border:
+                                  Border.all(color: AppTokens.successBorder),
+                            ),
+                            child: Text(
+                              '已激活 · 剩余 $remaining 天',
+                              style: const TextStyle(
+                                  fontSize: 12.5,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppTokens.successDark),
+                            ),
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: AppTokens.s24),
+                      TextField(
+                        controller: _code,
+                        enabled: !_busy,
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        textCapitalization: TextCapitalization.characters,
+                        keyboardType: TextInputType.text,
+                        inputFormatters: [
+                          // 仅放行字母/数字/连字符，杜绝输入法塞入中文或空白。
+                          FilteringTextInputFormatter.allow(
+                              RegExp(r'[A-Za-z0-9\-]')),
+                        ],
+                        decoration: InputDecoration(
+                          hintText: '例如 MJ-XXXX-XXXX-XXXX-XXXX',
+                          prefixIcon: const Icon(Icons.vpn_key_outlined,
+                              color: AppTokens.faint),
+                          border: OutlineInputBorder(
+                              borderRadius: AppTokens.radius12),
+                          enabledBorder: OutlineInputBorder(
+                              borderRadius: AppTokens.radius12,
+                              borderSide:
+                                  const BorderSide(color: AppTokens.border)),
+                          focusedBorder: OutlineInputBorder(
+                              borderRadius: AppTokens.radius12,
+                              borderSide: const BorderSide(
+                                  color: AppTokens.brand, width: 2)),
+                        ),
+                        style: const TextStyle(
+                            fontSize: 16,
+                            letterSpacing: 1.2,
+                            fontFamily: 'monospace',
+                            color: AppTokens.ink),
+                      ),
+                      if (st?.message != null && !isExpired) ...[
+                        const SizedBox(height: AppTokens.s12),
+                        Text(
+                          st!.message!,
+                          style: const TextStyle(
+                              color: AppTokens.danger, fontSize: 13),
+                        ),
+                      ],
+                      const SizedBox(height: AppTokens.s20),
+                      SizedBox(
+                        height: 50,
+                        child: FilledButton(
+                          onPressed: _busy ? null : _activate,
+                          style: FilledButton.styleFrom(
+                            backgroundColor: AppTokens.brand,
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(
+                                borderRadius: AppTokens.radius12),
+                          ),
+                          child: _busy
+                              ? const SizedBox(
+                                  width: 22,
+                                  height: 22,
+                                  child: CircularProgressIndicator(
+                                      strokeWidth: 2.5, color: Colors.white))
+                              : const Text('激活',
+                                  style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w700)),
+                        ),
+                      ),
+                      const SizedBox(height: AppTokens.s16),
+                      const Text(
+                        '如提示联网失败，请检查网络后重试；卡密激活后即绑定本机。',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                            fontSize: 11.5, color: AppTokens.faint),
+                      ),
+                    ],
                   ),
-                  style: const TextStyle(
-                      fontSize: 16, letterSpacing: 1.2, fontFamily: 'monospace'),
                 ),
-                if (st?.message != null && !isExpired) ...[
-                  const SizedBox(height: 10),
-                  Text(
-                    st!.message!,
-                    style: const TextStyle(color: Color(0xFFB71C1C), fontSize: 13),
-                  ),
-                ],
-                const SizedBox(height: 18),
-                SizedBox(
-                  height: 48,
-                  child: ElevatedButton(
-                    onPressed: _busy ? null : _activate,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: _accent,
-                      foregroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10)),
-                    ),
-                    child: _busy
-                        ? const SizedBox(
-                            width: 22,
-                            height: 22,
-                            child: CircularProgressIndicator(
-                                strokeWidth: 2.5, color: Colors.white))
-                        : const Text('激活',
-                            style:
-                                TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-                  ),
-                ),
-                const SizedBox(height: 14),
-                const Text(
-                  '如提示联网失败，请检查网络后重试；卡密激活后即绑定本机。',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 11.5, color: Color(0xFF94A3B8)),
-                ),
-              ],
+              ),
             ),
           ),
         ),

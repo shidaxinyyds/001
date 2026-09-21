@@ -2493,8 +2493,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                 end: Alignment.bottomCenter,
                 colors: [Color(0xF51A1D24), Color(0xF5101216)],
               ),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: Colors.white.withAlpha(24), width: 0.8),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: Colors.white.withAlpha(28), width: 0.8),
               boxShadow: [
                 BoxShadow(
                   color: Colors.black.withAlpha(120),
@@ -2660,7 +2660,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
                             decoration: BoxDecoration(
                               color: Colors.white.withAlpha(6),
-                              borderRadius: BorderRadius.circular(6),
+                              borderRadius: BorderRadius.circular(10),
                               border: Border.all(color: Colors.white10, width: 0.5),
                             ),
                             child: Column(
@@ -2732,7 +2732,16 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           color: Colors.white,
           fontFamily: 'sans-serif',
         ),
-        child: current,
+        // 收起/展开的轻量淡入淡出（内容均在 Expanded+滚动区内，小窗也不会 overflow）。
+        child: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 160),
+          switchInCurve: Curves.easeOut,
+          switchOutCurve: Curves.easeIn,
+          child: KeyedSubtree(
+            key: ValueKey<bool>(panelVisible),
+            child: current,
+          ),
+        ),
       ),
     );
   }

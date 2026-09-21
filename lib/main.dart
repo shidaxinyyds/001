@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:auto_vision/home_page.dart';
 import 'package:auto_vision/license/license_gate.dart';
 import 'package:auto_vision/overlays/mahjong_overlay.dart';
+import 'package:auto_vision/theme/app_theme.dart';
+import 'package:auto_vision/theme/app_tokens.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -54,7 +56,7 @@ void _installErrorGuards() {
 void _installNeutralErrorWidget() {
   ErrorWidget.builder = (FlutterErrorDetails details) {
     return Container(
-      color: const Color(0xFF37474F), // blueGrey 800，中性
+      color: AppTokens.errorPlaceholder, // 中性灰，杜绝满屏红字
       alignment: Alignment.center,
       padding: const EdgeInsets.all(8),
       child: const Text(
@@ -70,21 +72,6 @@ void _installNeutralErrorWidget() {
   };
 }
 
-// 全局主题：移除所有文字下划线装饰
-final ThemeData _appTheme = ThemeData(
-  useMaterial3: false,
-  textTheme: const TextTheme(
-    bodyLarge: TextStyle(decoration: TextDecoration.none),
-    bodyMedium: TextStyle(decoration: TextDecoration.none),
-    bodySmall: TextStyle(decoration: TextDecoration.none),
-    labelLarge: TextStyle(decoration: TextDecoration.none),
-    labelMedium: TextStyle(decoration: TextDecoration.none),
-    labelSmall: TextStyle(decoration: TextDecoration.none),
-    titleMedium: TextStyle(decoration: TextDecoration.none),
-    titleSmall: TextStyle(decoration: TextDecoration.none),
-  ),
-);
-
 // 悬浮窗入口：flutter_overlay_window 会在独立的 Flutter 引擎中以该函数作为入口点启动。
 @pragma("vm:entry-point")
 void overlayMain() {
@@ -93,7 +80,7 @@ void overlayMain() {
   runApp(
     MaterialApp(
       debugShowCheckedModeBanner: false,
-      theme: _appTheme,
+      theme: AppTheme.light,
       home: const MahjongOverlay(),
     ),
   );
@@ -106,7 +93,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      theme: _appTheme,
+      theme: AppTheme.light,
       home: const LicenseGate(child: HomePage()),
     );
   }

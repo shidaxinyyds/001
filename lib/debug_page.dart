@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:auto_vision/config_store.dart';
+import 'package:auto_vision/theme/app_tokens.dart';
 
 /// 配置页：所有开关都**真实下发给识别引擎**，没有一个是纯 UI 摆设。
 ///
@@ -16,10 +17,10 @@ class DebugPage extends StatefulWidget {
 }
 
 class _DebugPageState extends State<DebugPage> {
-  // 与主页一致的配色（青绿强调 / 深灰主文 / 中性灰副文）。
-  static const Color _kAccent = Color(0xFF00695C); // teal 800
-  static const Color _textMain = Color(0xFF202124);
-  static const Color _textSub = Color(0xFF5F6368);
+  // 与主页/设计 token 一致的配色（品牌青强调 / 主文本 / 次文本）。
+  static const Color _kAccent = AppTokens.brand;
+  static const Color _textMain = AppTokens.ink;
+  static const Color _textSub = AppTokens.muted;
 
   DebugConfig _cfg = DebugConfig();
   bool _loading = true;
@@ -85,7 +86,7 @@ class _DebugPageState extends State<DebugPage> {
   Future<void> _showRatePicker() async {
     await showModalBottomSheet<void>(
       context: context,
-      backgroundColor: Colors.white,
+      backgroundColor: AppTokens.surface,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
@@ -239,9 +240,9 @@ class _DebugPageState extends State<DebugPage> {
           {required String title, required List<Widget> children}) =>
       Container(
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: AppTokens.surface,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: Colors.grey.shade200),
+          border: Border.all(color: AppTokens.border),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
