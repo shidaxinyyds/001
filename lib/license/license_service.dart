@@ -22,6 +22,7 @@ class LicenseService {
   static final LicenseService instance = LicenseService._();
 
   static const String _kToken = 'lic_token';
+  static const String _kDeviceId = 'lic_device_id';
   static const String _kMaxWallMs = 'lic_max_wall_ms';
   // 服务器时间高水位（epoch 秒）：跨进程重启仍单调不回退，防重启后调时钟属滥用。
   static const String _kMaxServerNowS = 'lic_max_server_now_s';
@@ -71,6 +72,12 @@ class LicenseService {
     // 绝不让授权检查本身把 App 首屏带崩。
     try {
       _prefs = await SharedPreferences.getInstance();
+      if (_deviceId == null || _deviceId!.isEmpty) {
+        final cached = _prefs?.getString(_kDeviceId);
+        if (cached != null && cached.isNotEmpty) {
+          _deviceId = cached;
+        }
+      }
     } catch (_) {
       _prefs = null;
     }
@@ -82,7 +89,10 @@ class LicenseService {
           final id = await _ch.invokeMethod<String>('getDeviceId');
           // 【自愈重试副作用防护】init 现在可重入：只接受非空新值，一次瞬时通道失败
           // 绝不能抹掉已取到的指纹——否则主引擎永久跳过服务器心跳，拉黑不可检。
-          if (id != null && id.isNotEmpty) _deviceId = id;
+          if (id != null && id.isNotEmpty) {
+            _deviceId = id;
+            _prefs?.setString(_kDeviceId, id);
+          }
         } catch (_) {
           // 保留上次成功的 deviceId，勿清空。
         }
@@ -118,6 +128,9 @@ class LicenseService {
   /// 现在 await commit() 确保凭证真正持久化后才宣布激活成功。
   Future<void> _saveToken(String token) async {
     await _prefs?.setString(_kToken, token);
+    if (deviceId.isNotEmpty) {
+      await _prefs?.setString(_kDeviceId, deviceId);
+    }
   }
 
   Future<void> _clearToken() async {
@@ -131,8 +144,11 @@ class LicenseService {
     if (had && deviceId.isEmpty) {
       return const LicenseState(LicenseStatus.notActivated);
     }
-    return LicenseState(had ? LicenseStatus.refused : LicenseStatus.notActivated,
-        message: had ? message : null);
+    return LicenseState(
+      had ? LicenseStatus.refused : LicenseStatus.notActivated,
+      message: had ? message : null,
+      isRevoked: false,
+    );
   }
 
   bool _clockTampered(int nowMs) {
@@ -274,7 +290,12 @@ class LicenseService {
       return LicenseState(LicenseStatus.licenseExpired,
           expiresAt: DateTime.fromMillisecondsSinceEpoch(tk.expiresAt * 1000));
     }
-    return LicenseState(LicenseStatus.refused, message: _friendly(r.error));
+    final bool isRev = r.error == 'revoked';
+    if (isRev) {
+      await _clearToken();
+    }
+    return LicenseState(LicenseStatus.refused,
+        message: _friendly(r.error), isRevoked: isRev);
   }
 
   // ===== 用户主动激活 =====
@@ -341,20 +362,15 @@ class LicenseService {
       if (r.revoked) {
         await _clearToken();
         return LicenseState(LicenseStatus.refused,
-            expiresAt: expDt, message: '该授权已被停用，请联系卖家');
+            expiresAt: expDt, message: '该授权已被停用，请联系卖家', isRevoked: true);
       }
-      // not_found（查无此设备）可能是服务端瞬时不一致：新授权行尚未对读可见 /
-      // 主备切换读空 / 项目刚从空闲恢复。绝不能据此销毁一张「签名有效、尚未到期」
-      // 的本地凭证——那会把已激活的正常用户从首页误踢回激活页并强制重输卡密。
-      // 真到期的封顶仍由签名内 expires_at 兜住（下面 _localEval 已按此判定）。
-      // 注：此 fail-open 的暴露上界＝离线宽限本就信任的 token_exp+72h（非整卡周期、
-      // 不可续用，因不触发 renew）；故拉黑必须用 revoked=true（走上面硬清分支），
-      // 不得以「删授权行」作为拉黑手段，否则被删设备会拖到该上界才锁。
-      if (r.error == 'not_found') {
-        final local = _localEval();
-        if (local.allowsUsage) return local; // 本地仍能证明有效：保持放行，不清券
+      // not_found（查无此设备）或服务端短暂未就绪：先看本地凭证。
+      // 绝不能销毁一张「未到期」的本地有效凭证——那会把已激活的正常用户从首页误踢回激活页。
+      final local = _localEval();
+      if (local.allowsUsage) {
+        return local; // 本地仍能证明有效：保持放行，不清券
       }
-      // 其余明确负信号（到期）：清本地券，杜绝残留券被后续复用（含换设备后旧券）。
+      // 其余明确负信号（查无且本地不可用/已到期）：清本地券，杜绝残留券被后续复用。
       await _clearToken();
       return LicenseState(LicenseStatus.licenseExpired, expiresAt: expDt);
     }

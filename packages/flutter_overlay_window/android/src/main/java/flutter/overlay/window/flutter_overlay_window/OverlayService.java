@@ -258,7 +258,9 @@ public class OverlayService extends Service implements View.OnTouchListener {
         try {
             windowManager.addView(flutterView, params);
             moveOverlay(dx, dy, null);
+            instance = this;
         } catch (Throwable t) {
+            instance = null;
             Log.e("OverLay", "addView/moveOverlay failed", t);
             try {
                 if (flutterView != null) windowManager.removeView(flutterView);

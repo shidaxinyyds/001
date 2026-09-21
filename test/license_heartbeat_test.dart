@@ -144,5 +144,85 @@ void main() {
       expect(const LicenseState(LicenseStatus.refused).allowsUsage, isFalse);
       expect(const LicenseState(LicenseStatus.notActivated).allowsUsage, isFalse);
     });
+
+    test('isStrictlyTerminated 仅在真正到期或明确拉黑时成立', () {
+      // 普通 refused（如瞬态验签格式错误/设备不匹配，未被服务端拉黑）：不属于严格终止
+      expect(
+          const LicenseState(LicenseStatus.refused, isRevoked: false)
+              .isStrictlyTerminated,
+          isFalse);
+
+      // 服务端明确拉黑：严格终止
+      expect(
+          const LicenseState(LicenseStatus.refused, isRevoked: true)
+              .isStrictlyTerminated,
+          isTrue);
+
+      // 到期时间在未来：不属于严格终止
+      expect(
+          LicenseState(LicenseStatus.licenseExpired,
+                  expiresAt: DateTime.now().add(const Duration(days: 1)))
+              .isStrictlyTerminated,
+          isFalse);
+
+      // 到期时间已过：属于严格终止
+      expect(
+          LicenseState(LicenseStatus.licenseExpired,
+                  expiresAt: DateTime.now().subtract(const Duration(seconds: 1)))
+              .isStrictlyTerminated,
+          isTrue);
+    });
+  });
+
+  group('防误踢与凭证保护（核心修复验证）', () {
+    test('未到期有效凭证求值 → 始终保持放行', () {
+      final svc = LicenseService.newForTest(client: _FakeClient())
+        ..noteServerTimeForTest(_t0);
+      final tk = LicenseToken(
+        device: 'dev',
+        code: 'TEST-CODE',
+        expiresAt: _t0 + 7 * 86400,
+        tokenExp: _t0 + 86400,
+      );
+      final st = svc.evaluateForTest(tk);
+      expect(st.allowsUsage, isTrue);
+      expect(st.status, LicenseStatus.valid);
+      expect(st.isStrictlyTerminated, isFalse);
+    });
+
+    test('软状态（needsRenew，宽限期内）→ 仍保持放行且不属于严格终止', () {
+      final svc = LicenseService.newForTest(client: _FakeClient())
+        ..noteServerTimeForTest(_t0);
+      final tk = LicenseToken(
+        device: 'dev',
+        code: 'TEST-CODE',
+        expiresAt: _t0 + 7 * 86400,
+        tokenExp: _t0 - 3600, // 凭证过期但在宽限内
+      );
+      final st = svc.evaluateForTest(tk);
+      expect(st.allowsUsage, isTrue);
+      expect(st.status, LicenseStatus.needsRenew);
+      expect(st.isStrictlyTerminated, isFalse);
+    });
+
+    test('确凿拉黑（isRevoked=true）→ 属于严格终止', () {
+      const st = LicenseState(
+        LicenseStatus.refused,
+        isRevoked: true,
+        message: '该授权已被停用，请联系卖家',
+      );
+      expect(st.allowsUsage, isFalse);
+      expect(st.isStrictlyTerminated, isTrue);
+    });
+
+    test('普通暂态 refused（指纹未就绪/网络暂态）→ 不得判定为严格终止', () {
+      const st = LicenseState(
+        LicenseStatus.refused,
+        isRevoked: false,
+        message: '授权与本机不匹配或已损坏',
+      );
+      expect(st.allowsUsage, isFalse);
+      expect(st.isStrictlyTerminated, isFalse); // 绝不能误当成真正注销
+    });
   });
 }

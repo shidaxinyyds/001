@@ -21,8 +21,15 @@ class LicenseState {
   final DateTime? expiresAt;
   final DateTime? tokenExp;
   final String? message;
+  final bool isRevoked;
 
-  const LicenseState(this.status, {this.expiresAt, this.tokenExp, this.message});
+  const LicenseState(
+    this.status, {
+    this.expiresAt,
+    this.tokenExp,
+    this.message,
+    this.isRevoked = false,
+  });
 
   bool get isUsable => status == LicenseStatus.valid;
 
@@ -41,4 +48,14 @@ class LicenseState {
 
   bool get isExpiredLike =>
       status == LicenseStatus.licenseExpired || status == LicenseStatus.refused;
+
+  /// 严苛的终止态判定：仅在真正过期或被服务端明确拉黑时成立，绝不拿瞬态错误当终止。
+  bool get isStrictlyTerminated {
+    if (isRevoked) return true;
+    if (status == LicenseStatus.licenseExpired) {
+      if (expiresAt == null) return true;
+      return DateTime.now().isAfter(expiresAt!);
+    }
+    return false;
+  }
 }

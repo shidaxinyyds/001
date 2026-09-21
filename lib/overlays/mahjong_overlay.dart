@@ -605,16 +605,20 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       // 到期/拉黑/换设备 → 硬锁；网络失败且本引擎读不到本地券 → 保持 fail-open，
       // 避免断网误伤正常用户（真到期由服务器回包 valid:false 或主闸门收窗兜底）。
       final st = await LicenseService.instance.heartbeat();
-      if (!mounted) return;
-      final denied = st.status == LicenseStatus.licenseExpired ||
-          st.status == LicenseStatus.refused;
+      final bool isExpired = st.status == LicenseStatus.licenseExpired &&
+          st.expiresAt != null &&
+          DateTime.now().isAfter(st.expiresAt!) &&
+          DateTime.fromMillisecondsSinceEpoch(
+                  LicenseService.instance.serverNowSec * 1000)
+              .isAfter(st.expiresAt!);
+      final bool denied = st.isRevoked || isExpired;
       final allows = !denied;
       final days = st.remainingDays;
-      final denyText = st.status == LicenseStatus.licenseExpired
+      final denyText = isExpired
           ? '卡密授权已到期，请重新激活'
           : ((st.message?.isNotEmpty ?? false)
               ? st.message!
-              : '授权已失效，请重新激活');
+              : '授权已被停用，请重新激活');
       if (allows != _licenseAllows ||
           days != _licenseDays ||
           denyText != _licenseDenyText) {

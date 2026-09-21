@@ -99,20 +99,36 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
       _expiryTimer = Timer(const Duration(seconds: 1), _refresh);
       return;
     }
-    // 【踢人铁律】只有真到期（licenseExpired，签名 expires_at 到达/服务器确认）
-    // 或服务端明确拒绝（refused，含 revoked/换设备/篡改）才允许退回激活页。
-    // 已放行会话撞上 notActivated（本地存储瞬时读空、设备指纹未就绪、
-    // 心跳竞态等）视为瞬态抖动：保持功能页继续运行，绝不误踢。
-    // 但豁免仅限“保留会话自身仍在有效期内”：存档 expiresAt 已过则不得再
-    // 借抖动静默续命，杜绝授权旁路。
-    if (st.status == LicenseStatus.notActivated &&
-        (_state?.allowsUsage ?? false) &&
-        _retainedSessionStillValid(_state!)) {
-      _scheduleExpiryCheck(_state!);
-      return;
+
+    // 【核心铁律：仅在真到期或确凿拉黑时才允许退回激活页】
+    // 若当前会话已经处于放行可用状态（_state?.allowsUsage == true）：
+    // 只要尚未被服务端明确拉黑（st.isRevoked），且自身有效期尚未真正到期：
+    // 无论最新检查结果是 notActivated、缺少指纹导致的 refused、网络抖动超时、
+    // 插件初始化延迟、还是服务器心跳并发竞态，统统原地保持功能页放行，严禁跳转激活页！
+    if (_state?.allowsUsage ?? false) {
+      final bool isRevoked = st.isRevoked;
+      final bool isExpired = (st.status == LicenseStatus.licenseExpired) &&
+          !_retainedSessionStillValid(_state!);
+
+      if (!isRevoked && !isExpired) {
+        // 既没有确凿拉黑，也没有真正到期（仍在有效期内）：
+        // 绝对不得踢回激活页，原地保持放行会话！
+        if (st.allowsUsage) {
+          setState(() {
+            _state = st;
+            _checking = false;
+          });
+          _scheduleExpiryCheck(st);
+        } else {
+          // 新状态是瞬态错误/网络失败/设备未就绪等异常：
+          // 原地维持原 _state 放行态，不关闭悬浮窗，不跳激活页，仅安排下次复核
+          _scheduleExpiryCheck(_state!);
+        }
+        return;
+      }
     }
-    // 主闸门所在引擎能读到本地凭证，是到期的权威判定方；一旦失权
-    // （到期/被拒/被拉黑）立即收起悬浮窗，兜住子窗无法自验签的到期场景。
+
+    // 真正失权（确凿拉黑或真正到期）时才收起悬浮窗并跳转激活页
     if (!st.allowsUsage) {
       try {
         if (await FlutterOverlayWindow.isActive()) {
@@ -127,13 +143,13 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
     _scheduleExpiryCheck(st);
   }
 
-  /// 被保留的会话是否仍在自身有效期内（以服务器锚定时间为准）。
+  /// 被保留的会话是否仍在自身有效期内（双时钟防误杀）。
   bool _retainedSessionStillValid(LicenseState st) {
     final exp = st.expiresAt;
-    if (exp == null) return false;
+    if (exp == null) return true;
     final serverNow = DateTime.fromMillisecondsSinceEpoch(
         LicenseService.instance.serverNowSec * 1000);
-    return exp.isAfter(serverNow);
+    return exp.isAfter(serverNow) || exp.isAfter(DateTime.now());
   }
 
   /// 若总到期在轮询间隔内（如 10 分钟短卡），排一个到期精确 one-shot，
