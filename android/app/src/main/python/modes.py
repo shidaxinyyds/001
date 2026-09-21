@@ -290,41 +290,106 @@ def mode_keys() -> List[str]:
     return list(MODES.keys())
 
 
-_MODE_CACHE = {"mtime": 0.0, "check_time": 0.0, "mode": DEFAULT_MODE}
+_EXPLICIT_MODE: Optional[str] = None
+_CONFIG_DIR: Optional[str] = None
+# path 与 mtime 联合判缓存命中：候选路径列表可能因 set_config_dir 推送而重排，
+# 只有「同一物理文件 + 未变更」才算命中，避免跨路径误共享 mtime。
+_MODE_CACHE = {"path": "", "mtime": 0.0, "check_time": 0.0, "mode": DEFAULT_MODE}
+
+
+def set_config_dir(path: str) -> None:
+    """Java 原生层传入真实外部存储 files 目录绝对路径。"""
+    global _CONFIG_DIR
+    if path and isinstance(path, str):
+        _CONFIG_DIR = path
+        _MODE_CACHE["check_time"] = 0.0
+
+
+def set_mode_explicit(key: str) -> bool:
+    """显式设置当前玩法，优先级最高，直接绕过磁盘 IO。"""
+    global _EXPLICIT_MODE
+    if not key:
+        return False
+    key = str(key).strip().lower()
+    norm = ALIASES.get(key, key)
+    if norm in MODES:
+        _EXPLICIT_MODE = norm
+        _MODE_CACHE["mode"] = norm
+        _MODE_CACHE["check_time"] = time.time()
+        return True
+    return False
+
+
+def _get_candidate_paths(filename: str) -> List[str]:
+    """收集可能的配置文件物理路径列表（兼容各类 Android 版本与虚拟机）。"""
+    paths = []
+    if _CONFIG_DIR:
+        paths.append(os.path.join(_CONFIG_DIR, filename))
+    # 尝试从 Chaquopy 获取真实 Android 应用上下文路径
+    try:
+        from com.chaquo.python import Python
+        ctx = Python.getPlatform().getApplication()
+        if ctx:
+            ext = ctx.getExternalFilesDir(None)
+            if ext:
+                paths.append(os.path.join(str(ext.getAbsolutePath()), filename))
+            int_f = ctx.getFilesDir()
+            if int_f:
+                paths.append(os.path.join(str(int_f.getAbsolutePath()), filename))
+    except Exception:
+        pass
+    # 兜底硬编码路径
+    paths.append(os.path.join("/storage/emulated/0/Android/data/com.example.auto_vision/files", filename))
+    paths.append(os.path.join("/sdcard/Android/data/com.example.auto_vision/files", filename))
+    paths.append(os.path.join("/data/data/com.example.auto_vision/files", filename))
+    paths.append(filename)
+    return paths
 
 
 def load_mode() -> str:
-    """从共享文件读取当前玩法键，带内存与时间戳缓存防每帧磁盘 IO 阻塞。"""
+    """从内存显式配置或共享文件读取当前玩法键，带内存与时间戳缓存防每帧磁盘 IO 阻塞。"""
+    global _EXPLICIT_MODE
+    if _EXPLICIT_MODE is not None:
+        return _EXPLICIT_MODE
+
     now = time.time()
     if now - _MODE_CACHE["check_time"] < 0.5:
         return _MODE_CACHE["mode"]
     _MODE_CACHE["check_time"] = now
-    try:
-        if not os.path.exists(MODE_PATH):
-            return _MODE_CACHE["mode"]
-        mtime = os.path.getmtime(MODE_PATH)
-        if mtime == _MODE_CACHE["mtime"]:
-            return _MODE_CACHE["mode"]
-        with open(MODE_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        m = data.get("mode", DEFAULT_MODE)
-        res = ALIASES.get(m, m) if m in MODES or m in ALIASES else DEFAULT_MODE
-        _MODE_CACHE["mtime"] = mtime
-        _MODE_CACHE["mode"] = res
-        return res
-    except (OSError, ValueError, TypeError):
-        return _MODE_CACHE["mode"]
+
+    candidate_paths = _get_candidate_paths("mahjong_mode.json")
+    for path in candidate_paths:
+        try:
+            if not os.path.exists(path):
+                continue
+            mtime = os.path.getmtime(path)
+            if path == _MODE_CACHE["path"] and mtime == _MODE_CACHE["mtime"]:
+                return _MODE_CACHE["mode"]
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            m = data.get("mode", DEFAULT_MODE)
+            res = ALIASES.get(m, m) if m in MODES or m in ALIASES else DEFAULT_MODE
+            _MODE_CACHE["path"] = path
+            _MODE_CACHE["mtime"] = mtime
+            _MODE_CACHE["mode"] = res
+            return res
+        except (OSError, ValueError, TypeError):
+            continue
+
+    return _MODE_CACHE["mode"]
 
 
 def save_mode(key: str) -> bool:
     """把玩法键写入共享文件，供 Python 引擎读取。"""
     if key not in MODES:
         return False
+    candidate_paths = _get_candidate_paths("mahjong_mode.json")
+    target_path = candidate_paths[0] if candidate_paths else MODE_PATH
     try:
-        d = os.path.dirname(MODE_PATH)
+        d = os.path.dirname(target_path)
         if d:
             os.makedirs(d, exist_ok=True)
-        with open(MODE_PATH, "w", encoding="utf-8") as f:
+        with open(target_path, "w", encoding="utf-8") as f:
             json.dump({"mode": key}, f)
         _MODE_CACHE["check_time"] = 0.0
         return True
@@ -351,6 +416,7 @@ DEFAULT_WARN_DEAL_IN = False
 DEFAULT_WARN_PON_KONG = False
 
 _ADVICE_CACHE = {
+    "path": "",
     "mtime": 0.0,
     "check_time": 0.0,
     "cfg": {
@@ -382,35 +448,40 @@ def load_advice_config() -> Dict:
     minu = DEFAULT_MIN_UKEIRE
     wdi = DEFAULT_WARN_DEAL_IN
     wpk = DEFAULT_WARN_PON_KONG
-    try:
-        if not os.path.exists(ADVICE_PATH):
-            return dict(_ADVICE_CACHE["cfg"])
-        mtime = os.path.getmtime(ADVICE_PATH)
-        if mtime == _ADVICE_CACHE["mtime"]:
-            return dict(_ADVICE_CACHE["cfg"])
-        with open(ADVICE_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        v = data.get("show_advice", show)
-        if isinstance(v, bool):
-            show = v
-        n = data.get("min_ukeire", minu)
-        # bool 是 int 的子类，这里必须显式排除，避免把 True 当成 1。
-        if isinstance(n, int) and not isinstance(n, bool):
-            minu = n if n > 0 else DEFAULT_MIN_UKEIRE
-        d = data.get("warn_deal_in", wdi)
-        if isinstance(d, bool):
-            wdi = d
-        k = data.get("warn_pon_kong", wpk)
-        if isinstance(k, bool):
-            wpk = k
-        cfg = {
-            "show_advice": show,
-            "min_ukeire": minu,
-            "warn_deal_in": wdi,
-            "warn_pon_kong": wpk,
-        }
-        _ADVICE_CACHE["mtime"] = mtime
-        _ADVICE_CACHE["cfg"] = cfg
-        return dict(cfg)
-    except (OSError, ValueError, TypeError, AttributeError):
-        return dict(_ADVICE_CACHE["cfg"])
+
+    candidate_paths = _get_candidate_paths("mahjong_advice.json")
+    for path in candidate_paths:
+        try:
+            if not os.path.exists(path):
+                continue
+            mtime = os.path.getmtime(path)
+            if path == _ADVICE_CACHE["path"] and mtime == _ADVICE_CACHE["mtime"]:
+                return dict(_ADVICE_CACHE["cfg"])
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            v = data.get("show_advice", show)
+            if isinstance(v, bool):
+                show = v
+            n = data.get("min_ukeire", minu)
+            if isinstance(n, int) and not isinstance(n, bool):
+                minu = n if n > 0 else DEFAULT_MIN_UKEIRE
+            d = data.get("warn_deal_in", wdi)
+            if isinstance(d, bool):
+                wdi = d
+            k = data.get("warn_pon_kong", wpk)
+            if isinstance(k, bool):
+                wpk = k
+            cfg = {
+                "show_advice": show,
+                "min_ukeire": minu,
+                "warn_deal_in": wdi,
+                "warn_pon_kong": wpk,
+            }
+            _ADVICE_CACHE["path"] = path
+            _ADVICE_CACHE["mtime"] = mtime
+            _ADVICE_CACHE["cfg"] = cfg
+            return dict(cfg)
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+
+    return dict(_ADVICE_CACHE["cfg"])

@@ -201,6 +201,22 @@ public class ImageProcessor {
             return false;
         }
         TimedLog.i(TAG, "started Python");
+        // 把配置目录与当前持久化模式推给引擎
+        try {
+            File extDir = context != null ? context.getExternalFilesDir(null) : null;
+            if (extDir != null) {
+                engine.callAttr("set_config_dir", extDir.getAbsolutePath());
+            }
+            File intDir = context != null ? context.getFilesDir() : null;
+            if (intDir != null && extDir == null) {
+                engine.callAttr("set_config_dir", intDir.getAbsolutePath());
+            }
+            if (pendingMode != null) {
+                engine.callAttr("set_mode", pendingMode);
+            }
+        } catch (Throwable t) {
+            TimedLog.e(TAG, "配置目录/模式推入失败（不影响基础运行）: " + t);
+        }
         // 牌河采集目录推给引擎（仅在配置了「牌河采集」时引擎才会真正写盘）。
         // 引擎用普通文件 IO 写应用私有外部目录，无需存储权限；adb pull 可取回。
         try {
@@ -214,6 +230,22 @@ public class ImageProcessor {
         }
         sendStatus(NetworkClient.statusJson("engine_ready", null));
         return true;
+    }
+
+    private volatile String pendingMode = null;
+
+    public void setMode(String mode) {
+        if (mode == null || mode.trim().isEmpty()) return;
+        String m = mode.trim().toLowerCase();
+        pendingMode = m;
+        if (engine != null) {
+            try {
+                engine.callAttr("set_mode", m);
+                TimedLog.i(TAG, "setMode 即时推送到 Python 引擎: " + m);
+            } catch (Throwable t) {
+                TimedLog.e(TAG, "setMode 推送失败（引擎将经文件轮询兜底读到新玩法）: " + t);
+            }
+        }
     }
 
     // 单帧处理（Python 推理）可能超过 500ms 的采集间隔。

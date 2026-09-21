@@ -30,6 +30,8 @@ from trainer.utils.convert import mpsz_to_tile34_index, tiles34_index_to_mpsz, t
 from modes import (
     load_mode,
     load_advice_config,
+    set_config_dir as _modes_set_config_dir,
+    set_mode_explicit as _modes_set_mode_explicit,
     hand_sizes,
     available_set,
     MODES,
@@ -1482,6 +1484,24 @@ class Engine:
         """调试页开关：实时修改识别策略。未知 key 静默忽略。"""
         if key in self._cfg:
             self._cfg[key] = bool(value)
+
+    def set_config_dir(self, path) -> None:
+        """Java 侧推入真实外部 files 目录（getExternalFilesDir 实际返回值）。
+
+        修复「切了玩法规则不变」：部分机型/虚拟机上外部存储实际路径与
+        硬编码 /storage/emulated/0/... 不一致，引擎轮询永远读不到模式文件。
+        """
+        try:
+            _modes_set_config_dir(str(path) if path else "")
+        except Exception:
+            pass
+
+    def set_mode(self, key) -> None:
+        """Java 侧显式推送当前玩法（内存优先级最高，不等磁盘轮询）。"""
+        try:
+            _modes_set_mode_explicit(str(key) if key else "")
+        except Exception:
+            pass
 
     # 每轮采集上限：牌河状态签名去重后，一次长局约产生 60~150 帧，
     # 1200 足够几天采样用尽前不会撑爆存储（单帧 ≈ 300KB，上限约 360MB 前

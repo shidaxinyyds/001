@@ -91,6 +91,12 @@ public class MainActivity extends FlutterActivity {
         String mode = call.argument("mode");
         toRun = () -> {
           int rc = writeModeFile(mode);
+          // 文件通道对「引擎未启动/路径不一致」有兼容，但对「正在跑的引擎」
+          // 最慢要等缓存周期；这里额外经引擎实例显式推送，切换即时生效。
+          ImageProcessor p = processor;
+          if (p != null) {
+            p.setMode(mode);
+          }
           result.success(rc);
         };
       }
