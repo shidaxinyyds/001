@@ -1377,7 +1377,18 @@ class Engine:
             self._table_ev_tick = tick
             if tick % 4 == 1:
                 ev = False
+                # 【死锁修复】此处必须与下方 max_felt<0.18 兜底分支一样惰性初始化
+                # detector。process() 在牌桌校验失败时会提前 return，永远走不到后段
+                # 真正创建 detector 的 get_detector()。若这里只读 self._detector（首帧为
+                # None），则 ev 恒 False → 缓存 False → 返回 waiting → detector 永不创建，
+                # 形成「早期干净牌桌（中央近乎纯色桌布占比>=0.90）永久卡等待牌局开始」的
+                # 鸡生蛋死锁。惰性初始化后 detect_hand_strip 得以运行，实证有手牌即放行。
                 det = getattr(self, "_detector", None)
+                if det is None:
+                    try:
+                        det = self.get_detector()
+                    except Exception:
+                        det = None
                 if det is not None and hasattr(det, "detect_hand_strip"):
                     try:
                         ev = len(det.detect_hand_strip(image)) >= 7

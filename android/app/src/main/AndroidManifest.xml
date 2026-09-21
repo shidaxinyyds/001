@@ -7,6 +7,10 @@
          否则 startForeground() 抛 SecurityException，录屏识别根本起不来 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 设备信息卡片：读取当前网络类型（Wi-Fi/移动数据/离线）需要该普通权限，
+         安装时自动授予、不弹运行时窗。运营商名走 TelephonyManager
+         .getNetworkOperatorName()，本身无需权限。 -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <!-- 防平台检测：前台感知采样需要读取「当前前台 App」，

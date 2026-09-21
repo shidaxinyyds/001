@@ -6,9 +6,12 @@ import android.content.Intent;
 import android.content.res.Configuration;
 import android.media.projection.MediaProjectionConfig;
 import android.media.projection.MediaProjectionManager;
+import android.net.ConnectivityManager;
+import android.net.NetworkInfo;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.telephony.TelephonyManager;
 import android.util.DisplayMetrics;
 import android.view.WindowMetrics;
 import androidx.annotation.NonNull;
@@ -21,6 +24,8 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
@@ -166,6 +171,14 @@ public class MainActivity extends FlutterActivity {
         return;
       }
 
+      if (call.method.equals("getDeviceInfo")) {
+        // 设备信息卡片：返回真实本机信息（品牌/制造商/型号/系统版本/网络类型/
+        // 运营商）。均为轻量只读，主线程直接返回；任何异常一律安全兜底，
+        // 绝不抛出到 UI 线程（否则整页闪退）。
+        result.success(buildDeviceInfo());
+        return;
+      }
+
       if (call.method.equals("getDeviceId")) {
         // 卡密设备指纹：ANDROID_ID + 机型指纹做 SHA-256，返回 hex。
         // 不取 IMEI/序列号（权限受限），ANDROID_ID 在 8.0+ 按签名稳定。
@@ -215,6 +228,56 @@ public class MainActivity extends FlutterActivity {
         return null;
       });
     });
+  }
+
+  /**
+   * 组装设备信息卡所需的真实本机数据。
+   * 全部为轻量只读，且逐项 try/catch 兜底：拿不到的字段回退为空串/unknown，
+   * 绝不因单个系统 API 异常而中断整次调用（Dart 侧据空值显示“未知”）。
+   */
+  private Map<String, Object> buildDeviceInfo() {
+    Map<String, Object> m = new HashMap<>();
+    m.put("brand", Build.BRAND == null ? "" : Build.BRAND);
+    m.put("manufacturer", Build.MANUFACTURER == null ? "" : Build.MANUFACTURER);
+    m.put("model", Build.MODEL == null ? "" : Build.MODEL);
+    m.put("os_release", Build.VERSION.RELEASE == null ? "" : Build.VERSION.RELEASE);
+    m.put("sdk_int", Build.VERSION.SDK_INT);
+
+    String netType = "unknown";
+    try {
+      ConnectivityManager cm = (ConnectivityManager) getApplicationContext()
+          .getSystemService(Context.CONNECTIVITY_SERVICE);
+      if (cm != null) {
+        NetworkInfo ni = cm.getActiveNetworkInfo();
+        if (ni != null && ni.isConnected()) {
+          int t = ni.getType();
+          if (t == ConnectivityManager.TYPE_WIFI) {
+            netType = "wifi";
+          } else if (t == ConnectivityManager.TYPE_MOBILE) {
+            netType = "cellular";
+          } else {
+            netType = "other";
+          }
+        } else {
+          netType = "offline";
+        }
+      }
+    } catch (Throwable ignore) {
+    }
+    m.put("network_type", netType);
+
+    String carrier = "";
+    try {
+      TelephonyManager tm = (TelephonyManager) getApplicationContext()
+          .getSystemService(Context.TELEPHONY_SERVICE);
+      if (tm != null && tm.getNetworkOperatorName() != null) {
+        carrier = tm.getNetworkOperatorName();
+      }
+    } catch (Throwable ignore) {
+    }
+    m.put("carrier", carrier);
+
+    return m;
   }
 
   @Override

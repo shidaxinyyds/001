@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:auto_vision/overlays/mahjong_overlay.dart';
+import 'package:auto_vision/device_info_card.dart';
 
 /// 判定一个颜色是否"看起来是红/橙系"。
 /// 判据：红通道明显高于绿和蓝，且红通道本身较亮。
@@ -238,6 +239,27 @@ void main() {
 
     test('非法 JSON 返回 null 而不抛异常', () {
       expect(parseEngineResult('not json\n'.codeUnits), isNull);
+    });
+  });
+
+  group('设备信息卡片鲁棒性', () {
+    // 测试环境无原生插件：getDeviceInfo / isPermissionGranted 会抛
+    // MissingPluginException。卡片必须逐项兜底为“未知”，绝不崩溃。
+    testWidgets('平台通道不可用时不抛异常且正常渲染',
+        (WidgetTester tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(home: Scaffold(body: DeviceInfoCard())),
+      );
+      // 卡片刷新时短暂显示进度环（无限动画），故不能用 pumpAndSettle（会超时）。
+      // 标签文字为静态，不依赖异步 _refresh 完成，用有限次 pump 验证不崩溃即可。
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 80));
+      expect(tester.takeException(), isNull);
+      expect(find.text('设备信息'), findsOneWidget);
+      expect(find.text('系统'), findsOneWidget);
+      expect(find.text('机型'), findsOneWidget);
+      expect(find.text('网络'), findsOneWidget);
+      expect(find.text('悬浮窗'), findsOneWidget);
     });
   });
 }
