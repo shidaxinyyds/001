@@ -8,9 +8,10 @@ import 'license_service.dart';
 import 'license_status.dart';
 
 /// 授权闸门：包住主页。
-///   - 启动即本地校验短期凭证；有效 → 直接放行（离线秒开）。
+///   - 启动即服务器心跳核验；有效 → 直接放行（离线秒开）。
 ///   - 无效/未激活/到期 → 显示激活页，输入卡密联网激活。
-///   - 放行后仍每 30 分钟静默复核一次，到期即自动退回激活页。
+///   - 放行后：进前台(resume)、每 30 分钟、以及到期精确点都会强制心跳复核，
+///     失权即自动退回激活页并收起悬浮窗。
 class LicenseGate extends StatefulWidget {
   final Widget child;
   const LicenseGate({Key? key, required this.child}) : super(key: key);
@@ -19,34 +20,48 @@ class LicenseGate extends StatefulWidget {
   State<LicenseGate> createState() => _LicenseGateState();
 }
 
-class _LicenseGateState extends State<LicenseGate> {
+class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
   static const Color _accent = Color(0xFF0D9488);
+  // 常规定期轮询间隔；短卡到期由精确 one-shot 定时器兜住。
+  static const Duration _pollInterval = Duration(minutes: 30);
 
   final TextEditingController _code = TextEditingController();
   LicenseState? _state;
   bool _checking = true;
   bool _busy = false;
   Timer? _timer;
+  Timer? _expiryTimer;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _refresh();
-    // 放行后低频复核：到期/被拉黑最迟 30 分钟内退回（凭证本身到期也会触发续签）。
-    _timer = Timer.periodic(const Duration(minutes: 30), (_) => _refresh());
+    // 低频轮询作为兜底：到期/被拉黑最迟 30 分钟内退回（到期精确点另有 one-shot 兜底）。
+    _timer = Timer.periodic(_pollInterval, (_) => _refresh());
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _timer?.cancel();
+    _expiryTimer?.cancel();
     _code.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 进入前台：立即强制一次服务器心跳核验（对齐需求“每次进入前台”）。
+    if (state == AppLifecycleState.resumed) {
+      _refresh();
+    }
   }
 
   Future<void> _refresh() async {
     LicenseState? st;
     try {
-      st = await LicenseService.instance.ensureUsable();
+      st = await LicenseService.instance.heartbeat();
     } catch (_) {
       // 授权检查自身异常绝不闪退：兜底为"未激活"，交给激活页。
       st = const LicenseState(LicenseStatus.notActivated);
@@ -65,6 +80,25 @@ class _LicenseGateState extends State<LicenseGate> {
       _state = st;
       _checking = false;
     });
+    _scheduleExpiryCheck(st);
+  }
+
+  /// 若总到期在轮询间隔内（如 10 分钟短卡），排一个到期精确 one-shot，
+  /// 到期即时复核；否则交给 30 分钟轮询，不占用长时效定时器。
+  void _scheduleExpiryCheck(LicenseState st) {
+    _expiryTimer?.cancel();
+    final exp = st.expiresAt;
+    if (exp == null || !st.allowsUsage) return;
+    final serverNow = DateTime.fromMillisecondsSinceEpoch(
+        LicenseService.instance.serverNowSec * 1000);
+    final remainMs = exp.difference(serverNow).inMilliseconds;
+    if (remainMs <= 0) {
+      _refresh();
+      return;
+    }
+    if (remainMs > _pollInterval.inMilliseconds) return; // 长时效卡交给轮询
+    _expiryTimer = Timer(
+        Duration(milliseconds: remainMs + 1500), _refresh);
   }
 
   Future<void> _activate() async {

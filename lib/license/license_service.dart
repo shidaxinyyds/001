@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -12,27 +13,54 @@ import 'token.dart';
 /// 授权服务单例。主引擎与悬浮窗引擎各自持有实例，但共用同一份
 /// SharedPreferences（同 app 私有区），因此后台续签写入后悬浮窗可读到。
 ///
-/// 放行判定：
+/// 放行判定（一律以服务器签名时间为准，本地时钟仅用于测流逝）：
 ///   - 凭证有效且未过期 → valid（离线可用）
-///   - 凭证到续签点 → 联网 renew；网络失败但仍在宽限内 → needsRenew（软，仍可用）
-///   - 服务端明确 expired / revoked / 换设备 / 改时间 → 硬拒绝
+///   - 凭证到续签点 → 联网 renew；网络失败但仍在 72h 宽限内 → needsRenew（软，仍可用）
+///   - 服务端心跳明确 expired / revoked / 换设备 / 改时间 → 硬拒绝
 class LicenseService {
-  LicenseService._();
+  LicenseService._({LicenseClient? client}) : _client = client ?? LicenseClient();
   static final LicenseService instance = LicenseService._();
 
   static const String _kToken = 'lic_token';
   static const String _kMaxWallMs = 'lic_max_wall_ms';
+  // 服务器时间高水位（epoch 秒）：跨进程重启仍单调不回退，防重启后调时钟属滥用。
+  static const String _kMaxServerNowS = 'lic_max_server_now_s';
   // 改时间回拨容忍窗口：比这个大得多的回拨视为篡改。
   static const int _rollbackTolS = 86400; // 1 天
-  // 凭证到期后的网络宽限：宽限内 renew 失败仍可离线用。
-  static const int _graceS = 86400; // 1 天
+  // 凭证到期后的网络宽限：宽限内 renew/心跳失败仍可离线用（最多 72 小时）。
+  static const int _graceS = 259200; // 72 小时
 
   final MethodChannel _ch = const MethodChannel(CHANNEL_NAME);
-  final LicenseClient _client = LicenseClient();
+  final LicenseClient _client;
 
   SharedPreferences? _prefs;
   String? _deviceId;
   bool _ready = false;
+
+  // 服务器时间锚点：_srvNowS 为上次心跳的服务器秒，_srvBaseElapsedMs 为当时单调钟读数。
+  // 单调钟(Stopwatch)测流逝，本地墙钟被前调/后拨都无法伪造"当前服务器时间"。
+  int? _srvNowS;
+  int _srvBaseElapsedMs = 0;
+  final Stopwatch _mono = Stopwatch()..start();
+
+  // ===== 测试钩子（不改变生产行为）=====
+  @visibleForTesting
+  static LicenseService newForTest({LicenseClient? client}) =>
+      LicenseService._(client: client);
+
+  @visibleForTesting
+  void primeForTest({required String deviceId, SharedPreferences? prefs}) {
+    _deviceId = deviceId;
+    _prefs = prefs;
+    _ready = true;
+  }
+
+  @visibleForTesting
+  void noteServerTimeForTest(int serverNowSec) => _noteServerTime(serverNowSec);
+
+  /// 直接对已验签的凭证求值（跳过 HMAC），便于无密钥环境下测试到期/宽限/服务器时间。
+  @visibleForTesting
+  LicenseState evaluateForTest(LicenseToken tk) => _evaluate(tk);
 
   Future<void> init() async {
     if (_ready) return;
@@ -52,6 +80,9 @@ class LicenseService {
   }
 
   String get deviceId => _deviceId ?? '';
+
+  /// 当前服务器锚定时间（epoch 秒），供上层排到期精确定时器。
+  int get serverNowSec => _effectiveNowSec();
 
   // ===== 本地状态计算（不联网）=====
 
@@ -85,16 +116,55 @@ class LicenseService {
     return false;
   }
 
-  LicenseState _evaluate(LicenseToken tk, DateTime now) {
+  // ===== 服务器时间锚点（防本地时钟篡改的唯一时间基准）=====
+
+  /// 记录一次服务器签名时间，重置单调锚点；并把高水位 best-effort 落盘（主引擎）。
+  void _noteServerTime(int? serverTimeSec) {
+    if (serverTimeSec == null || serverTimeSec <= 0) return;
+    _srvNowS = serverTimeSec;
+    _srvBaseElapsedMs = _mono.elapsedMilliseconds;
+    final p = _prefs;
+    if (p != null) {
+      final floor = p.getInt(_kMaxServerNowS) ?? 0;
+      if (serverTimeSec > floor) p.setInt(_kMaxServerNowS, serverTimeSec);
+    }
+  }
+
+  /// 当前"服务器时间"秒：有锚点则 = 上次服务器秒 + 单调流逝；无锚点退回本地墙钟。
+  /// 无论哪种，都不得回退到已知高水位之下（防重启后调时钟/断网前调后移到未来）。
+  int _effectiveNowSec() {
+    final localSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final s = _srvNowS;
+    int eff;
+    if (s != null) {
+      final elapsedSec = (_mono.elapsedMilliseconds - _srvBaseElapsedMs) ~/ 1000;
+      eff = s + elapsedSec;
+      final p = _prefs;
+      if (p != null && eff > (p.getInt(_kMaxServerNowS) ?? 0)) {
+        p.setInt(_kMaxServerNowS, eff); // 仅在有锚点时推进高水位
+      }
+    } else {
+      eff = localSec;
+    }
+    final floor = _prefs?.getInt(_kMaxServerNowS) ?? 0;
+    if (floor > eff) eff = floor;
+    return eff;
+  }
+
+  DateTime _serverNow() =>
+      DateTime.fromMillisecondsSinceEpoch(_effectiveNowSec() * 1000);
+
+  LicenseState _evaluate(LicenseToken tk) {
     final expiresAt =
         DateTime.fromMillisecondsSinceEpoch(tk.expiresAt * 1000);
     final tokenExp = DateTime.fromMillisecondsSinceEpoch(tk.tokenExp * 1000);
-    final nowMs = now.millisecondsSinceEpoch;
-
-    if (_clockTampered(nowMs)) {
+    // 回拨检测必须用本地墙钟（唯一能发现用户把时间调过去的信号）。
+    if (_clockTampered(DateTime.now().millisecondsSinceEpoch)) {
       return LicenseState(LicenseStatus.refused,
           expiresAt: expiresAt, message: '检测到系统时间被回拨，请联网校准');
     }
+    // 到期/宽限比较一律用服务器锚定时间，本地时钟无法伪造。
+    final now = _serverNow();
     if (expiresAt.isBefore(now)) {
       // 总授权到期 → 自动销毁，需新卡密。
       return LicenseState(LicenseStatus.licenseExpired, expiresAt: expiresAt);
@@ -114,9 +184,9 @@ class LicenseService {
   }
 
   /// 是否已接近续签点（提前 renewLeadS 触发）。
-  bool _dueRenew(LicenseToken tk, DateTime now) {
+  bool _dueRenew(LicenseToken tk) {
     final tokenExp = DateTime.fromMillisecondsSinceEpoch(tk.tokenExp * 1000);
-    return !now.isBefore(
+    return !_serverNow().isBefore(
         tokenExp.subtract(const Duration(seconds: LicenseConfig.renewLeadS)));
   }
 
@@ -124,7 +194,7 @@ class LicenseService {
 
   Future<LicenseState> ensureUsable() async {
     await init();
-    final now = DateTime.now();
+    final now = _serverNow();
     final tk = _loadToken();
     if (tk == null) {
       final p = _prefs;
@@ -133,7 +203,7 @@ class LicenseService {
       return LicenseState(had ? LicenseStatus.refused : LicenseStatus.notActivated,
           message: had ? '授权与本机不匹配或已损坏' : null);
     }
-    var st = _evaluate(tk, now);
+    var st = _evaluate(tk);
     // 续签触发：①needsRenew(宽限内)；②licenseExpired；③refused 且凭证已超宽限。
     // 后两类中，expires_at / token_exp 都是 HMAC 签名的本地不可改：
     //  - refused+超宽限：用户离线过久但卡可能仍有效 → 必须给续签机会；
@@ -146,24 +216,24 @@ class LicenseService {
     final renewTrigger = st.status == LicenseStatus.needsRenew ||
         st.status == LicenseStatus.licenseExpired ||
         pastGraceRefused ||
-        (st.status == LicenseStatus.valid && _dueRenew(tk, now));
+        (st.status == LicenseStatus.valid && _dueRenew(tk));
     if (renewTrigger) {
       // 悬浮窗等独立引擎拿不到设备指纹（deviceId 为空）：服务端按 device 定位授权，
       // 空号会被拒（no_device）导致误锁。续签交给主 App 做，这里只信本地验签结果。
       if (deviceId.isEmpty) return st;
-      st = await _tryRenew(tk, st, now);
+      st = await _tryRenew(tk, st);
     }
     return st;
   }
 
-  Future<LicenseState> _tryRenew(
-      LicenseToken tk, LicenseState cur, DateTime now) async {
+  Future<LicenseState> _tryRenew(LicenseToken tk, LicenseState cur) async {
     final r = await _client.renew(deviceId);
     if (r.ok && r.token != null) {
+      _noteServerTime(r.serverTime);
       _saveToken(r.token!);
       final re = LicenseToken.parseAndVerify(
           r.token!, LicenseConfig.licenseTokenSecretHex, deviceId);
-      if (re != null) return _evaluate(re, DateTime.now());
+      if (re != null) return _evaluate(re);
       return LicenseState(LicenseStatus.valid,
           expiresAt: DateTime.fromMillisecondsSinceEpoch(tk.expiresAt * 1000));
     }
@@ -188,10 +258,11 @@ class LicenseService {
     }
     final r = await _client.activate(deviceId, input);
     if (r.ok && r.token != null) {
+      _noteServerTime(r.serverTime);
       _saveToken(r.token!);
       final re = LicenseToken.parseAndVerify(
           r.token!, LicenseConfig.licenseTokenSecretHex, deviceId);
-      if (re != null) return _evaluate(re, DateTime.now());
+      if (re != null) return _evaluate(re);
     }
     if (r.networkError) {
       return const LicenseState(LicenseStatus.notActivated,
@@ -203,6 +274,48 @@ class LicenseService {
   /// 强制下线时清理本地凭证（调试/换卡用）。
   void logout() {
     _clearToken();
+  }
+
+  /// 本地离线判定（不联网）：本地验签券 + 服务器时间锚点 + 72h 宽限。
+  LicenseState _localEval() {
+    final tk = _loadToken();
+    if (tk == null) {
+      final had = (_prefs?.getString(_kToken) ?? '').isNotEmpty;
+      return LicenseState(had ? LicenseStatus.refused : LicenseStatus.notActivated,
+          message: had ? '授权与本机不匹配或已损坏' : null);
+    }
+    return _evaluate(tk);
+  }
+
+  /// 轻量级心跳核验（主 App 与悬浮窗子引擎共用）。
+  /// 服务器按 device_id 读一行授权→权威判 valid + 回服务器时间；拿到有效回包
+  /// 才继续放行；明确无效则立即硬锁；仅网络失败时走离线宽限（绝不因断网误锁）。
+  Future<LicenseState> heartbeat() async {
+    await init();
+    if (deviceId.isEmpty) {
+      // 拿不到设备指纹：无法按设备心跳，退回本地判定（保 fail-open，绝不误锁正常用户）。
+      return ensureUsable();
+    }
+    final r = await _client.heartbeat(deviceId);
+    if (r.networkError) {
+      // 心跳失败≠授权失效：按本地券 + 服务器锚点 + 72h 宽限离线判定。
+      return _localEval();
+    }
+    _noteServerTime(r.serverTime); // 收到服务器时间就刷新锚点
+    final expDt = r.expiresAt != null
+        ? DateTime.fromMillisecondsSinceEpoch(r.expiresAt! * 1000)
+        : null;
+    if (!r.valid) {
+      // 服务器明确：到期/拉黑/查无 → 清本地券，杜绝残留券被复用（含换设备后旧券）。
+      _clearToken();
+      if (r.revoked) {
+        return LicenseState(LicenseStatus.refused,
+            expiresAt: expDt, message: '该授权已被停用，请联系卖家');
+      }
+      return LicenseState(LicenseStatus.licenseExpired, expiresAt: expDt);
+    }
+    // 服务器判仍有效：走 ensureUsable（临近续签点时顺带换新券并刷新锚点）。
+    return ensureUsable();
   }
 
   String _friendly(String? err) {

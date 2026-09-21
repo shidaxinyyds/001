@@ -75,19 +75,53 @@ async function touchDb(): Promise<number> {
   return res.status;
 }
 
+// 设备心跳：只读该设备的一行授权，服务端权威判定 valid + 回服务器时间。
+// 客户端据此做「以服务器时间为准」的到期强制，杜绝本地时钟篡改与后台免费滥用。
+async function heartbeatDevice(
+  device: string,
+): Promise<{ valid: boolean; revoked: boolean; expiresAt: number | null; error?: string }> {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/licenses?select=expires_at,revoked&device_id=eq.${encodeURIComponent(device)}&limit=1`,
+    { headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` } },
+  );
+  const rows = await res.json().catch(() => [] as any[]);
+  const now = Math.floor(Date.now() / 1000);
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return { valid: false, revoked: false, expiresAt: null, error: "not_found" };
+  }
+  const row = rows[0];
+  const revoked = row.revoked === true;
+  const expiresAt = row.expires_at ? Math.floor(Date.parse(row.expires_at) / 1000) : null;
+  const valid = !revoked && expiresAt !== null && expiresAt > now;
+  return { valid, revoked, expiresAt };
+}
+
 async function handle(req: Request): Promise<Response> {
   const json = await req.json().catch(() => ({} as any));
   const action = String(json.action ?? "");
   const device = String(json.device_id ?? "").trim();
   const code = String(json.code ?? "").trim();
 
-  // 注：不在这里统一要求 device —— heartbeat 不需要设备号；
-  // activate / renew 各自在分支内校验。
+  // 注：不在这里统一要求 device —— heartbeat 无 device 时只做 CI 保活；
+  // 带 device 的 heartbeat 才按设备读授权行。activate / renew 各自在分支内校验。
   let out: any;
   if (action === "heartbeat") {
-    // GitHub Actions 保活用：读一行即算数据库活动，防止免费项目 7 天空闲被暂停。
+    const now = Math.floor(Date.now() / 1000);
+    if (device) {
+      // 设备心跳：读该设备一行授权，服务端权威判 valid + 回服务器时间。
+      const hb = await heartbeatDevice(device);
+      return Response.json({
+        ok: true,
+        valid: hb.valid,
+        revoked: hb.revoked,
+        expires_at: hb.expiresAt,
+        server_time: now,
+        error: hb.error ?? null,
+      });
+    }
+    // GitHub Actions 保活用（无 device）：读一行即算数据库活动，防免费项目 7 天空闲被暂停。
     const status = await touchDb();
-    return Response.json({ ok: true, db: status });
+    return Response.json({ ok: true, db: status, server_time: now });
   } else if (action === "activate") {
     if (!device) return Response.json({ ok: false, error: "no_device" });
     if (!code) return Response.json({ ok: false, error: "no_code" });
@@ -121,6 +155,7 @@ async function handle(req: Request): Promise<Response> {
     expires_at: expiresAt,
     token_exp: tokenExp,
     card_type: out.card_type ?? null,
+    server_time: now,
   });
 }
 

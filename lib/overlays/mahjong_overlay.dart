@@ -467,10 +467,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   bool _isResizing = false;
   bool _hitLimitFeedback = false;
 
-  // ── 授权自守护（悬浮窗独立引擎也本地验签，到期即不显示建议）──
+  // ── 授权自守护（悬浮窗子引擎用 device_id 直连服务器心跳，到期即自锁）──
   bool _licenseAllows = true; // 乐观默认，首次异步核验后纠正
   int _licenseDays = 0;
   Timer? _licenseTimer;
+  Timer? _licenseExpiryTimer;
 
   // ── socket 服务生命周期：旧实现 Server 建完即丢引用，dispose 不关监听，
   //    关窗重开后旧 State 的监听与新监听共存抢连接丢帧（server.dart 已去 shared）。
@@ -545,9 +546,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       _ensureSize(w, h);
     });
 
-    // 授权核验：异步本地验签，之后每 30 分钟静默复核。到期即收起建议、只显提示。
+    // 授权核验：异步服务器心跳，之后每 60 秒静默复核（单行只读、成本极低）。
+    // 取 60s 而非旧 30min：主 isolate 被厂商省电冻结时，子引擎仍能 ≤~1 分钟内自锁。
     _refreshLicense();
-    _licenseTimer = Timer.periodic(const Duration(minutes: 30), (_) => _refreshLicense());
+    _licenseTimer =
+        Timer.periodic(const Duration(seconds: 60), (_) => _refreshLicense());
 
     // 玩法文件已改由主页通过 Java MethodChannel 写入；这里不再读 dart:io 文件。
     // （注：本 Flutter 端的 selectedMode 仍保留，仅用于把当前模式透传给主界面。）
@@ -556,6 +559,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   @override
   void dispose() {
     _licenseTimer?.cancel();
+    _licenseExpiryTimer?.cancel();
     _signalWatchdog?.cancel();
     // 必须关闭 socket 监听：旧实现泄漏 Server，旧 State 继续抢接 Java 短连接丢帧。
     _server?.close();
@@ -595,12 +599,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
   Future<void> _refreshLicense() async {
     try {
-      final st = await LicenseService.instance.ensureUsable();
+      // 子引擎用 device_id 直连服务器心跳（不依赖 shared_preferences）。服务器明确
+      // 到期/拉黑/换设备 → 硬锁；网络失败且本引擎读不到本地券 → 保持 fail-open，
+      // 避免断网误伤正常用户（真到期由服务器回包 valid:false 或主闸门收窗兜底）。
+      final st = await LicenseService.instance.heartbeat();
       if (!mounted) return;
-      // 悬浮窗跑在独立 Flutter 引擎，shared_preferences 插件在此常未注册，
-      // ensureUsable 会因读不到本地凭证而返回 notActivated——这并非"真未激活"
-      // （用户没通过主闸门根本打不开悬浮窗）。故子窗只对"确凿失效"(到期/被拒)上锁，
-      // 环境异常一律 fail-open；到期兜底交给主闸门（其所在引擎能读凭证，失权即关闭悬浮窗）。
       final denied = st.status == LicenseStatus.licenseExpired ||
           st.status == LicenseStatus.refused;
       final allows = !denied;
@@ -611,9 +614,22 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           _licenseDays = days;
         });
       }
+      _scheduleLicenseExpiryCheck(st, allows);
     } catch (_) {
       // 核验异常绝不让悬浮窗引擎崩溃；保持当前状态。
     }
+  }
+
+  /// 若总到期在下一个 60s 轮询之前，排一个到期精确 one-shot，到期即时锁。
+  void _scheduleLicenseExpiryCheck(LicenseState st, bool allows) {
+    _licenseExpiryTimer?.cancel();
+    final exp = st.expiresAt;
+    if (exp == null || !allows) return;
+    final serverNow = DateTime.fromMillisecondsSinceEpoch(
+        LicenseService.instance.serverNowSec * 1000);
+    final remainMs = exp.difference(serverNow).inMilliseconds;
+    final d = remainMs <= 0 ? Duration.zero : Duration(milliseconds: remainMs + 1000);
+    _licenseExpiryTimer = Timer(d, _refreshLicense);
   }
 
   // ===== 渲染节流：前沿立即 + 尾部合并（降低 UI 重建频率，不增加反馈延迟）=====
