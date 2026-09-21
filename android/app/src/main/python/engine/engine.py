@@ -1386,13 +1386,34 @@ class Engine:
         if max_felt >= 0.18:
             return True
 
-        # 兜底：若中央被全屏大弹窗（如选牌面板）遮挡，通过手牌识别器底层检查是否能检测出合法手牌
+        # 兜底：中央桌布占比不足（被全屏大弹窗/定缺色盘/换牌面板遮挡）时的
+        # 「确凿在对局中」实证。两条独立铁证任一成立即判牌桌场景：
+        #   ① 手牌区能切出 >=7 张合法手牌；
+        #   ② 命中定缺/换牌/选牌开局阶段探测器（中央万/条/筒三色大圆盘等）。
+        # 修复「进入游戏却在定缺选门界面永久卡『等待牌局开始』」：
+        #   定缺选门时三大色盘盖满中央使 felt 骤降 <0.18，而 self._detector 直到
+        #   process() 后段 get_detector() 才惰性创建——牌桌校验在其之前，若此处 detector
+        #   仍为 None 则兜底形同虚设、直接返回 False，主链路阶段分支（本可给出定缺推荐）
+        #   永远走不到。故这里惰性初始化 detector，并补上阶段探测器这条与 felt 无关的铁证。
+        # 说明：探测器只认牌桌专属的物理色形（色盘三行同高、金换牌钮+青过钮并存等），
+        #   大厅/结算不会命中；且仅在低 felt 罕见分支调用，成本与既有 detect_hand_strip 兜底同级。
         det = getattr(self, "_detector", None)
-        if det is not None and hasattr(det, "detect_hand_strip"):
+        if det is None:
             try:
-                tiles = det.detect_hand_strip(image)
-                if len(tiles) >= 7:
+                det = self.get_detector()
+            except Exception:
+                det = None
+        if det is not None:
+            try:
+                if hasattr(det, "detect_hand_strip") and len(det.detect_hand_strip(image)) >= 7:
                     return True
+            except Exception:
+                pass
+            try:
+                for _phase_fn in ("is_dingque_phase", "is_swap_phase", "is_pick_phase"):
+                    fn = getattr(det, _phase_fn, None)
+                    if fn is not None and fn(image):
+                        return True
             except Exception:
                 pass
 
