@@ -434,22 +434,32 @@ class TencentGridDetector(Detector):
 
     def is_swap_phase(self, image_bgr: np.ndarray) -> bool:
         """检测腾讯欢乐麻将「换牌中...」换三张阶段。
-        真实特征：右侧必定出现金黄色【换牌】大圆按钮 (H in [14, 35], S >= 110, V >= 140)
-        以及青色【过】按钮，绝不能检测绿色（绿色为牌桌桌布主色，会导致整局被误判为换牌）。"""
+        真实特征：换牌交互区【同时】出现金黄色「换牌」圆按钮（中心 x≈65%）与其
+        右侧青色「过」圆按钮（中心 x≈73%）。
+        旧实现只看 x:65%~85% 这一宽区的金黄占比，会被蜀山/腾讯局中的金色
+        「杠/碰/胡」动作按钮（中心 x≈75%，整片实心金黄）刷高 gold_ratio 而误报，
+        进而把本帧已识别到的手牌吞进换牌分支、面板退化为「等待牌局开始/未检测到手牌」。
+        现收紧到换牌金按钮专属左区（x:61%~73%），并要求右侧青色过按钮共存，
+        双条件同时满足才判定换牌阶段；杠/碰/胡动作按钮落在更右侧且不伴随青过按钮，被排除。"""
         if image_bgr is None or image_bgr.size == 0:
             return False
         ih, iw = image_bgr.shape[:2]
-        # 金黄色换牌按钮专属区域（y: 55%~75%, x: 65%~85%）
-        btn_area = image_bgr[int(ih * 0.55):int(ih * 0.75), int(iw * 0.65):int(iw * 0.85)]
-        if btn_area.size == 0:
+        y0, y1 = int(ih * 0.56), int(ih * 0.76)
+        # 换牌金按钮专属左区：杠/碰/胡动作按钮位于更右侧，不落入此区
+        gold_zone = image_bgr[y0:y1, int(iw * 0.61):int(iw * 0.73)]
+        # 过按钮青区：真实换牌阶段必有青色「过」按钮与金按钮并存
+        cyan_zone = image_bgr[y0:y1, int(iw * 0.70):int(iw * 0.80)]
+        if gold_zone.size == 0 or cyan_zone.size == 0:
             return False
-        hsv = cv2.cvtColor(btn_area, cv2.COLOR_BGR2HSV)
-        # 金黄色大圆形按钮颜色区间：色相 14~35，高饱和 S>=110，高明度 V>=140
-        gold_btn = (hsv[:, :, 0] >= 14) & (hsv[:, :, 0] <= 35) & (hsv[:, :, 1] >= 110) & (hsv[:, :, 2] >= 140)
-        gold_ratio = float(np.mean(gold_btn))
-
-        # 真实换牌阶段金黄色圆形按钮占比约为 4%~8%，非换牌对局为 0%
-        return gold_ratio >= 0.025
+        hsv_g = cv2.cvtColor(gold_zone, cv2.COLOR_BGR2HSV)
+        gold = (hsv_g[:, :, 0] >= 14) & (hsv_g[:, :, 0] <= 35) & (hsv_g[:, :, 1] >= 120) & (hsv_g[:, :, 2] >= 150)
+        hsv_c = cv2.cvtColor(cyan_zone, cv2.COLOR_BGR2HSV)
+        # 明亮青色过按钮：高饱和高亮，排除偏暗青绿桌布
+        cyan = (hsv_c[:, :, 0] >= 85) & (hsv_c[:, :, 0] <= 102) & (hsv_c[:, :, 1] >= 120) & (hsv_c[:, :, 2] >= 150)
+        gold_ratio = float(np.mean(gold))
+        cyan_ratio = float(np.mean(cyan))
+        # 真实换牌阶段：金按钮占比 ~11%、青过按钮占比 ~1.2%；杠/碰误报：两者均 ~0
+        return gold_ratio >= 0.05 and cyan_ratio >= 0.008
 
     def is_pick_phase(self, image_bgr: np.ndarray) -> bool:
         """检测腾讯欢乐麻将「请任选一张牌」弹窗或选牌确定界面。"""
