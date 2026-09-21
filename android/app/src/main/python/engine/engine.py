@@ -1328,6 +1328,10 @@ class Engine:
         self._phase_scan_tick: int = 0
         self._phase_cache: Tuple[bool, bool, bool] = (False, False, False)
         self._pick_cand_cache: List[str] = []
+        # 换牌阶段时间迟滞状态：_swap_hold_frames 为剩余保持的检测周期数，
+        # _swap_raw 为本帧探测器对换牌的「真实」判定（未经迟滞），供清池计数使用。
+        self._swap_hold_frames: int = 0
+        self._swap_raw: bool = False
         # 单帧耗时诊断：最近 30 帧滚动窗口，每 60 帧打印一次均值/峰值
         self._proc_ms: deque = deque(maxlen=30)
         self._proc_frames: int = 0
@@ -1387,35 +1391,43 @@ class Engine:
             return True
 
         # 兜底：中央桌布占比不足（被全屏大弹窗/定缺色盘/换牌面板遮挡）时的
-        # 「确凿在对局中」实证。两条独立铁证任一成立即判牌桌场景：
-        #   ① 手牌区能切出 >=7 张合法手牌；
-        #   ② 命中定缺/换牌/选牌开局阶段探测器（中央万/条/筒三色大圆盘等）。
-        # 修复「进入游戏却在定缺选门界面永久卡『等待牌局开始』」：
-        #   定缺选门时三大色盘盖满中央使 felt 骤降 <0.18，而 self._detector 直到
-        #   process() 后段 get_detector() 才惰性创建——牌桌校验在其之前，若此处 detector
-        #   仍为 None 则兜底形同虚设、直接返回 False，主链路阶段分支（本可给出定缺推荐）
-        #   永远走不到。故这里惰性初始化 detector，并补上阶段探测器这条与 felt 无关的铁证。
-        # 说明：探测器只认牌桌专属的物理色形（色盘三行同高、金换牌钮+青过钮并存等），
-        #   大厅/结算不会命中；且仅在低 felt 罕见分支调用，成本与既有 detect_hand_strip 兜底同级。
+        # 「确凿在对局中」实证。核心不变量：真实牌桌在任何阶段（定缺/换牌/选牌/
+        # 摸打）底部都必呈现玩家自己的手牌，而大厅/主菜单/结算/加载画面底部没有
+        # 手牌（只有菜单图标）。故以「手牌区切出的合法牌数」为必要前提：
+        #   ① detect_hand_strip >= 7 直接判牌桌——定缺/换牌/选牌阶段中央色盘与
+        #      面板只遮挡画面中部，底部 10~14 张手牌完整可见，必然满足；
+        #   ② detect_hand_strip >= 5 且命中定缺/换牌/选牌阶段探测器——仅在换牌
+        #      动画把个别手牌压出切分带、张数瞬时跌破 7 时用作放宽，仍强制要求
+        #      底部有 >=5 张牌这一物理前提。
+        # 修复两类问题：
+        #   (A) 定缺选门永久卡「等待牌局开始」：旧实现 detector 直到 process() 后段
+        #       get_detector() 才惰性创建，牌桌校验在其之前，兜底 detector=None 形同
+        #       虚设恒返回 False；此处惰性初始化 detector。
+        #   (B) 大厅/广告弹窗被误判为牌桌并显示选牌推荐：上一版兜底把 is_pick_phase
+        #       当作【独立】铁证，而大厅金色宝箱 + 青色「看广告」按钮恰好命中
+        #       is_pick_phase 宽松的「深色带+少量白块」形式，导致整张大厅被放行。
+        #       现强制任何放行都以底部手牌实证为前提：大厅无手牌 → hand_n≈0 → 绝不放行。
         det = getattr(self, "_detector", None)
         if det is None:
             try:
                 det = self.get_detector()
             except Exception:
                 det = None
-        if det is not None:
+        if det is not None and hasattr(det, "detect_hand_strip"):
             try:
-                if hasattr(det, "detect_hand_strip") and len(det.detect_hand_strip(image)) >= 7:
-                    return True
+                hand_n = len(det.detect_hand_strip(image))
             except Exception:
-                pass
-            try:
-                for _phase_fn in ("is_dingque_phase", "is_swap_phase", "is_pick_phase"):
-                    fn = getattr(det, _phase_fn, None)
-                    if fn is not None and fn(image):
-                        return True
-            except Exception:
-                pass
+                hand_n = 0
+            if hand_n >= 7:
+                return True
+            if hand_n >= 5:
+                try:
+                    for _phase_fn in ("is_dingque_phase", "is_swap_phase", "is_pick_phase"):
+                        fn = getattr(det, _phase_fn, None)
+                        if fn is not None and fn(image):
+                            return True
+                except Exception:
+                    pass
 
         return False
 
@@ -3003,14 +3015,30 @@ class Engine:
                             cands = detector.detect_pick_candidates(full_for_preview)
                         except Exception:
                             cands = []
+                    raw_swap = swap_p
+                    # ===== 换牌阶段时间迟滞（纯状态机逻辑，不改任何像素阈值）=====
+                    # 换三张是持续 ~10s 的连续交互，金换牌钮 + 青过钮全程在场；单帧因
+                    # 换牌浮起动画遮挡/采样抖动漏检时，绝不应立刻掉回 pick/ok 而把「换牌中」
+                    # 错显成「定缺/选牌/正常出牌」UI。一旦本帧确检换牌即置满保持窗口；探测到
+                    # 定缺/选牌说明阶段已推进 → 立即清零退出，杜绝跨阶段粘连；否则逐检测周期
+                    # 递减以桥接瞬时漏检。窗口取 3 个检测周期（≈6 采集帧 ≈150ms），远小于换牌
+                    # 时长、又足以吞掉抖动；换牌结束至多让「换牌」UI 延续 ~150ms（换牌面板本就
+                    # 会短暂残留），不影响后续正常出牌。
+                    if raw_swap:
+                        self._swap_hold_frames = 3
+                    elif dq_p or pick_p:
+                        self._swap_hold_frames = 0
+                    elif self._swap_hold_frames > 0:
+                        self._swap_hold_frames -= 1
+                        swap_p = True  # 迟滞保持：本帧虽漏检，仍视为换牌延续
                     self._phase_cache = (swap_p, dq_p, pick_p)
                     self._pick_cand_cache = cands
+                    self._swap_raw = raw_swap
                 is_swap_phase, is_dq_phase, is_pick_phase = self._phase_cache
                 pick_candidates = list(self._pick_cand_cache)
-                # 连续确认只在「真正跑了探测器」的帧计数：节流复用缓存的帧不得计入，
-                # 否则单次瞬时误检会借下一帧缓存自动凑满 2 次而误清牌池（与「≥2 次检测
-                # 命中才生效」的既定意图相悖）。真新局的换三张/定缺面板会连续多帧命中，仍能清池。
-                if ran_detector and (is_swap_phase or is_dq_phase):
+                # 连续确认只在「真正跑了探测器」的帧计数，且以「本帧真实检测」(raw_swap) 为准：
+                # 迟滞保持出来的 swap 不参与清池计数，避免把上一帧漏检也当成换牌确检反复清池。
+                if ran_detector and (getattr(self, "_swap_raw", False) or is_dq_phase):
                     self._phase_confirm_frames += 1
                     if self._phase_confirm_frames >= 2:
                         self._clear_discard_ledgers()
