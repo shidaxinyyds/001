@@ -650,7 +650,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       btnColor = AppTokens.danger;
       btnText = '停止悬浮窗';
     } else if (_overlayBusy) {
-      btnColor = _kAccent.withValues(alpha: 0.7);
+      btnColor = _kAccent.withAlpha(179); // alpha 0.7（CI 锁 Flutter 3.13，禁用 withValues）
       btnText = '开启中…';
     } else if (canStart) {
       btnColor = _kAccent;
@@ -711,14 +711,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             Icon(
               Icons.check_circle_outline_rounded,
               size: 13,
-              color: AppTokens.faint.withValues(alpha: 0.65),
+              color: AppTokens.faint.withAlpha(166), // alpha 0.65（3.13 兼容）
             ),
             const SizedBox(width: 5),
             Text(
               '支持主流麻将玩法 · 开启后悬浮窗自动跟随推演',
               style: TextStyle(
                 fontSize: 11.5,
-                color: AppTokens.faint.withValues(alpha: 0.8),
+                color: AppTokens.faint.withAlpha(204), // alpha 0.8（3.13 兼容）
                 letterSpacing: 0.2,
               ),
             ),
