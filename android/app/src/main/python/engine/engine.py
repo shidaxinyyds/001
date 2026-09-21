@@ -2858,7 +2858,8 @@ class Engine:
             # ≥2 次检测命中才生效，杜绝单帧误检误清新局牌池。
             if is_dingque_mode(self.mode):
                 self._phase_scan_tick += 1
-                if self._phase_scan_tick % 2 == 1:
+                ran_detector = (self._phase_scan_tick % 2 == 1)
+                if ran_detector:
                     swap_p = dq_p = pick_p = False
                     cands: List[str] = []
                     # 1. 优先检测换三张阶段（右侧金色换牌大圆按钮 / 过按钮）
@@ -2878,12 +2879,15 @@ class Engine:
                     self._pick_cand_cache = cands
                 is_swap_phase, is_dq_phase, is_pick_phase = self._phase_cache
                 pick_candidates = list(self._pick_cand_cache)
-                if is_swap_phase or is_dq_phase:
+                # 连续确认只在「真正跑了探测器」的帧计数：节流复用缓存的帧不得计入，
+                # 否则单次瞬时误检会借下一帧缓存自动凑满 2 次而误清牌池（与「≥2 次检测
+                # 命中才生效」的既定意图相悖）。真新局的换三张/定缺面板会连续多帧命中，仍能清池。
+                if ran_detector and (is_swap_phase or is_dq_phase):
                     self._phase_confirm_frames += 1
                     if self._phase_confirm_frames >= 2:
                         self._clear_discard_ledgers()
                         self._match_started = False
-                else:
+                elif ran_detector:
                     self._phase_confirm_frames = 0
 
             # 定缺状态判定：
