@@ -682,25 +682,26 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       if (_renderScheduled) return;
       _applyPendingResult(); // 前沿：立即上屏
       _renderScheduled = true;
-      Future<void>.delayed(const Duration(milliseconds: 120), () {
+      Future<void>.delayed(const Duration(milliseconds: 50), () {
         _renderScheduled = false;
         if (!mounted) return;
         if (_pendingJson != null) _applyPendingResult(); // 尾部：应用窗口内最新一帧
       });
       return;
     }
-    // 清空帧去抖：当前正显示好数据 → 首帧仍立即采纳（真离开对局要快速响应），
-    // 但后续同类清空帧必须连续 ≥2 帧或持续 ~400ms 才再次替换画面，
-    // 瞬态坏帧（引擎单帧 waiting/no_tiles）永远到不了屏幕。
+    // 清空帧去抖：
+    // 若当前屏幕正在显示有效手牌与出牌建议，瞬态单帧或短动画（如摸打动画、手指划过）
+    // 绝不能瞬间抹平手牌与建议跳回"等待中"；必须持续 ≥4 帧且持续 ≥450ms 确凿无手牌才清空。
     _pendingClearRun++;
     _firstPendingClearAt ??= DateTime.now();
-    final last = _pendingJson;
-    final showingGood =
-        last != null && !_kClearStatuses.contains(last['status'] as String? ?? '');
+    final showingGood = result != null &&
+        !_kClearStatuses.contains(result?['status'] as String? ?? '') &&
+        ((result?['hand'] as String? ?? '').isNotEmpty ||
+            (result?['count'] as num? ?? 0) > 0);
     final sustained = DateTime.now()
             .difference(_firstPendingClearAt!)
-            .inMilliseconds >= 400;
-    if (showingGood || _pendingClearRun >= 2 || sustained) {
+            .inMilliseconds >= 450;
+    if (!showingGood || (_pendingClearRun >= 4 && sustained)) {
       _pendingClearRun = 0;
       _firstPendingClearAt = null;
       _pendingClearJson = null;
@@ -708,7 +709,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       _pendingJson = json;
       _applyPendingResult();
     } else {
-      // 未达采纳条件：暂存，到期由看门狗兜底提交（持续清空说明确实该清）
+      // 局中瞬态丢帧：暂存保护，不打断屏幕已有建议，到期仍无好数据再由看门狗兜底提交
       _pendingClearJson = json;
       _scheduleClearCommit();
     }
@@ -719,7 +720,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   void _scheduleClearCommit() {
     if (_clearCommitScheduled) return;
     _clearCommitScheduled = true;
-    Future<void>.delayed(const Duration(milliseconds: 420), () {
+    Future<void>.delayed(const Duration(milliseconds: 460), () {
       _clearCommitScheduled = false;
       if (!mounted || _pendingClearJson == null) return;
       _lastFrameAt = DateTime.now();

@@ -2802,12 +2802,12 @@ class Engine:
 
             # ===== 新局指纹（旧 river_locked 死锁的对侧保险）=====
             # 上一帧还确信在手牌区可见 ≥4 张牌，本帧骤减为 0（定缺徽章消失由下方
-            # 阶段检测无门控+两帧确认负责）：连续 2 帧确认已彻底离开对局
-            # （结算/换局/回大厅）→ 清池与副露账本，绝不跨局残留。此路径不清
-            # _match_started 之前的建议缓存以外的稳定器状态，不干扰空帧宽限。
+            # 阶段检测无门控+两帧确认负责）：连续 ≥12 帧（约 300~500ms）确认已彻底离开对局
+            # （结算/换局/回大厅）→ 清池与副露账本，绝不跨局残留。
+            # 防误杀：瞬态丢帧（如出牌飞行阴影、摸打遮挡等 1~5 帧）绝不误重置牌局与建议。
             if (self._match_started and self._prev_raw_n >= 4 and curr_raw_n == 0):
                 self._prev_raw_n_before_clear += 1
-                if (self._prev_raw_n_before_clear >= 2
+                if (self._prev_raw_n_before_clear >= 12
                         and sum(self._monotonic_discards.values()) > 0):
                     self._clear_discard_ledgers()
                     self._discard_history.clear()

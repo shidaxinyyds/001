@@ -24,16 +24,16 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String? latestMessageFromOverlay;
 
   static const channel = MethodChannel(CHANNEL_NAME);
 
   bool isProcessing = false;
-  // 当前选中的玩法，初始空：必须先选才能开始识别。
-  String? selectedMode;
+  // 当前选中的玩法，初始默认川麻血流红中，秒级就绪，按钮绝不卡灰。
+  String? selectedMode = GameMode.defaultMode;
   String _selectedCategory = '川麻血流';
-  bool _modeReady = false;
+  bool _modeReady = true;
 
   // 悬浮窗→主 App 的回传订阅。必须持有并在 dispose 取消：旧实现只 listen
   // 不 cancel，页面每次被重建都叠加一个监听/或撞单订阅流报错，状态回传
@@ -43,6 +43,7 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
 
     // 拉一次当前玩法（来自 Java 写的共享文件，Python 引擎也读这个文件）
     GameMode.current().then((m) {
@@ -95,7 +96,26 @@ class _HomePageState extends State<HomePage> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // 从系统设置开启权限或多任务切回前台：强制解除开窗忙碌标志，重检真实运行态与权限
+      _overlayBusy = false;
+      FlutterOverlayWindow.isActive().then((act) {
+        if (!mounted) return;
+        if (act != isProcessing) {
+          setState(() => isProcessing = act);
+        } else {
+          setState(() {});
+        }
+      }).catchError((_) {
+        if (mounted) setState(() {});
+      });
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _overlaySub?.cancel();
     _overlaySub = null;
     super.dispose();
@@ -140,16 +160,23 @@ class _HomePageState extends State<HomePage> {
       bool granted = await FlutterOverlayWindow.isPermissionGranted() == true;
       if (!granted) {
         _setStatus('未授予悬浮窗权限，正在请求…');
-        granted = await FlutterOverlayWindow.requestPermission() == true;
+        await FlutterOverlayWindow.requestPermission();
+        // 用户去系统设置开启后切回，轮询 4 次（每次 150ms），确保系统 Settings 数据库落盘
+        for (int i = 0; i < 4; i++) {
+          if (await FlutterOverlayWindow.isPermissionGranted() == true) {
+            granted = true;
+            break;
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 150));
+        }
       }
       if (!granted) {
         // 权限未授予时悬浮窗无法显示，提示用户去系统设置开启。
         _setStatus('✗ 未授予"显示在其他应用上层"权限，悬浮窗无法显示');
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text(
-                '悬浮窗需要"显示在其他应用上层"权限。请到系统设置→应用→Ace Mahjong→权限中开启，再点一次"开始识别"。'),
-            duration: Duration(seconds: 6),
+            content: Text('悬浮窗需要"显示在其他应用上层"权限。请在设置中开启后重试。'),
+            duration: Duration(seconds: 4),
           ));
         }
         return false;
@@ -623,9 +650,7 @@ class _HomePageState extends State<HomePage> {
       btnColor = AppTokens.danger;
       btnText = '停止悬浮窗';
     } else if (_overlayBusy) {
-      // 开窗在飞：给出明确的“开启中”反馈并禁用重复点击，
-      // 不再是旧实现的静默吞点击。
-      btnColor = AppTokens.borderStrong;
+      btnColor = _kAccent.withValues(alpha: 0.7);
       btnText = '开启中…';
     } else if (canStart) {
       btnColor = _kAccent;
@@ -676,38 +701,29 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildIdleCard() {
-    return Container(
+    return Center(
       key: const ValueKey<String>('idle'),
-      padding: const EdgeInsets.symmetric(
-          horizontal: AppTokens.s16, vertical: AppTokens.s16),
-      decoration: BoxDecoration(
-        color: AppTokens.surface,
-        borderRadius: AppTokens.radius12,
-        border: Border.all(color: _kBorder, width: 0.8),
-      ),
-      child: const Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: EdgeInsets.only(top: 2),
-            child: Icon(
-              Icons.info_outline_rounded,
-              size: 16,
-              color: AppTokens.faint,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.check_circle_outline_rounded,
+              size: 13,
+              color: AppTokens.faint.withValues(alpha: 0.65),
             ),
-          ),
-          SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              '选定玩法后点击开启，悬浮窗将自动浮于牌局之上实时推演向听与最优出牌。',
+            const SizedBox(width: 5),
+            Text(
+              '支持主流麻将玩法 · 开启后悬浮窗自动跟随推演',
               style: TextStyle(
-                fontSize: 13,
-                color: _kTextMuted,
-                height: 1.4,
+                fontSize: 11.5,
+                color: AppTokens.faint.withValues(alpha: 0.8),
+                letterSpacing: 0.2,
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

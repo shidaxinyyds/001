@@ -11,6 +11,9 @@ import android.service.notification.StatusBarNotification;
 import android.util.Log;
 import android.view.WindowManager;
 
+import android.app.Application;
+import android.os.Bundle;
+
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
@@ -36,7 +39,7 @@ import io.flutter.plugin.common.PluginRegistry;
 
 public class FlutterOverlayWindowPlugin implements
         FlutterPlugin, ActivityAware, BasicMessageChannel.MessageHandler, MethodCallHandler,
-        PluginRegistry.ActivityResultListener {
+        PluginRegistry.ActivityResultListener, Application.ActivityLifecycleCallbacks {
 
     private MethodChannel channel;
     private Context context;
@@ -74,14 +77,27 @@ public class FlutterOverlayWindowPlugin implements
                 pendingResult.success(checkOverlayPermission());
                 pendingResult = null;
             }
+            if (checkOverlayPermission()) {
+                result.success(true);
+                return;
+            }
             pendingResult = result;
             if (mActivity == null) {
                 // 【安全补丁】无 Activity 时立即回复，绝不让 Dart 侧 Future 永挂。
-                if (pendingResult != null) { pendingResult.success(checkOverlayPermission()); pendingResult = null; }
-            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION);
-                intent.setData(Uri.parse("package:" + mActivity.getPackageName()));
-                mActivity.startActivityForResult(intent, REQUEST_CODE_FOR_OVERLAY_PERMISSION);
+                flushPendingResult();
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                try {
+                    Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION);
+                    intent.setData(Uri.parse("package:" + mActivity.getPackageName()));
+                    mActivity.startActivityForResult(intent, REQUEST_CODE_FOR_OVERLAY_PERMISSION);
+                } catch (Exception e) {
+                    try {
+                        Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION);
+                        mActivity.startActivityForResult(intent, REQUEST_CODE_FOR_OVERLAY_PERMISSION);
+                    } catch (Exception ex) {
+                        flushPendingResult();
+                    }
+                }
             } else {
                 result.success(true);
                 pendingResult = null;
@@ -163,9 +179,13 @@ public class FlutterOverlayWindowPlugin implements
     @Override
     public void onAttachedToActivity(@NonNull ActivityPluginBinding binding) {
         mActivity = binding.getActivity();
-        // 【安全补丁】旧实现从未注册 ActivityResultListener：requestPermission 跳去
-        // 系统设置后结果永远不会回复，Dart 侧 await 挂死（“点了开启悬浮窗没反应”）。
+        // 【安全补丁】注册 ActivityResultListener 与 ActivityLifecycleCallbacks：
+        // 安卓跳转系统设置开启权限后，很多 ROM 不会分发 onActivityResult，
+        // 唯有在 onActivityResumed 中主动检查并回复才能 100% 避免 Dart 侧挂死。
         binding.addActivityResultListener(this);
+        if (mActivity != null && mActivity.getApplication() != null) {
+            mActivity.getApplication().registerActivityLifecycleCallbacks(this);
+        }
         if (FlutterEngineCache.getInstance().get(OverlayConstants.CACHED_TAG) == null) {
             FlutterEngineGroup enn = new FlutterEngineGroup(context);
             DartExecutor.DartEntrypoint dEntry = new DartExecutor.DartEntrypoint(
@@ -178,8 +198,9 @@ public class FlutterOverlayWindowPlugin implements
 
     @Override
     public void onDetachedFromActivityForConfigChanges() {
-        // 【安全补丁】配置变化时旧 Activity 已失效，置空防后续用陈旧 activity 拉起设置页。
-        // 【评审补丁】旧 Activity 不会再 dispatch onActivityResult，兜底回复挂起项防永挂。
+        if (mActivity != null && mActivity.getApplication() != null) {
+            mActivity.getApplication().unregisterActivityLifecycleCallbacks(this);
+        }
         mActivity = null;
         flushPendingResult();
     }
@@ -187,22 +208,72 @@ public class FlutterOverlayWindowPlugin implements
     @Override
     public void onReattachedToActivityForConfigChanges(@NonNull ActivityPluginBinding binding) {
         this.mActivity = binding.getActivity();
+        binding.addActivityResultListener(this);
+        if (mActivity != null && mActivity.getApplication() != null) {
+            mActivity.getApplication().registerActivityLifecycleCallbacks(this);
+        }
     }
 
     @Override
     public void onDetachedFromActivity() {
-        // 【安全补丁】对称置空，防泄漏与旧 Activity 回调。
-        // 【评审补丁】Activity 销毁后结果永不回来：立即按当前权限状态回复，绝不让 Dart 永挂。
+        if (mActivity != null && mActivity.getApplication() != null) {
+            mActivity.getApplication().unregisterActivityLifecycleCallbacks(this);
+        }
         mActivity = null;
         flushPendingResult();
     }
 
     private void flushPendingResult() {
         if (pendingResult != null) {
-            pendingResult.success(checkOverlayPermission());
+            try {
+                pendingResult.success(checkOverlayPermission());
+            } catch (Exception ignored) {}
             pendingResult = null;
         }
     }
+
+    // ── Application.ActivityLifecycleCallbacks ──────────────────────────
+
+    @Override
+    public void onActivityCreated(@NonNull Activity activity, @Nullable Bundle savedInstanceState) {}
+
+    @Override
+    public void onActivityStarted(@NonNull Activity activity) {}
+
+    @Override
+    public void onActivityResumed(@NonNull Activity activity) {
+        if (activity == mActivity && pendingResult != null) {
+            // 用户从系统设置页切回本 App（点击返回或多任务切回）：
+            // 某些厂商系统落地 Settings 数据库有数十毫秒延迟，立即查一次，若未通过则 150ms 后兜底再查并提交
+            if (checkOverlayPermission()) {
+                flushPendingResult();
+            } else {
+                try {
+                    activity.getWindow().getDecorView().postDelayed(this::flushPendingResult, 150);
+                } catch (Exception e) {
+                    flushPendingResult();
+                }
+            }
+        }
+    }
+
+    @Override
+    public void onActivityPaused(@NonNull Activity activity) {}
+
+    @Override
+    public void onActivityStopped(@NonNull Activity activity) {}
+
+    @Override
+    public void onActivitySaveInstanceState(@NonNull Activity activity, @NonNull Bundle outState) {}
+
+    @Override
+    public void onActivityDestroyed(@NonNull Activity activity) {
+        if (activity == mActivity) {
+            flushPendingResult();
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────────
 
     @Override
     public void onMessage(@Nullable Object message, @NonNull BasicMessageChannel.Reply reply) {
@@ -230,12 +301,7 @@ public class FlutterOverlayWindowPlugin implements
     @Override
     public boolean onActivityResult(int requestCode, int resultCode, Intent data) {
         if (requestCode == REQUEST_CODE_FOR_OVERLAY_PERMISSION) {
-            // 【安全补丁】只在确实有挂起请求时回复一次，并立即置空，
-            // 杜绝重复 complete 同一条回复导致的 IllegalStateException。
-            if (pendingResult != null) {
-                pendingResult.success(checkOverlayPermission());
-                pendingResult = null;
-            }
+            flushPendingResult();
             return true;
         }
         return false;
