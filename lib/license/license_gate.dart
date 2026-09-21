@@ -34,6 +34,9 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
   // 心跳在飞标志：防 resume/轮询/到期复核多路触发叠乘，也封死任何
   // “守卫→排程→再心跳”的自递归风暴。
   bool _refreshInFlight = false;
+  // 冷启动首验为“未激活”时的一次性延迟复核：存储/指纹通道就绪竞态
+  // 不该把已激活设备直接切进激活页（全程仅复核一次，绝不循环）。
+  bool _coldRecheckDone = false;
 
   @override
   void initState() {
@@ -86,6 +89,16 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
       st = const LicenseState(LicenseStatus.notActivated);
     }
     if (!mounted) return;
+    // 【冷启动一次性复核 v3】从未放行过的新会话首验撞上 notActivated：可能是
+    // SharedPreferences/指纹通道尚未就绪的时序竞态。保持 Loading 1s 后只复核
+    // 一次；真未激活的用户也只多等一秒，绝不因此反复重验。
+    if (st.status == LicenseStatus.notActivated &&
+        _state == null &&
+        !_coldRecheckDone) {
+      _coldRecheckDone = true;
+      _expiryTimer = Timer(const Duration(seconds: 1), _refresh);
+      return;
+    }
     // 【踢人铁律】只有真到期（licenseExpired，签名 expires_at 到达/服务器确认）
     // 或服务端明确拒绝（refused，含 revoked/换设备/篡改）才允许退回激活页。
     // 已放行会话撞上 notActivated（本地存储瞬时读空、设备指纹未就绪、

@@ -256,7 +256,8 @@ class _HomePageState extends State<HomePage> {
   }
 
   /// 用户点选玩法：**乐观更新**——点下去立刻高亮选中（旧实现要等 Java 写完
-  /// 共享文件才 setState，手感就是"点一下卡半秒"）；异步落地失败再回滚并提示。
+  /// 共享文件才 setState，手感就是“点一下卡半秒”）；异步落地失败再回滚并提示。
+  /// 玩法切换不走网络、不等原生：纯本地 setState + 后台落盘，秒响应。
   Future<void> _selectMode(String mode) async {
     if (mode == selectedMode) return;
     final prevMode = selectedMode;
@@ -463,7 +464,8 @@ class _HomePageState extends State<HomePage> {
   // 开始/停止识别
   Future<void> _toggleProcessing() async {
     if (_overlayBusy) return; // 防重入：开窗流程可耗时数秒，连点会踩踏服务
-    _overlayBusy = true;
+    setState(() => _overlayBusy = true); // 按钮立即进入“开启中”反馈态，
+    // 旧实现静默吞点击，用户体感就是“点了没反应”。
     try {
       if (isProcessing) {
         setProcessingState(false);
@@ -479,7 +481,7 @@ class _HomePageState extends State<HomePage> {
         setState(() => isProcessing = true);
       }
     } finally {
-      _overlayBusy = false;
+      if (mounted) setState(() => _overlayBusy = false);
     }
   }
 
@@ -620,6 +622,11 @@ class _HomePageState extends State<HomePage> {
     if (isProcessing) {
       btnColor = AppTokens.danger;
       btnText = '停止悬浮窗';
+    } else if (_overlayBusy) {
+      // 开窗在飞：给出明确的“开启中”反馈并禁用重复点击，
+      // 不再是旧实现的静默吞点击。
+      btnColor = AppTokens.borderStrong;
+      btnText = '开启中…';
     } else if (canStart) {
       btnColor = _kAccent;
       btnText = '开启悬浮窗';
@@ -631,7 +638,8 @@ class _HomePageState extends State<HomePage> {
     return SizedBox(
       height: 50,
       child: FilledButton(
-        onPressed: (canStart || isProcessing) ? _toggleProcessing : null,
+        onPressed:
+            (isProcessing || canStart) && !_overlayBusy ? _toggleProcessing : null,
         style: FilledButton.styleFrom(
           backgroundColor: btnColor,
           disabledBackgroundColor: AppTokens.borderStrong,

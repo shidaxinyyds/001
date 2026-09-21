@@ -75,12 +75,23 @@ class LicenseService {
       _prefs = null;
     }
     try {
-      final id = await _ch.invokeMethod<String>('getDeviceId');
-      // 【自愈重试副作用防护】init 现在可重入：只接受非空新值，一次瞬时通道失败
-      // 绝不能抹掉已取到的指纹——否则主引擎永久跳过服务器心跳，拉黑不可检。
-      if (id != null && id.isNotEmpty) _deviceId = id;
+      // 【自愈重试 v3】有界重试取设备指纹：冷启动时 MainActivity 通道可能晚于首个
+      // 心跳就绪，一次失败就永久放弃会让本地验签永远失败→误判“与本机不匹配”误踢。
+      for (int i = 0; i < 3 && !(_deviceId?.isNotEmpty ?? false); i++) {
+        try {
+          final id = await _ch.invokeMethod<String>('getDeviceId');
+          // 【自愈重试副作用防护】init 现在可重入：只接受非空新值，一次瞬时通道失败
+          // 绝不能抹掉已取到的指纹——否则主引擎永久跳过服务器心跳，拉黑不可检。
+          if (id != null && id.isNotEmpty) _deviceId = id;
+        } catch (_) {
+          // 保留上次成功的 deviceId，勿清空。
+        }
+        if (!(_deviceId?.isNotEmpty ?? false)) {
+          await Future<void>.delayed(const Duration(milliseconds: 300));
+        }
+      }
     } catch (_) {
-      // 保留上次成功的 deviceId，勿清空。
+      // 延时本身异常（页面销毁等）：同样保留旧 deviceId。
     }
     _ready = true;
   }
@@ -101,12 +112,27 @@ class LicenseService {
         stored, LicenseConfig.licenseTokenSecretHex, deviceId);
   }
 
-  void _saveToken(String token) {
-    _prefs?.setString(_kToken, token);
+  /// 【必须落盘才算成功 v3】旧实现 fire-and-forget：激活成功后紧接着进程崩溃
+  /// （如开悬浮窗原生异常）时 token 尚未写入磁盘，重启后本地判“未激活”，
+  /// 而服务器上该卡明明已激活未过期——表现为“卡没过期却被踢回激活页”。
+  /// 现在 await commit() 确保凭证真正持久化后才宣布激活成功。
+  Future<void> _saveToken(String token) async {
+    await _prefs?.setString(_kToken, token);
   }
 
-  void _clearToken() {
-    _prefs?.remove(_kToken);
+  Future<void> _clearToken() async {
+    await _prefs?.remove(_kToken);
+  }
+
+  /// 本地有存券但验签失败时的定性：空指纹下验签必然失败，不能据此判
+  /// “与本机不匹配/被篡改”（那是误踢正常用户的路径），降级为瞬态未就绪。
+  LicenseState _denyOrPending(String? message) {
+    final had = (_prefs?.getString(_kToken) ?? '').isNotEmpty;
+    if (had && deviceId.isEmpty) {
+      return const LicenseState(LicenseStatus.notActivated);
+    }
+    return LicenseState(had ? LicenseStatus.refused : LicenseStatus.notActivated,
+        message: had ? message : null);
   }
 
   bool _clockTampered(int nowMs) {
@@ -203,11 +229,8 @@ class LicenseService {
     final now = _serverNow();
     final tk = _loadToken();
     if (tk == null) {
-      final p = _prefs;
-      final had = (p?.getString(_kToken) ?? '').isNotEmpty;
-      // 存了但验签失败：换设备 / 篡改 / 密钥不符。
-      return LicenseState(had ? LicenseStatus.refused : LicenseStatus.notActivated,
-          message: had ? '授权与本机不匹配或已损坏' : null);
+      // 存了但验签失败：换设备 / 篡改 / 密钥不符；空指纹则属未就绪（见上）。
+      return _denyOrPending('授权与本机不匹配或已损坏');
     }
     var st = _evaluate(tk);
     // 续签触发：①needsRenew(宽限内)；②licenseExpired；③refused 且凭证已超宽限。
@@ -236,7 +259,7 @@ class LicenseService {
     final r = await _client.renew(deviceId);
     if (r.ok && r.token != null) {
       _noteServerTime(r.serverTime);
-      _saveToken(r.token!);
+      await _saveToken(r.token!);
       final re = LicenseToken.parseAndVerify(
           r.token!, LicenseConfig.licenseTokenSecretHex, deviceId);
       if (re != null) return _evaluate(re);
@@ -265,7 +288,9 @@ class LicenseService {
     final r = await _client.activate(deviceId, input);
     if (r.ok && r.token != null) {
       _noteServerTime(r.serverTime);
-      _saveToken(r.token!);
+      // 【必须落盘才算成功 v3】先确保证券真写进磁盘再返回成功：
+      // 否则紧随其后的任何崩溃/杀进程都会把已激活设备打回“未激活”。
+      await _saveToken(r.token!);
       final re = LicenseToken.parseAndVerify(
           r.token!, LicenseConfig.licenseTokenSecretHex, deviceId);
       if (re != null) return _evaluate(re);
@@ -280,17 +305,15 @@ class LicenseService {
   /// 强制下线时清理本地凭证（调试/换卡用）。
   /// 注：LicenseGate 对“已放行会话 + notActivated”的瞬态抖动豁免意味着清券后
   /// 不会自动退回激活页；若重新接出此调试入口，需由调用方显式驱动闸门强制复位。
-  void logout() {
-    _clearToken();
+  Future<void> logout() async {
+    await _clearToken();
   }
 
   /// 本地离线判定（不联网）：本地验签券 + 服务器时间锚点 + 72h 宽限。
   LicenseState _localEval() {
     final tk = _loadToken();
     if (tk == null) {
-      final had = (_prefs?.getString(_kToken) ?? '').isNotEmpty;
-      return LicenseState(had ? LicenseStatus.refused : LicenseStatus.notActivated,
-          message: had ? '授权与本机不匹配或已损坏' : null);
+      return _denyOrPending('授权与本机不匹配或已损坏');
     }
     return _evaluate(tk);
   }
@@ -316,7 +339,7 @@ class LicenseService {
     if (!r.valid) {
       // revoked（服务端明确停用）：必须硬清本地券，杜绝被拉黑的券被复用。
       if (r.revoked) {
-        _clearToken();
+        await _clearToken();
         return LicenseState(LicenseStatus.refused,
             expiresAt: expDt, message: '该授权已被停用，请联系卖家');
       }
@@ -332,7 +355,7 @@ class LicenseService {
         if (local.allowsUsage) return local; // 本地仍能证明有效：保持放行，不清券
       }
       // 其余明确负信号（到期）：清本地券，杜绝残留券被后续复用（含换设备后旧券）。
-      _clearToken();
+      await _clearToken();
       return LicenseState(LicenseStatus.licenseExpired, expiresAt: expDt);
     }
     // 服务器判仍有效：走 ensureUsable（临近续签点时顺带换新券并刷新锚点）。

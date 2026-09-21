@@ -171,16 +171,32 @@ public class OverlayService extends Service implements View.OnTouchListener {
             stopSelf();
             return START_NOT_STICKY;
         }
-        engine.getLifecycleChannel().appIsResumed();
-        flutterView = new FlutterView(getApplicationContext(), new FlutterTextureView(getApplicationContext()));
-        flutterView.attachToFlutterEngine(engine);
-        flutterView.setFitsSystemWindows(true);
-        flutterView.setFocusable(true);
-        flutterView.setFocusableInTouchMode(true);
-        flutterView.setBackgroundColor(Color.TRANSPARENT);
-        // 【安全补丁】通道在确认引擎非空后才创建（字段初始化器见上方说明）。
-        flutterChannel = new MethodChannel(engine.getDartExecutor(), OverlayConstants.OVERLAY_TAG);
-        overlayMessageChannel = new BasicMessageChannel(engine.getDartExecutor(), OverlayConstants.MESSENGER_TAG, JSONMessageCodec.INSTANCE);
+        // 【安全补丁 v3】建视图/挂引擎/建通道整段兜底：attachToFlutterEngine 在引擎
+        // 复用时序竞态下可能抛 IllegalStateException，旧实现裸奔 → 崩同进程整个 App。
+        try {
+            engine.getLifecycleChannel().appIsResumed();
+            flutterView = new FlutterView(getApplicationContext(), new FlutterTextureView(getApplicationContext()));
+            flutterView.attachToFlutterEngine(engine);
+            flutterView.setFitsSystemWindows(true);
+            flutterView.setFocusable(true);
+            flutterView.setFocusableInTouchMode(true);
+            flutterView.setBackgroundColor(Color.TRANSPARENT);
+            // 【安全补丁】通道在确认引擎非空后才创建（字段初始化器见上方说明）。
+            flutterChannel = new MethodChannel(engine.getDartExecutor(), OverlayConstants.OVERLAY_TAG);
+            overlayMessageChannel = new BasicMessageChannel(engine.getDartExecutor(), OverlayConstants.MESSENGER_TAG, JSONMessageCodec.INSTANCE);
+        } catch (Throwable t) {
+            Log.e("OverLay", "engine/view attach failed; abort instead of crashing", t);
+            if (flutterView != null) {
+                try {
+                    flutterView.detachFromFlutterEngine();
+                } catch (Exception ignore) {
+                }
+                flutterView = null;
+            }
+            isRunning = false;
+            stopSelf();
+            return START_NOT_STICKY;
+        }
         flutterChannel.setMethodCallHandler((call, result) -> {
             if (call.method.equals("updateFlag")) {
                 String flag = call.argument("flag").toString();
@@ -197,7 +213,15 @@ public class OverlayService extends Service implements View.OnTouchListener {
             }
         });
         overlayMessageChannel.setMessageHandler((message, reply) -> {
-            WindowSetup.messenger.send(message);
+            // 【安全补丁 v3】主引擎插件已 detach 时 WindowSetup.messenger 为 null，
+            // 且 BasicMessageChannel 回调里抛出的异常不会被通道吞掉——直接崩主线程。
+            try {
+                if (WindowSetup.messenger != null) {
+                    WindowSetup.messenger.send(message);
+                }
+            } catch (Throwable t) {
+                Log.e("OverLay", "messenger forward failed", t);
+            }
         });
         windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
 
@@ -379,37 +403,57 @@ public class OverlayService extends Service implements View.OnTouchListener {
 
     @Override
     public void onCreate() {
-        createNotificationChannel();
-        Intent notificationIntent = new Intent(this, FlutterOverlayWindowPlugin.class);
-        int pendingFlags;
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-            pendingFlags = PendingIntent.FLAG_IMMUTABLE;
-        } else {
-            pendingFlags = PendingIntent.FLAG_UPDATE_CURRENT;
-        }
-        PendingIntent pendingIntent = PendingIntent.getActivity(this,
-                0, notificationIntent, pendingFlags);
-        final int notifyIcon = getDrawableResourceId("mipmap", "launcher");
-        Notification notification = new NotificationCompat.Builder(this, OverlayConstants.CHANNEL_ID)
-                .setContentTitle(WindowSetup.overlayTitle)
-                .setContentText(WindowSetup.overlayContent)
-                .setSmallIcon(notifyIcon == 0 ? R.drawable.notification_icon : notifyIcon)
-                .setContentIntent(pendingIntent)
-                .setVisibility(WindowSetup.notificationVisibility)
-                .build();
-        // 【安全补丁】部分 OEM/系统版本对前台服务启动有额外限制（如后台启动窗口期已过），
-        // startForeground 抛异常会直接崩掉同进程整个 App；现在失败即干净自停，
-        // Dart 侧只会看到悬浮窗没弹出来，绝不闪退。
+        // 【安全补丁 v3】整段前台服务启动流程（通知渠道/PendingIntent/通知构建）
+        // 全部兜底：上游 0.4.5 把 FlutterOverlayWindowPlugin（非 Activity）塞进
+        // PendingIntent.getActivity，Android 14+ 部分系统直接抛 IllegalArgumentException；
+        // 这些都在主线程，任何未捕获异常都会带走同进程整个 App（“点开悬浮窗即闪退”）。
+        // 现在任何一步失败都干净自停，绝不上抛。
         try {
-            startForeground(OverlayConstants.NOTIFICATION_ID, notification);
+            createNotificationChannel();
+            Intent notificationIntent = new Intent(this, FlutterOverlayWindowPlugin.class);
+            int pendingFlags;
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                pendingFlags = PendingIntent.FLAG_IMMUTABLE;
+            } else {
+                pendingFlags = PendingIntent.FLAG_UPDATE_CURRENT;
+            }
+            PendingIntent pendingIntent = null;
+            try {
+                // 【安全补丁 v3】点通知跳转失败不阻止通知本身：单独兜底，拿不到就无跳转。
+                pendingIntent = PendingIntent.getActivity(this,
+                        0, notificationIntent, pendingFlags);
+            } catch (Throwable t) {
+                Log.e("OverLay", "notification PendingIntent failed; building without contentIntent", t);
+            }
+            final int notifyIcon = getDrawableResourceId("mipmap", "launcher");
+            NotificationCompat.Builder nb = new NotificationCompat.Builder(this, OverlayConstants.CHANNEL_ID)
+                    .setContentTitle(WindowSetup.overlayTitle)
+                    .setContentText(WindowSetup.overlayContent)
+                    .setSmallIcon(notifyIcon == 0 ? R.drawable.notification_icon : notifyIcon)
+                    .setVisibility(WindowSetup.notificationVisibility);
+            if (pendingIntent != null) {
+                nb.setContentIntent(pendingIntent);
+            }
+            Notification notification = nb.build();
+            // 【安全补丁】部分 OEM/系统版本对前台服务启动有额外限制（如后台启动窗口期已过），
+            // startForeground 抛异常会直接崩掉同进程整个 App；现在失败即干净自停，
+            // Dart 侧只会看到悬浮窗没弹出来，绝不闪退。
+            try {
+                startForeground(OverlayConstants.NOTIFICATION_ID, notification);
+            } catch (Throwable t) {
+                Log.e("OverLay", "startForeground failed; stopping service instead of crashing", t);
+                startForegroundFailed = true;
+                isRunning = false;
+                stopSelf();
+                return;
+            }
+            instance = this;
         } catch (Throwable t) {
-            Log.e("OverLay", "startForeground failed; stopping service instead of crashing", t);
+            Log.e("OverLay", "onCreate failed; stopping service instead of crashing", t);
             startForegroundFailed = true;
             isRunning = false;
             stopSelf();
-            return;
         }
-        instance = this;
     }
 
     private void createNotificationChannel() {
@@ -444,7 +488,9 @@ public class OverlayService extends Service implements View.OnTouchListener {
 
     @Override
     public boolean onTouch(View view, MotionEvent event) {
-        if (windowManager != null && WindowSetup.enableDrag) {
+        // 【安全补丁 v3】补 flutterView 判空：窗口销毁竞态期 windowManager 尚在、
+        // 视图已置 null，触摸事件回调查 getLayoutParams() 即 NPE 崩主线程。
+        if (windowManager != null && flutterView != null && WindowSetup.enableDrag) {
             WindowManager.LayoutParams params = (WindowManager.LayoutParams) flutterView.getLayoutParams();
             switch (event.getAction()) {
                 case MotionEvent.ACTION_DOWN:
@@ -481,7 +527,12 @@ public class OverlayService extends Service implements View.OnTouchListener {
                     params.x = Math.max(0, Math.min(xx, maxX));
                     params.y = Math.max(0, Math.min(yy, maxY));
                     if (windowManager != null) {
-                        windowManager.updateViewLayout(flutterView, params);
+                        // 【安全补丁 v3】拖拽途中视图被移除（服务停止竞态）时 updateViewLayout
+                        // 会抛 IllegalArgumentException：吞掉，最多这一帧拖动不生效。
+                        try {
+                            windowManager.updateViewLayout(flutterView, params);
+                        } catch (Throwable ignore) {
+                        }
                     }
                     dragging = true;
                     break;
@@ -490,7 +541,10 @@ public class OverlayService extends Service implements View.OnTouchListener {
                     lastYPosition = params.y;
                     if (!WindowSetup.positionGravity.equals("none")) {
                         if (windowManager == null) return false;
-                        windowManager.updateViewLayout(flutterView, params);
+                        try {
+                            windowManager.updateViewLayout(flutterView, params);
+                        } catch (Throwable ignore) {
+                        }
                         mTrayTimerTask = new TrayAnimationTimerTask();
                         mTrayAnimationTimer = new Timer();
                         mTrayAnimationTimer.schedule(mTrayTimerTask, 0, 25);
