@@ -488,6 +488,28 @@ public class OverlayService extends Service implements View.OnTouchListener {
         return mResources.getConfiguration().orientation == Configuration.ORIENTATION_PORTRAIT;
     }
 
+    // 【本仓库安全补丁 v4】szWindow 原先只在开窗时取一次 display size：竖屏开窗后
+    // 横屏进游戏，拖拽 clamp 的 maxX = szWindow.x - curW 仍是旧竖屏宽度算出的
+    // 小值（甚至夹到 0），悬浮窗永远贴左拖不动。每次拖拽/吸附前动态刷新为
+    // 当前真实显示尺寸；API 30+ 优先取视图自身挂载的 Display（与窗口同配置，
+    // 服务上下文默认显示屏可能不是游戏所在屏）。
+    private void refreshWindowSize() {
+        try {
+            Display d = null;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && flutterView != null
+                    && flutterView.isAttachedToWindow() && flutterView.getDisplay() != null) {
+                d = flutterView.getDisplay();
+            } else if (windowManager != null && windowManager.getDefaultDisplay() != null) {
+                d = windowManager.getDefaultDisplay();
+            }
+            if (d != null) {
+                d.getSize(szWindow);
+            }
+        } catch (Throwable t) {
+            Log.e("OverLay", "refreshWindowSize failed", t);
+        }
+    }
+
     @Override
     public boolean onTouch(View view, MotionEvent event) {
         // 【安全补丁 v3】补 flutterView 判空：窗口销毁竞态期 windowManager 尚在、
@@ -524,6 +546,7 @@ public class OverlayService extends Service implements View.OnTouchListener {
                     int yy = params.y + ((int) dy * (invertY ? -1 : 1));
                     int curW = params.width > 0 ? params.width : flutterView.getWidth();
                     int curH = params.height > 0 ? params.height : flutterView.getHeight();
+                    refreshWindowSize();
                     int maxX = Math.max(0, szWindow.x - curW);
                     int maxY = Math.max(0, szWindow.y - curH);
                     params.x = Math.max(0, Math.min(xx, maxX));
@@ -576,6 +599,7 @@ public class OverlayService extends Service implements View.OnTouchListener {
                 return;
             }
             mDestY = lastYPosition;
+            refreshWindowSize();
             switch (WindowSetup.positionGravity) {
                 case "auto":
                     mDestX = (params.x + (flutterView.getWidth() / 2)) <= szWindow.x / 2 ? 0 : szWindow.x - flutterView.getWidth();

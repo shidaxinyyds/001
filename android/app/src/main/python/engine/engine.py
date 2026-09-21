@@ -1307,6 +1307,9 @@ class Engine:
         self._river_dump_dir: str = ""
         self._river_last_sig: Optional[tuple] = None  # 上一张已存帧的牌河状态签名
         self._river_saved: int = 0
+        # ===== 低置信手牌帧采集（见 _maybe_collect_lowconf_hand）=====
+        self._lowconf_saved: int = 0
+        self._lowconf_last_ts: float = 0.0
         # YOLO 影子对比实例：None=未创建，False=创建失败（不再重试），对象=可用
         self._yolo_shadow = None
         # ===== 全图辅助检测节流（响应提速）=====
@@ -1353,6 +1356,13 @@ class Engine:
         wood_felt = float(np.mean((hsv[:, :, 0] >= 12) & (hsv[:, :, 0] <= 25) & (hsv[:, :, 1] >= 60) & (hsv[:, :, 2] >= 35) & (hsv[:, :, 2] <= 160)))
 
         max_felt = max(green_felt, cyan_felt, wood_felt)
+
+        # 【v4 防误判】纯色背景排除：速配/加载/ splash 页常是铺满全屏的单一
+        # 绿底，桌布占比可高达 90%+；而真实牌桌中央必有牌河/副露/玩家头像/
+        # 桌面花纹，单一桌布色占比极少超过 90%。占比高到接近铺满时不当牌桌，
+        # 落入下方手牌实证兜底，杜绝速配页被误判为对局而显示残留手牌。
+        if max_felt >= 0.90:
+            max_felt = 0.0
 
         # 真实牌桌中央桌布单色占比通常达到 18% 以上
         if max_felt >= 0.18:
@@ -1544,6 +1554,59 @@ class Engine:
                 json.dump(meta, f, ensure_ascii=False)
             self._river_saved += 1
             print(f"[collect_river] 存第 {self._river_saved} 帧 牌河{len(river_tally)}种 签名={sig}")
+        except Exception:
+            traceback.print_exc()
+
+    LOWCONF_SCORE_GATE = 0.80   # 最高模板分低于此 = 当前 bank 对平台样式覆盖不足
+    LOWCONF_MIN_INTERVAL = 3.0  # 秒，限流防风暴写盘
+    LOWCONF_LIMIT = 300         # 单引擎会话上限（≈ 60MB）
+
+    def _maybe_collect_lowconf_hand(self, image, result: Dict) -> None:
+        """低置信手牌帧采集：真机遇到模板 bank 未覆盖的平台牌面样式（漏检/
+        误识的主要数据性根因）时，落盘低分帧 + 引擎弱标签，供离线校验后
+        扩充 bank。与 collect_river 共用总开关与目录（hand_lowconf 子目录），
+        默认关、限流、限量；任何异常吞掉，绝不影响识别主链路。"""
+        try:
+            if not self._cfg.get("collect_river") or not self._river_dump_dir:
+                return
+            status = result.get("status")
+            if status not in ("ok", "partial", "incomplete", "no_tiles"):
+                return
+            top = float(result.get("top_score") or 0.0)
+            if top >= self.LOWCONF_SCORE_GATE:
+                return
+            now = time.time()
+            if (self._lowconf_saved >= self.LOWCONF_LIMIT
+                    or now - self._lowconf_last_ts < self.LOWCONF_MIN_INTERVAL):
+                return
+            if not isinstance(image, np.ndarray) or image.size == 0:
+                return
+            ok, buf = cv2.imencode(
+                ".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+            if not ok:
+                return
+            out_dir = os.path.join(self._river_dump_dir, "hand_lowconf")
+            os.makedirs(out_dir, exist_ok=True)
+            ts = int(now * 1000)
+            stem = os.path.join(out_dir, f"lowconf_{self._lowconf_saved:04d}_{ts}")
+            with open(stem + ".jpg", "wb") as f:
+                f.write(buf.tobytes())
+            meta = {
+                "ts": ts,
+                "mode": result.get("mode"),
+                "status": status,
+                "top_score": top,
+                "hand": result.get("hand") or "",
+                "hand_count": result.get("count"),
+                "tile_count": len(result.get("tiles") or []),
+                "frame_size": [int(image.shape[1]), int(image.shape[0])],
+                "verified": False,
+            }
+            with open(stem + ".json", "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False)
+            self._lowconf_saved += 1
+            self._lowconf_last_ts = now
+            print(f"[lowconf] 存第 {self._lowconf_saved} 帧低分帧 top={top}")
         except Exception:
             traceback.print_exc()
 
@@ -3778,6 +3841,8 @@ class Engine:
             self._frame_skipper.remember(payload, result["top_score"])
             # 牌河真实帧采集（仅当调试页「牌河采集」开启；异常已内部吞掉）
             self._maybe_collect_river(full_for_preview, result)
+            # 低置信手牌帧采集（同一开关门控：真机 bank 覆盖不足样本回收闭环）
+            self._maybe_collect_lowconf_hand(full_for_preview, result)
 
             res = EngineResult(
                 image=_make_preview(full_for_preview),

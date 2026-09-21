@@ -2559,7 +2559,12 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                                   const SizedBox(width: 5),
                                   Flexible(
                                     child: Text(
-                                      GameMode.label(selectedMode),
+                                      // 【v4 玩法可见】优先显示引擎回传的实际玩法名：
+                                      // 屏上规则真身由引擎 mode 驱动，标题与引擎同源
+                                      // 才能证明切换已生效（本地 selectedMode 仅作回退）。
+                                      (result?['mode_name'] as String?)?.isNotEmpty == true
+                                          ? result!['mode_name'] as String
+                                          : GameMode.label(selectedMode),
                                       overflow: TextOverflow.ellipsis,
                                       style: const TextStyle(
                                         color: Colors.white,
@@ -2659,11 +2664,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                 ),
                 const SizedBox(height: 5),
                 // 核心卡片滚动流：全包裹于 SingleChildScrollView，彻底杜绝 RenderFlex overflow
-                // 假活/断流时灰化数据区（降透明度+不可交互误导降至最低），
-                // 让用户一眼看出屏上数据已不是实时。
+                // 假活/断流时淡化数据区（屏上数据已非实时）：旧 0.45 过重，正常数据
+                // 也看不清、被误认成窗口故障发黑；0.72 足以传达“非实时”不伤可读性。
                 Expanded(
                   child: Opacity(
-                    opacity: signalLost ? 0.45 : 1.0,
+                    opacity: signalLost ? 0.72 : 1.0,
                     child: SingleChildScrollView(
                     controller: _panelScrollController,
                     physics: const AlwaysScrollableScrollPhysics(
@@ -2672,6 +2677,30 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
+                        // 0. 空态占位：未开局/无手牌时给出明确指引，
+                        //    避免展开面板只剩大片黑底被误认为变灰/故障。
+                        if (!inMatch && !isDingquePhase && !isSwapPhase && !isPickPhase && hand.isEmpty) ...[
+                          const SizedBox(height: 34),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: const [
+                              Icon(Icons.sports_esports_outlined, color: Colors.white30, size: 15),
+                              SizedBox(width: 5),
+                              Flexible(
+                                child: Text(
+                                  '等待牌局开始，进入游戏后自动识别…',
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: Colors.white38,
+                                    fontSize: 10,
+                                    decoration: TextDecoration.none,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 10),
+                        ],
                         // 1. 核心建议（出牌决策）
                         _adviceSection(advice, best, count),
                         const SizedBox(height: 5),
