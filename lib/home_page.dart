@@ -58,7 +58,11 @@ class _HomePageState extends State<HomePage> {
     });
 
     // 接收悬浮窗通过 shareData 发来的消息：
-    // 'stop' 为"停止"指令，Map 为识别状态回传（用于确认后端真的在识别）
+    // 'stop' 为"停止"指令；roi/orient/reset_match 是低频控制事件转给 Java。
+    // 注意：高频的 'status' 识别回传**不在这里处理**——旧实现每帧回传都整页
+    // setState，识别高峰期整树重建不停排队，把点玩法/点按钮的响应全拖慢
+    // （"卡顿感"真正来源）。识别状态已下沉到 _RecognitionStatusView 自建
+    // 订阅只重建局部小卡（overlayListener 已是广播流，支持多处订阅）。
     _overlaySub = FlutterOverlayWindow.overlayListener.listen((event) {
       if (event == 'stop') {
         setProcessingState(false);
@@ -69,20 +73,6 @@ class _HomePageState extends State<HomePage> {
           });
         }
         return;
-      }
-      if (event is Map && event['type'] == 'status') {
-        if (mounted) {
-          setState(() {
-            _recogStatus = event['status']?.toString() ?? '';
-            // JSON 链路数值可能是 int/double，强转 as int 会抛错弄残监听；统一走 num。
-            _recogCount = (event['count'] as num?)?.toInt() ?? 0;
-            _recogShanten = (event['shanten'] as num?)?.toInt();
-            _recogHand = event['hand']?.toString() ?? '';
-            _recogTopScore = (event['top_score'] as num?)?.toDouble() ?? 0.0;
-            _recogScreen = event['screen']?.toString() ?? '';
-            _recogMessage = event['message']?.toString() ?? '';
-          });
-        }
       }
       // 悬浮窗拖动态识别框：把 ROI 比例经主引擎 MethodChannel 转给 Java/引擎。
       // 注意：悬浮窗是独立 Flutter 引擎，它的 MethodChannel 到不了 MainActivity
@@ -111,14 +101,9 @@ class _HomePageState extends State<HomePage> {
     super.dispose();
   }
 
-  // 由悬浮窗回传的识别状态（证明链路真的在跑，而不是摆设）
-  String _recogStatus = '';
-  int _recogCount = 0;
-  int? _recogShanten;
-  String _recogHand = '';
-  double _recogTopScore = 0.0;
-  String _recogScreen = '';
-  String _recogMessage = '';
+  // 悬浮窗开启/停止流程在飞标志：防用户重复点击重入（二次 showOverlay/closeOverlay
+  // 与第一轮位置校正循环互相踩踏，是“开窗过程抽风”的常见诱因）。
+  bool _overlayBusy = false;
 
   // 底部导航栏当前页（0=主页, 1=调试）
   int _tab = 0;
@@ -142,15 +127,6 @@ class _HomePageState extends State<HomePage> {
   static const OverlayPosition _startPos = OverlayPosition(16, 100);
 
   String _status = '未开始';
-
-  void _setStatus(String s) {
-    print('[悬浮窗状态] $s');
-    if (mounted) {
-      setState(() {
-        _status = s;
-      });
-    }
-  }
 
   Future<void> showOverlay() async {
     try {
@@ -227,53 +203,6 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  String _recognitionText() {
-    if (!isProcessing) return '未开始识别';
-    switch (_recogStatus) {
-      case 'ok':
-        final String sh = _recogShanten == null
-            ? ''
-            : (_recogShanten == 0 ? '（听牌）' : '（$_recogShanten 向听）');
-        return '✓ 已识别 $_recogCount 张$sh\n$_recogHand';
-      case 'incomplete':
-        return '识别到 $_recogCount 张，需 13/14 张才完整\n（确认牌面完整、没有被遮挡）';
-      case 'no_tiles':
-        return '未识别到牌面\n${_diagHint()}';
-      case 'engine_ready':
-        return '识别引擎已就绪，等待画面…\n（若一直停在这里，说明采集不到屏幕画面）';
-      case 'no_frames':
-        return '已授权录屏，但未采集到画面\n'
-            '（切到牌局稍等几秒；屏幕完全静止时也属正常；\n'
-            '若持续如此说明录屏会话已失效，请"停止识别"后重新开始）';
-      case 'projection_stopped':
-        return '录屏会话被系统结束\n（锁屏/状态栏停止共享/被其它录屏抢占）\n请重新点"开始识别"';
-      case 'send_error':
-        return '识别结果发送失败\n（悬浮窗数据链路断开，请停止后重新开始）';
-      case 'py_error':
-      case 'decode_error':
-      case 'java_error':
-      case 'capture_error':
-      case 'start_failed':
-        return '识别链路异常\n$_recogMessage';
-      default:
-        return '正在等待第一帧识别结果…';
-    }
-  }
-
-  // 识别不出牌时，把"匹配分/分辨率"摆出来，一眼能区分
-  // 是没截到屏、屏幕里没牌，还是牌面样式跟模板不匹配
-  String _diagHint() {
-    final String scr = _recogScreen.isEmpty ? '未知' : _recogScreen;
-    final String score = _recogTopScore.toStringAsFixed(2);
-    if (_recogScreen.isEmpty) {
-      return '（还没收到第一帧，确认已授权录屏并打开牌局）';
-    }
-    if (_recogTopScore < 0.20) {
-      return '屏幕 $scr｜匹配分 $score\n屏幕里没找到牌，确认已打开牌局且手牌可见';
-    }
-    return '屏幕 $scr｜匹配分 $score\n有牌但匹配分偏低：本 App 的牌面样式与内置模板差异较大';
-  }
-
   // 诊断小工具：调试时可手动调用查看权限/采集链路。当前 UI 不再暴露按钮。
   // ignore: unused_element
   Future<void> _refreshDiag() async {
@@ -291,6 +220,15 @@ class _HomePageState extends State<HomePage> {
       pos = 'x=${p.x.toStringAsFixed(0)}, y=${p.y.toStringAsFixed(0)}';
     } catch (_) {}
     _setStatus('权限=${granted ? "已授予" : "未授予"}｜运行中=$active｜位置=$pos');
+  }
+
+  void _setStatus(String s) {
+    print('[悬浮窗状态] $s');
+    if (mounted) {
+      setState(() {
+        _status = s;
+      });
+    }
   }
 
   void hideOverlay() async {
@@ -515,17 +453,23 @@ class _HomePageState extends State<HomePage> {
 
   // 开始/停止识别
   Future<void> _toggleProcessing() async {
-    if (isProcessing) {
-      setProcessingState(false);
-      hideOverlay();
-      setState(() => isProcessing = false);
-    } else {
-      await showOverlay();
-      // 开悬浮窗流程可长达数秒（权限/位置校正），期间若被授权闸门卸页面，
-      // 绝不拿着已销毁的 context 再 setState。
-      if (!mounted) return;
-      setProcessingState(true);
-      setState(() => isProcessing = true);
+    if (_overlayBusy) return; // 防重入：开窗流程可耗时数秒，连点会踩踏服务
+    _overlayBusy = true;
+    try {
+      if (isProcessing) {
+        setProcessingState(false);
+        hideOverlay();
+        setState(() => isProcessing = false);
+      } else {
+        await showOverlay();
+        // 开悬浮窗流程可长达数秒（权限/位置校正），期间若被授权闸门卸页面，
+        // 绝不拿着已销毁的 context 再 setState。
+        if (!mounted) return;
+        setProcessingState(true);
+        setState(() => isProcessing = true);
+      }
+    } finally {
+      _overlayBusy = false;
     }
   }
 
@@ -706,7 +650,10 @@ class _HomePageState extends State<HomePage> {
       duration: const Duration(milliseconds: 220),
       switchInCurve: Curves.easeOut,
       switchOutCurve: Curves.easeIn,
-      child: isProcessing ? _buildRunningCard() : _buildIdleCard(),
+      child: isProcessing
+          ? _RecognitionStatusView(
+              key: const ValueKey<String>('running'), overlayStatus: _status)
+          : _buildIdleCard(),
     );
   }
 
@@ -747,9 +694,109 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _buildRunningCard() {
+}
+
+/// 运行中状态卡：自建对悬浮窗广播流的订阅，识别回传每帧只重建本小卡，
+/// 不再触发整棵首页 setState——这是“识别开着时点玩法/按钮发卡顿”的根治。
+class _RecognitionStatusView extends StatefulWidget {
+  final String overlayStatus;
+  const _RecognitionStatusView({Key? key, required this.overlayStatus})
+      : super(key: key);
+
+  @override
+  State<_RecognitionStatusView> createState() => _RecognitionStatusViewState();
+}
+
+class _RecognitionStatusViewState extends State<_RecognitionStatusView> {
+  // 由悬浮窗回传的识别状态（证明链路真的在跑，而不是摆设）
+  String _recogStatus = '';
+  int _recogCount = 0;
+  int? _recogShanten;
+  String _recogHand = '';
+  double _recogTopScore = 0.0;
+  String _recogScreen = '';
+  String _recogMessage = '';
+
+  StreamSubscription<dynamic>? _sub;
+
+  @override
+  void initState() {
+    super.initState();
+    // overlayListener 是广播流，支持主页控制事件订阅之外再开一路局部订阅。
+    _sub = FlutterOverlayWindow.overlayListener.listen((event) {
+      if (!mounted) return;
+      if (event is Map && event['type'] == 'status') {
+        setState(() {
+          _recogStatus = event['status']?.toString() ?? '';
+          // JSON 链路数值可能是 int/double，强转 as int 会抛错弄残监听；统一走 num。
+          _recogCount = (event['count'] as num?)?.toInt() ?? 0;
+          _recogShanten = (event['shanten'] as num?)?.toInt();
+          _recogHand = event['hand']?.toString() ?? '';
+          _recogTopScore = (event['top_score'] as num?)?.toDouble() ?? 0.0;
+          _recogScreen = event['screen']?.toString() ?? '';
+          _recogMessage = event['message']?.toString() ?? '';
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    _sub = null;
+    super.dispose();
+  }
+
+  String _recognitionText() {
+    switch (_recogStatus) {
+      case 'ok':
+        final String sh = _recogShanten == null
+            ? ''
+            : (_recogShanten == 0 ? '（听牌）' : '（$_recogShanten 向听）');
+        return '✓ 已识别 $_recogCount 张$sh\n$_recogHand';
+      case 'incomplete':
+        return '识别到 $_recogCount 张，需 13/14 张才完整\n（确认牌面完整、没有被遮挡）';
+      case 'no_tiles':
+        return '未识别到牌面\n${_diagHint()}';
+      case 'engine_ready':
+        return '识别引擎已就绪，等待画面…\n（若一直停在这里，说明采集不到屏幕画面）';
+      case 'no_frames':
+        return '已授权录屏，但未采集到画面\n'
+            '（切到牌局稍等几秒；屏幕完全静止时也属正常；\n'
+            '若持续如此说明录屏会话已失效，请"停止识别"后重新开始）';
+      case 'projection_stopped':
+        return '录屏会话被系统结束\n（锁屏/状态栏停止共享/被其它录屏抢占）\n请重新点"开始识别"';
+      case 'send_error':
+        return '识别结果发送失败\n（悬浮窗数据链路断开，请停止后重新开始）';
+      case 'py_error':
+      case 'decode_error':
+      case 'java_error':
+      case 'capture_error':
+      case 'start_failed':
+        return '识别链路异常\n$_recogMessage';
+      default:
+        return '正在等待第一帧识别结果…';
+    }
+  }
+
+  // 识别不出牌时，把"匹配分/分辨率"摆出来，一眼能区分
+  // 是没截到屏、屏幕里没牌，还是牌面样式跟模板不匹配
+  String _diagHint() {
+    final String scr = _recogScreen.isEmpty ? '未知' : _recogScreen;
+    final String score = _recogTopScore.toStringAsFixed(2);
+    if (_recogScreen.isEmpty) {
+      return '（还没收到第一帧，确认已授权录屏并打开牌局）';
+    }
+    if (_recogTopScore < 0.20) {
+      return '屏幕 $scr｜匹配分 $score\n屏幕里没找到牌，确认已打开牌局且手牌可见';
+    }
+    return '屏幕 $scr｜匹配分 $score\n有牌但匹配分偏低：本 App 的牌面样式与内置模板差异较大';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final String st = widget.overlayStatus;
     return Container(
-      key: const ValueKey<String>('running'),
       padding: const EdgeInsets.all(AppTokens.s16),
       decoration: BoxDecoration(
         color: AppTokens.surface,
@@ -790,9 +837,9 @@ class _HomePageState extends State<HomePage> {
             ],
           ),
           const SizedBox(height: 10),
-          if (_status.isNotEmpty && _status != '未开始') ...[
+          if (st.isNotEmpty && st != '未开始') ...[
             Text(
-              _status,
+              st,
               style: const TextStyle(
                 fontSize: 12,
                 color: _kTextMuted,

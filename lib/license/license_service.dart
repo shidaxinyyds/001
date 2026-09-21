@@ -63,7 +63,10 @@ class LicenseService {
   LicenseState evaluateForTest(LicenseToken tk) => _evaluate(tk);
 
   Future<void> init() async {
-    if (_ready) return;
+    // 【自愈重试】旧实现一旦首轮 getInstance 瞬态失败（厂商杀存储/IO 抖动）就把
+    // _prefs=null 锁死整个生命周期，之后本地判定永远 notActivated，已激活的
+    // 正常用户会被误踢。现在只要存储仍缺失就每次重试，拿到才视为就绪。
+    if (_ready && _prefs != null) return;
     // 存储不可用属极端环境异常：吞掉并置 _prefs=null（上层退化为"未激活"），
     // 绝不让授权检查本身把 App 首屏带崩。
     try {

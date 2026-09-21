@@ -73,6 +73,14 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
       st = const LicenseState(LicenseStatus.notActivated);
     }
     if (!mounted) return;
+    // 【踢人铁律】只有真到期（licenseExpired，签名 expires_at 到达/服务器确认）
+    // 或服务端明确拒绝（refused，含 revoked/换设备/篡改）才允许退回激活页。
+    // 已放行会话撞上 notActivated（本地存储瞬时读空、设备指纹未就绪、
+    // 心跳竞态等）一律视为瞬态抖动：保持功能页继续运行，绝不误踢。
+    if (st.status == LicenseStatus.notActivated && (_state?.allowsUsage ?? false)) {
+      _scheduleExpiryCheck(_state!);
+      return;
+    }
     // 主闸门所在引擎能读到本地凭证，是到期的权威判定方；一旦失权
     // （到期/被拒/被拉黑）立即收起悬浮窗，兜住子窗无法自验签的到期场景。
     if (!st.allowsUsage) {

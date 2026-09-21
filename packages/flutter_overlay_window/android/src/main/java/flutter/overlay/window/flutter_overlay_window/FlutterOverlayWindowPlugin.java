@@ -120,8 +120,15 @@ public class FlutterOverlayWindowPlugin implements
             intent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
             intent.putExtra("startX", startX);
             intent.putExtra("startY", startY);
-            context.startService(intent);
-            result.success(null);
+            // 【安全补丁】系统对后台启动服务等限制会从 startService 抛异常，
+            // 旧实现直接冒到主线程崩整个 App；现在以 error 回给 Dart 侧展示提示。
+            try {
+                context.startService(intent);
+                result.success(null);
+            } catch (Throwable t) {
+                Log.e("FlutterOverlayWindow", "startService(OverlayService) failed", t);
+                result.error("START_FAILED", "无法启动悬浮窗服务: " + t.getMessage(), null);
+            }
         } else if (call.method.equals("isOverlayActive")) {
             result.success(OverlayService.isRunning);
             return;

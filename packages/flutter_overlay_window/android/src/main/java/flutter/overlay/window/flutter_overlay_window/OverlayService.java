@@ -388,7 +388,17 @@ public class OverlayService extends Service implements View.OnTouchListener {
                 .setContentIntent(pendingIntent)
                 .setVisibility(WindowSetup.notificationVisibility)
                 .build();
-        startForeground(OverlayConstants.NOTIFICATION_ID, notification);
+        // 【安全补丁】部分 OEM/系统版本对前台服务启动有额外限制（如后台启动窗口期已过），
+        // startForeground 抛异常会直接崩掉同进程整个 App；现在失败即干净自停，
+        // Dart 侧只会看到悬浮窗没弹出来，绝不闪退。
+        try {
+            startForeground(OverlayConstants.NOTIFICATION_ID, notification);
+        } catch (Throwable t) {
+            Log.e("OverLay", "startForeground failed; stopping service instead of crashing", t);
+            isRunning = false;
+            stopSelf();
+            return;
+        }
         instance = this;
     }
 
