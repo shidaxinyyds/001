@@ -306,12 +306,25 @@ class LicenseService {
         ? DateTime.fromMillisecondsSinceEpoch(r.expiresAt! * 1000)
         : null;
     if (!r.valid) {
-      // 服务器明确：到期/拉黑/查无 → 清本地券，杜绝残留券被复用（含换设备后旧券）。
-      _clearToken();
+      // revoked（服务端明确停用）：必须硬清本地券，杜绝被拉黑的券被复用。
       if (r.revoked) {
+        _clearToken();
         return LicenseState(LicenseStatus.refused,
             expiresAt: expDt, message: '该授权已被停用，请联系卖家');
       }
+      // not_found（查无此设备）可能是服务端瞬时不一致：新授权行尚未对读可见 /
+      // 主备切换读空 / 项目刚从空闲恢复。绝不能据此销毁一张「签名有效、尚未到期」
+      // 的本地凭证——那会把已激活的正常用户从首页误踢回激活页并强制重输卡密。
+      // 真到期的封顶仍由签名内 expires_at 兜住（下面 _localEval 已按此判定）。
+      // 注：此 fail-open 的暴露上界＝离线宽限本就信任的 token_exp+72h（非整卡周期、
+      // 不可续用，因不触发 renew）；故拉黑必须用 revoked=true（走上面硬清分支），
+      // 不得以「删授权行」作为拉黑手段，否则被删设备会拖到该上界才锁。
+      if (r.error == 'not_found') {
+        final local = _localEval();
+        if (local.allowsUsage) return local; // 本地仍能证明有效：保持放行，不清券
+      }
+      // 其余明确负信号（到期）：清本地券，杜绝残留券被后续复用（含换设备后旧券）。
+      _clearToken();
       return LicenseState(LicenseStatus.licenseExpired, expiresAt: expDt);
     }
     // 服务器判仍有效：走 ensureUsable（临近续签点时顺带换新券并刷新锚点）。

@@ -59,11 +59,17 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
   }
 
   Future<void> _refresh() async {
-    LicenseState? st;
+    LicenseState st;
     try {
       st = await LicenseService.instance.heartbeat();
     } catch (_) {
-      // 授权检查自身异常绝不闪退：兜底为"未激活"，交给激活页。
+      if (!mounted) return;
+      // 授权核验自身异常：绝不闪退，也绝不把一段本就可用的会话误重置为「未激活」。
+      // 已有可用状态时原地保持（不收起悬浮窗、不跳回激活页），仅在从未激活过时兜底。
+      if (_state?.allowsUsage ?? false) {
+        _scheduleExpiryCheck(_state!);
+        return;
+      }
       st = const LicenseState(LicenseStatus.notActivated);
     }
     if (!mounted) return;
@@ -116,7 +122,12 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
       _state = st;
       _busy = false;
     });
-    if (st.allowsUsage) _code.clear();
+    if (st.allowsUsage) {
+      _code.clear();
+      // 激活成功后立即排定到期复核（短卡到期即时退回激活页），与 _refresh 一致，
+      // 不再等下一次 30 分钟轮询。
+      _scheduleExpiryCheck(st);
+    }
   }
 
   @override
