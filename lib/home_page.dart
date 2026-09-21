@@ -35,6 +35,11 @@ class _HomePageState extends State<HomePage> {
   String _selectedCategory = '川麻血流';
   bool _modeReady = false;
 
+  // 悬浮窗→主 App 的回传订阅。必须持有并在 dispose 取消：旧实现只 listen
+  // 不 cancel，页面每次被重建都叠加一个监听/或撞单订阅流报错，状态回传
+  // 链路越用越卡甚至损坏。
+  StreamSubscription<dynamic>? _overlaySub;
+
   @override
   void initState() {
     super.initState();
@@ -54,7 +59,7 @@ class _HomePageState extends State<HomePage> {
 
     // 接收悬浮窗通过 shareData 发来的消息：
     // 'stop' 为"停止"指令，Map 为识别状态回传（用于确认后端真的在识别）
-    FlutterOverlayWindow.overlayListener.listen((event) {
+    _overlaySub = FlutterOverlayWindow.overlayListener.listen((event) {
       if (event == 'stop') {
         setProcessingState(false);
         hideOverlay();
@@ -69,8 +74,9 @@ class _HomePageState extends State<HomePage> {
         if (mounted) {
           setState(() {
             _recogStatus = event['status']?.toString() ?? '';
-            _recogCount = (event['count'] ?? 0) as int;
-            _recogShanten = event['shanten'] as int?;
+            // JSON 链路数值可能是 int/double，强转 as int 会抛错弄残监听；统一走 num。
+            _recogCount = (event['count'] as num?)?.toInt() ?? 0;
+            _recogShanten = (event['shanten'] as num?)?.toInt();
             _recogHand = event['hand']?.toString() ?? '';
             _recogTopScore = (event['top_score'] as num?)?.toDouble() ?? 0.0;
             _recogScreen = event['screen']?.toString() ?? '';
@@ -96,6 +102,13 @@ class _HomePageState extends State<HomePage> {
         channel.invokeMethod<dynamic>('resetMatch');
       }
     });
+  }
+
+  @override
+  void dispose() {
+    _overlaySub?.cancel();
+    _overlaySub = null;
+    super.dispose();
   }
 
   // 由悬浮窗回传的识别状态（证明链路真的在跑，而不是摆设）
@@ -295,19 +308,12 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  /// 用户点选玩法。同步写到 Java 共享文件（Python 引擎读的就是这个文件），
-  /// 异步回来再 setState，避免 MethodChannel 抖动期间出现"选项闪烁"。
+  /// 用户点选玩法：**乐观更新**——点下去立刻高亮选中（旧实现要等 Java 写完
+  /// 共享文件才 setState，手感就是"点一下卡半秒"）；异步落地失败再回滚并提示。
   Future<void> _selectMode(String mode) async {
     if (mode == selectedMode) return;
-    final ok = await GameMode.set(mode);
-    if (!ok) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('切到 ${GameMode.label(mode)} 失败，请重试'),
-      ));
-      return;
-    }
-    if (!mounted) return;
+    final prevMode = selectedMode;
+    final prevCategory = _selectedCategory;
     final info = GameMode.info(mode);
     setState(() {
       selectedMode = mode;
@@ -315,6 +321,17 @@ class _HomePageState extends State<HomePage> {
         _selectedCategory = info.category;
       }
     });
+    final ok = await GameMode.set(mode);
+    if (ok) return;
+    if (!mounted) return;
+    // 落地失败：回滚到切换前的选择，不让 UI 停在未生效的选中态。
+    setState(() {
+      selectedMode = prevMode;
+      _selectedCategory = prevCategory;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text('切到 ${GameMode.label(mode)} 失败，请重试'),
+    ));
   }
 
   @override
@@ -502,6 +519,9 @@ class _HomePageState extends State<HomePage> {
       setState(() => isProcessing = false);
     } else {
       await showOverlay();
+      // 开悬浮窗流程可长达数秒（权限/位置校正），期间若被授权闸门卸页面，
+      // 绝不拿着已销毁的 context 再 setState。
+      if (!mounted) return;
       setProcessingState(true);
       setState(() => isProcessing = true);
     }

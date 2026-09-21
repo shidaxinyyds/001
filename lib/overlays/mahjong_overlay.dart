@@ -470,6 +470,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // ── 授权自守护（悬浮窗子引擎用 device_id 直连服务器心跳，到期即自锁）──
   bool _licenseAllows = true; // 乐观默认，首次异步核验后纠正
   int _licenseDays = 0;
+  // 锁定胶囊文案：只在真到期/被拒时显示对应原因，绝不把一切失权都写成"到期"。
+  String _licenseDenyText = '授权校验未通过';
   Timer? _licenseTimer;
   Timer? _licenseExpiryTimer;
 
@@ -608,10 +610,18 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           st.status == LicenseStatus.refused;
       final allows = !denied;
       final days = st.remainingDays;
-      if (allows != _licenseAllows || days != _licenseDays) {
+      final denyText = st.status == LicenseStatus.licenseExpired
+          ? '卡密授权已到期，请重新激活'
+          : ((st.message?.isNotEmpty ?? false)
+              ? st.message!
+              : '授权已失效，请重新激活');
+      if (allows != _licenseAllows ||
+          days != _licenseDays ||
+          denyText != _licenseDenyText) {
         setState(() {
           _licenseAllows = allows;
           _licenseDays = days;
+          _licenseDenyText = denyText;
         });
       }
       _scheduleLicenseExpiryCheck(st, allows);
@@ -751,14 +761,14 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           borderRadius: BorderRadius.circular(20),
           border: Border.all(color: const Color(0xFFFF8A80), width: 1),
         ),
-        child: const Row(
+        child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.lock_outline, size: 15, color: Color(0xFFFF8A80)),
-            SizedBox(width: 6),
+            const Icon(Icons.lock_outline, size: 15, color: Color(0xFFFF8A80)),
+            const SizedBox(width: 6),
             Text(
-              '授权已到期，请续费',
-              style: TextStyle(
+              _licenseDenyText,
+              style: const TextStyle(
                 color: Colors.white,
                 fontSize: 12.5,
                 fontWeight: FontWeight.w700,
@@ -809,16 +819,22 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     }).catchError((_) {});
   }
 
-  /// 一键「新局重置」：向原生与 Python 发送重置信号，同时界面瞬间恢复 108 张活牌满额
+  /// 一键「新局重置」：向原生与 Python 发送重置信号，同时界面瞬间恢复满额活牌。
+  /// 字牌矩阵必须按当前玩法牌墙推导（108 无字牌 / 112 仅 4 红中 / 136 全 7 字牌），
+  /// 旧实现硬编码 7×4 字牌，在血战/血流等玩法下属于与牌局不符的"无中生有"数据。
   void _requestResetMatch() {
     FlutterOverlayWindow.shareData({'type': 'reset_match'}).catchError((_) {});
     if (mounted) {
       setState(() {
+        final int wall = GameMode.info(selectedMode)?.wall ?? 108;
+        final List<int> z = wall >= 136
+            ? List.filled(7, 4)
+            : (wall == 112 ? <int>[4] : <int>[]);
         final resetMatrix = {
           'm': List.filled(9, 4),
           'p': List.filled(9, 4),
           's': List.filled(9, 4),
-          'z': List.filled(7, 4),
+          'z': z,
         };
         if (result != null) {
           result = Map<String, dynamic>.from(result!)

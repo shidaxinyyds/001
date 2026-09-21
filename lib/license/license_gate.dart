@@ -148,9 +148,21 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
   }
 
   Widget _activationScreen(LicenseState? st) {
-    final remaining = st?.remainingDays ?? 0;
-    final isExpired =
-        st != null && st.status != LicenseStatus.notActivated;
+    // 提示文案只反映真实状态，绝不拿"已到期"兜底吓用户：
+    //  - licenseExpired：签名内 expires_at 真到达（或服务器确认到期）才说"已到期"；
+    //  - refused：服务端拉黑/换设备/篡改等，逐条显示服务端的拒因原文；
+    //  - 其它（未激活/激活失败）：只是请用户输入卡密，不提任何到期字样。
+    final status = st?.status;
+    final bool isExpired = status == LicenseStatus.licenseExpired;
+    final bool isRefused = status == LicenseStatus.refused;
+    final String prompt;
+    if (isExpired) {
+      prompt = '卡密授权已到期，请输入新卡密激活';
+    } else if (isRefused) {
+      prompt = st?.message ?? '授权校验未通过，请重新输入卡密激活';
+    } else {
+      prompt = '输入卡密开始使用（一卡绑一台设备）';
+    }
     return Scaffold(
       // 明亮商务底：极淡的品牌青向下过渡到近白，营造高级感而不喧宾夺主。
       backgroundColor: AppTokens.bg,
@@ -207,43 +219,11 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
                       ),
                       const SizedBox(height: AppTokens.s8),
                       Text(
-                        '专业麻将实时分析 · 一卡绑定一台设备',
+                        prompt,
                         textAlign: TextAlign.center,
                         style: const TextStyle(
                             fontSize: 13, color: AppTokens.muted),
                       ),
-                      const SizedBox(height: AppTokens.s8),
-                      Text(
-                        isExpired
-                            ? (st.message ?? '授权已到期，请输入新卡密激活')
-                            : '输入卡密开始使用（一卡绑一台设备）',
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                            fontSize: 13, color: AppTokens.muted),
-                      ),
-                      if (isExpired && remaining > 0) ...[
-                        const SizedBox(height: AppTokens.s12),
-                        Center(
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: AppTokens.s16, vertical: 6),
-                            decoration: BoxDecoration(
-                              color: AppTokens.successBg,
-                              borderRadius:
-                                  BorderRadius.circular(AppTokens.rPill),
-                              border:
-                                  Border.all(color: AppTokens.successBorder),
-                            ),
-                            child: Text(
-                              '已激活 · 剩余 $remaining 天',
-                              style: const TextStyle(
-                                  fontSize: 12.5,
-                                  fontWeight: FontWeight.w600,
-                                  color: AppTokens.successDark),
-                            ),
-                          ),
-                        ),
-                      ],
                       const SizedBox(height: AppTokens.s24),
                       TextField(
                         controller: _code,
@@ -278,7 +258,7 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
                             fontFamily: 'monospace',
                             color: AppTokens.ink),
                       ),
-                      if (st?.message != null && !isExpired) ...[
+                      if (st?.message != null && !isExpired && !isRefused) ...[
                         const SizedBox(height: AppTokens.s12),
                         Text(
                           st!.message!,

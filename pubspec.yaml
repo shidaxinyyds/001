@@ -1,6 +1,6 @@
 name: auto_vision
 description: 实时麻将训练器：通过屏幕录制与机器学习识别牌面，并在悬浮窗中给出弃牌策略建议。
-version: 1.5.0+15
+version: 1.5.1+16
 publish_to: "none"
 
 environment:
@@ -16,7 +16,12 @@ dependencies:
   cupertino_icons: ^1.0.1
   permission_handler: ^11.0.1
   share_plus: ^7.2.1
-  flutter_overlay_window: ^0.4.3
+  # 本地 vendor 的 0.4.5（packages/ 内）：上游版 OverlayService 有多条主线程未捕获
+  # NPE（START_STICKY 重启 null-intent、缓存引擎缺失、removeView/detach 无守卫），
+  # 同进程崩溃即整 App 闪退；并修了 requestPermission/closeOverlay 永不回复、
+  # overlay 回传单订阅流二次 listen 抛错。补丁位置见包内【安全补丁】注释。
+  flutter_overlay_window:
+    path: packages/flutter_overlay_window
   # 本地设置与调试状态持久化
   shared_preferences: ^2.2.0
   # 卡密授权：联网激活/续签 + 本地短期凭证 HMAC 验签
