@@ -69,6 +69,11 @@ public class FlutterOverlayWindowPlugin implements
         if (call.method.equals("checkPermission")) {
             result.success(checkOverlayPermission());
         } else if (call.method.equals("requestPermission")) {
+            // 【评审补丁】新一次请求先兜底回复旧挂起项，防旧 Dart Future 失声永挂。
+            if (pendingResult != null) {
+                pendingResult.success(checkOverlayPermission());
+                pendingResult = null;
+            }
             pendingResult = result;
             if (mActivity == null) {
                 // 【安全补丁】无 Activity 时立即回复，绝不让 Dart 侧 Future 永挂。
@@ -120,9 +125,6 @@ public class FlutterOverlayWindowPlugin implements
         } else if (call.method.equals("isOverlayActive")) {
             result.success(OverlayService.isRunning);
             return;
-        } else if (call.method.equals("isOverlayActive")) {
-            result.success(OverlayService.isRunning);
-            return;
         } else if (call.method.equals("moveOverlay")) {
             int x = call.argument("x");
             int y = call.argument("y");
@@ -170,7 +172,9 @@ public class FlutterOverlayWindowPlugin implements
     @Override
     public void onDetachedFromActivityForConfigChanges() {
         // 【安全补丁】配置变化时旧 Activity 已失效，置空防后续用陈旧 activity 拉起设置页。
+        // 【评审补丁】旧 Activity 不会再 dispatch onActivityResult，兜底回复挂起项防永挂。
         mActivity = null;
+        flushPendingResult();
     }
 
     @Override
@@ -180,8 +184,17 @@ public class FlutterOverlayWindowPlugin implements
 
     @Override
     public void onDetachedFromActivity() {
-        // 【安全补丁】对称移除监听，防泄漏与旧 Activity 回调。
+        // 【安全补丁】对称置空，防泄漏与旧 Activity 回调。
+        // 【评审补丁】Activity 销毁后结果永不回来：立即按当前权限状态回复，绝不让 Dart 永挂。
         mActivity = null;
+        flushPendingResult();
+    }
+
+    private void flushPendingResult() {
+        if (pendingResult != null) {
+            pendingResult.success(checkOverlayPermission());
+            pendingResult = null;
+        }
     }
 
     @Override

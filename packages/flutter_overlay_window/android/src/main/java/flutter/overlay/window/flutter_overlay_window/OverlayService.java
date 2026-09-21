@@ -241,6 +241,9 @@ public class OverlayService extends Service implements View.OnTouchListener {
             }
             isRunning = false;
             stopSelf();
+            // 【评审补丁】自行停止时不再让系统按 START_STICKY 重拉，
+            // 避免 stopSelf → 重拉 → null intent → stopSelf 的空转周期。
+            return START_NOT_STICKY;
         }
         return START_STICKY;
     }
@@ -311,7 +314,8 @@ public class OverlayService extends Service implements View.OnTouchListener {
         if (windowManager != null && flutterView != null) {
             WindowManager.LayoutParams params = (WindowManager.LayoutParams) flutterView.getLayoutParams();
             params.width = (width == -1999 || width == -1) ? -1 : dpToPx(width);
-            params.height = (height != 1999 || height != -1) ? dpToPx(height) : height;
+            // 【评审补丁】上游 0.4.5 此处 `||` 恒真（哨兵分支死代码），按 width 同语义修正。
+            params.height = (height == 1999 || height == -1) ? height : dpToPx(height);
             WindowSetup.enableDrag = enableDrag;
             windowManager.updateViewLayout(flutterView, params);
             result.success(true);

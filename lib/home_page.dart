@@ -324,7 +324,9 @@ class _HomePageState extends State<HomePage> {
     final ok = await GameMode.set(mode);
     if (ok) return;
     if (!mounted) return;
-    // 落地失败：回滚到切换前的选择，不让 UI 停在未生效的选中态。
+    // 落地失败：仅当当前仍停在本次乐观切换的选中态时才回滚，
+    // 避免快速连点时晚到的旧失败回滚踩掉后续已成功的切换。
+    if (selectedMode != mode) return;
     setState(() {
       selectedMode = prevMode;
       _selectedCategory = prevCategory;
