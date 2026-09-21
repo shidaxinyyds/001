@@ -128,11 +128,13 @@ class _HomePageState extends State<HomePage> {
 
   String _status = '未开始';
 
-  Future<void> showOverlay() async {
+  /// 开启悬浮窗；返回是否真正打开成功（失败时调用方必须保持待命态，
+  /// 绝不能在服务未起来的情况下把 UI 标成“识别中”）。
+  Future<bool> showOverlay() async {
     try {
       if (await FlutterOverlayWindow.isActive()) {
         _setStatus('悬浮窗已在运行');
-        return;
+        return true;
       }
       // 若未授予"显示在其他应用上层"权限，先引导到系统设置开启。
       bool granted = await FlutterOverlayWindow.isPermissionGranted() == true;
@@ -150,7 +152,7 @@ class _HomePageState extends State<HomePage> {
             duration: Duration(seconds: 6),
           ));
         }
-        return;
+        return false;
       }
       _setStatus('✓ 权限已授予，正在打开悬浮窗…');
 
@@ -198,8 +200,15 @@ class _HomePageState extends State<HomePage> {
       _setStatus(moved
           ? '✓ 悬浮窗已显示（位置已校正：$posText）'
           : '⚠ 悬浮窗已调用，但位置校正未成功（$posText）。请把本行内容反馈给开发者。');
+      return true;
     } catch (e) {
       _setStatus('✗ showOverlay 异常：$e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('开启悬浮窗失败，请再试一次。若反复失败请反馈本机型与时间。'),
+        ));
+      }
+      return false;
     }
   }
 
@@ -461,10 +470,11 @@ class _HomePageState extends State<HomePage> {
         hideOverlay();
         setState(() => isProcessing = false);
       } else {
-        await showOverlay();
+        final opened = await showOverlay();
         // 开悬浮窗流程可长达数秒（权限/位置校正），期间若被授权闸门卸页面，
         // 绝不拿着已销毁的 context 再 setState。
         if (!mounted) return;
+        if (!opened) return; // 开窗失败：留在待命态，不假装“识别中”
         setProcessingState(true);
         setState(() => isProcessing = true);
       }

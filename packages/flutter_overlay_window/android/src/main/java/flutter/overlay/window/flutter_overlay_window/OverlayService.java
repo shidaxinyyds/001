@@ -64,6 +64,10 @@ public class OverlayService extends Service implements View.OnTouchListener {
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
 
     private Handler mAnimationHandler = new Handler();
+    // 【评审补丁】startForeground 失败标记：onCreate 里的 stopSelf() 是异步请求，
+    // 不保证阻断后续 onStartCommand 派发；用显式标志短路，防前台服务已死还
+    // 继续建窗（闪现 + isRunning 假真）。
+    private boolean startForegroundFailed = false;
     private float lastX, lastY;
     private int lastYPosition;
     private boolean dragging;
@@ -108,6 +112,11 @@ public class OverlayService extends Service implements View.OnTouchListener {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         mResources = getApplicationContext().getResources();
+        // 【评审补丁】前台服务启动失败过一次：不再尝试建窗，直接干净终止。
+        if (startForegroundFailed) {
+            stopSelf();
+            return START_NOT_STICKY;
+        }
         // 【安全补丁】系统按 START_STICKY 重建本服务时 intent 为 null，旧实现直接
         // intent.getIntExtra → 主线程 NPE → 整 App 进程闪退（“开悬浮窗后意外退出”的真凶）。
         if (intent == null) {
@@ -395,6 +404,7 @@ public class OverlayService extends Service implements View.OnTouchListener {
             startForeground(OverlayConstants.NOTIFICATION_ID, notification);
         } catch (Throwable t) {
             Log.e("OverLay", "startForeground failed; stopping service instead of crashing", t);
+            startForegroundFailed = true;
             isRunning = false;
             stopSelf();
             return;

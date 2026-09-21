@@ -66,7 +66,7 @@ class LicenseService {
     // 【自愈重试】旧实现一旦首轮 getInstance 瞬态失败（厂商杀存储/IO 抖动）就把
     // _prefs=null 锁死整个生命周期，之后本地判定永远 notActivated，已激活的
     // 正常用户会被误踢。现在只要存储仍缺失就每次重试，拿到才视为就绪。
-    if (_ready && _prefs != null) return;
+    if (_ready && _prefs != null && (_deviceId?.isNotEmpty ?? false)) return;
     // 存储不可用属极端环境异常：吞掉并置 _prefs=null（上层退化为"未激活"），
     // 绝不让授权检查本身把 App 首屏带崩。
     try {
@@ -75,9 +75,12 @@ class LicenseService {
       _prefs = null;
     }
     try {
-      _deviceId = (await _ch.invokeMethod<String>('getDeviceId')) ?? '';
+      final id = await _ch.invokeMethod<String>('getDeviceId');
+      // 【自愈重试副作用防护】init 现在可重入：只接受非空新值，一次瞬时通道失败
+      // 绝不能抹掉已取到的指纹——否则主引擎永久跳过服务器心跳，拉黑不可检。
+      if (id != null && id.isNotEmpty) _deviceId = id;
     } catch (_) {
-      _deviceId = '';
+      // 保留上次成功的 deviceId，勿清空。
     }
     _ready = true;
   }
@@ -275,6 +278,8 @@ class LicenseService {
   }
 
   /// 强制下线时清理本地凭证（调试/换卡用）。
+  /// 注：LicenseGate 对“已放行会话 + notActivated”的瞬态抖动豁免意味着清券后
+  /// 不会自动退回激活页；若重新接出此调试入口，需由调用方显式驱动闸门强制复位。
   void logout() {
     _clearToken();
   }

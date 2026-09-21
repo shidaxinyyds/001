@@ -31,6 +31,9 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
   bool _busy = false;
   Timer? _timer;
   Timer? _expiryTimer;
+  // 心跳在飞标志：防 resume/轮询/到期复核多路触发叠乘，也封死任何
+  // “守卫→排程→再心跳”的自递归风暴。
+  bool _refreshInFlight = false;
 
   @override
   void initState() {
@@ -59,6 +62,16 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
   }
 
   Future<void> _refresh() async {
+    if (_refreshInFlight) return; // 已有心跳在飞：不叠乘、不递归
+    _refreshInFlight = true;
+    try {
+      await _doRefresh();
+    } finally {
+      _refreshInFlight = false;
+    }
+  }
+
+  Future<void> _doRefresh() async {
     LicenseState st;
     try {
       st = await LicenseService.instance.heartbeat();
@@ -76,8 +89,12 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
     // 【踢人铁律】只有真到期（licenseExpired，签名 expires_at 到达/服务器确认）
     // 或服务端明确拒绝（refused，含 revoked/换设备/篡改）才允许退回激活页。
     // 已放行会话撞上 notActivated（本地存储瞬时读空、设备指纹未就绪、
-    // 心跳竞态等）一律视为瞬态抖动：保持功能页继续运行，绝不误踢。
-    if (st.status == LicenseStatus.notActivated && (_state?.allowsUsage ?? false)) {
+    // 心跳竞态等）视为瞬态抖动：保持功能页继续运行，绝不误踢。
+    // 但豁免仅限“保留会话自身仍在有效期内”：存档 expiresAt 已过则不得再
+    // 借抖动静默续命，杜绝授权旁路。
+    if (st.status == LicenseStatus.notActivated &&
+        (_state?.allowsUsage ?? false) &&
+        _retainedSessionStillValid(_state!)) {
       _scheduleExpiryCheck(_state!);
       return;
     }
@@ -97,6 +114,15 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
     _scheduleExpiryCheck(st);
   }
 
+  /// 被保留的会话是否仍在自身有效期内（以服务器锚定时间为准）。
+  bool _retainedSessionStillValid(LicenseState st) {
+    final exp = st.expiresAt;
+    if (exp == null) return false;
+    final serverNow = DateTime.fromMillisecondsSinceEpoch(
+        LicenseService.instance.serverNowSec * 1000);
+    return exp.isAfter(serverNow);
+  }
+
   /// 若总到期在轮询间隔内（如 10 分钟短卡），排一个到期精确 one-shot，
   /// 到期即时复核；否则交给 30 分钟轮询，不占用长时效定时器。
   void _scheduleExpiryCheck(LicenseState st) {
@@ -107,7 +133,9 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
         LicenseService.instance.serverNowSec * 1000);
     final remainMs = exp.difference(serverNow).inMilliseconds;
     if (remainMs <= 0) {
-      _refresh();
+      // 到期已过：用有界 Timer 5s 后复核，绝不直调 _refresh——旧直调与
+      // “保留会话”守卫路径会构成无界自递归（心跳风暴/界面冻结）。
+      _expiryTimer = Timer(const Duration(seconds: 5), _refresh);
       return;
     }
     if (remainMs > _pollInterval.inMilliseconds) return; // 长时效卡交给轮询
