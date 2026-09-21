@@ -561,10 +561,18 @@ public class OverlayService extends Service implements View.OnTouchListener {
     private class TrayAnimationTimerTask extends TimerTask {
         int mDestX;
         int mDestY;
+        boolean cancelled = false;
         WindowManager.LayoutParams params = (WindowManager.LayoutParams) flutterView.getLayoutParams();
 
         public TrayAnimationTimerTask() {
             super();
+            // 【安全补丁 v3】构造期视图可能已销毁：getLayoutParams() 返回 null 时后续
+            // 字段访问即 NPE（在 onTouch 里冒到主线程崩整个 App），此处早退并标记取消。
+            if (flutterView == null || flutterView.getLayoutParams() == null) {
+                cancelled = true;
+                cancel();
+                return;
+            }
             mDestY = lastYPosition;
             switch (WindowSetup.positionGravity) {
                 case "auto":
@@ -585,15 +593,32 @@ public class OverlayService extends Service implements View.OnTouchListener {
 
         @Override
         public void run() {
+            if (cancelled) {
+                return;
+            }
             mAnimationHandler.post(() -> {
-                params.x = (2 * (params.x - mDestX)) / 3 + mDestX;
-                params.y = (2 * (params.y - mDestY)) / 3 + mDestY;
-                if (windowManager != null) {
-                    windowManager.updateViewLayout(flutterView, params);
-                }
-                if (Math.abs(params.x - mDestX) < 2 && Math.abs(params.y - mDestY) < 2) {
-                    TrayAnimationTimerTask.this.cancel();
-                    mTrayAnimationTimer.cancel();
+                // 【安全补丁 v3】吸附动画跑在独立 Timer 线程上，窗口此刻可能已被
+                // 销毁/移除：整体兜底，任何一步抛错就停掉定时器，绝不冒到主线程崩溃。
+                try {
+                    params.x = (2 * (params.x - mDestX)) / 3 + mDestX;
+                    params.y = (2 * (params.y - mDestY)) / 3 + mDestY;
+                    if (windowManager != null && flutterView != null) {
+                        windowManager.updateViewLayout(flutterView, params);
+                    }
+                    if (Math.abs(params.x - mDestX) < 2 && Math.abs(params.y - mDestY) < 2) {
+                        TrayAnimationTimerTask.this.cancel();
+                        mTrayAnimationTimer.cancel();
+                    }
+                } catch (Throwable t) {
+                    Log.e("OverLay", "tray animation failed; cancelling timer", t);
+                    try {
+                        TrayAnimationTimerTask.this.cancel();
+                    } catch (Exception ignore) {
+                    }
+                    try {
+                        if (mTrayAnimationTimer != null) mTrayAnimationTimer.cancel();
+                    } catch (Exception ignore) {
+                    }
                 }
             });
         }
