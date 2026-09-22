@@ -440,16 +440,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         .toList();
 
     return SafeArea(
-      child: Column(
-        children: [
-          // 可滚动主体：玩法列表/状态卡随内容滚动。
-          Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: AppTokens.s20, vertical: AppTokens.s16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(
+            horizontal: AppTokens.s20, vertical: AppTokens.s16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
             // 分类切换栏
             _buildCategorySelector(),
             const SizedBox(height: AppTokens.s12),
@@ -487,17 +483,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
             // 状态 / 提示卡片
             _buildStatusCard(),
+
+            const SizedBox(height: 14),
+
+            // 设备信息卡片：作为页面内容的一部分随页面滚动（不固定悬浮在页面上层）。
+            const DeviceInfoCard(),
           ],
-            ),
-            ),
-          ),
-          // 设备信息卡片：固定在主页底部，不随上方内容滚动消失。
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-                AppTokens.s20, 0, AppTokens.s20, AppTokens.s16),
-            child: const DeviceInfoCard(),
-          ),
-        ],
+        ),
       ),
     );
   }

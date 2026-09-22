@@ -3021,11 +3021,16 @@ class Engine:
                         dq_p = True
                     # 3. 选一张牌阶段（屏幕中央大牌确认 或 候选横排）
                     elif hasattr(detector, "is_pick_phase") and detector.is_pick_phase(full_for_preview):
-                        pick_p = True
                         try:
                             cands = detector.detect_pick_candidates(full_for_preview)
                         except Exception:
                             cands = []
+                        # 【选牌阶段不变量】只有「真正能读出候选牌」时才成立。若
+                        # is_pick_phase 命中但候选读不出（<2 张），说明是弹窗色盘/
+                        # 大厅卡片等误触发（悬浮窗只会显示「等待选牌弹窗识别…」的空
+                        # 面板，属明确的误报），绝不进入选牌阶段，退回其它阶段/正常判定。
+                        # 真选牌弹窗候选充足（通常 9 张），不受此门影响。
+                        pick_p = len(cands) >= 2
                     raw_swap = swap_p
                     # ===== 换牌阶段时间迟滞（纯状态机逻辑，不改任何像素阈值）=====
                     # 换三张是持续 ~10s 的连续交互，金换牌钮 + 青过钮全程在场；单帧因
