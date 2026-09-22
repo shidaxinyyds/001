@@ -363,6 +363,7 @@ class TencentGridDetector(Detector):
         red_mask = (((hsv[:, :, 0] <= 10) | (hsv[:, :, 0] >= 170)) & (hsv[:, :, 1] >= 100) & (hsv[:, :, 2] >= 100)).astype(np.uint8) * 255
         green_mask = ((hsv[:, :, 0] >= 35) & (hsv[:, :, 0] <= 85) & (hsv[:, :, 1] >= 80) & (hsv[:, :, 2] >= 80)).astype(np.uint8) * 255
         orange_mask = ((hsv[:, :, 0] >= 8) & (hsv[:, :, 0] <= 32) & (hsv[:, :, 1] >= 75) & (hsv[:, :, 2] >= 90)).astype(np.uint8) * 255
+        blue_mask = ((hsv[:, :, 0] >= 95) & (hsv[:, :, 0] <= 130) & (hsv[:, :, 1] >= 100) & (hsv[:, :, 2] >= 100)).astype(np.uint8) * 255
 
         def get_main_center(mask):
             cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -388,6 +389,7 @@ class TencentGridDetector(Detector):
         rc = get_main_center(red_mask)
         gc = get_main_center(green_mask)
         oc = get_main_center(orange_mask)
+        bc = get_main_center(blue_mask)
 
         # 1. 三个按钮全在：万(红) -> 条(绿) -> 筒(黄/橙)
         if rc and gc and oc:
@@ -409,6 +411,26 @@ class TencentGridDetector(Detector):
             rcx, rcy = rc
             gcx, gcy = gc
             if rcx < gcx and abs(rcy - gcy) <= 25 and (gcx - rcx) < sub.shape[1] * 0.40:
+                return True
+
+        # 4. 蜀山四川麻将等变体：筒盘为蓝色（腾讯为橙色），且条盘绿色常被顶部
+        #    装饰/头像角标干扰而漏检（实测蜀山定缺帧绿色抓到顶部装饰块）。改以
+        #    「万(红) 与 筒(橙或蓝) 两外盘水平对齐成行」为铁证：两盘同处色盘行
+        #    （纵向差<=40）、横向间距占据色盘跨度的合理区间(0.28~0.55 区宽)，
+        #    杜绝把相邻小色块误当定缺盘。仅新增判据，不改动上述 1~3 原腾讯判据。
+        tc = None
+        for cand in (oc, bc):
+            if cand and (tc is None or cand[0] > tc[0]):
+                tc = cand
+        if rc and tc:
+            rcx, rcy = rc
+            tcx, tcy = tc
+            dx = tcx - rcx
+            sh = sub.shape[0]
+            # 两盘必须落在色盘纵向带（sub 下部 30%~95%）：定缺色盘行居中偏下，
+            # 而顶部 y<30% 的红/蓝块多为头像角标/装饰，排除之（防局中帧误判）。
+            in_band = (sh * 0.30 <= rcy <= sh * 0.95) and (sh * 0.30 <= tcy <= sh * 0.95)
+            if in_band and rcx < tcx and abs(rcy - tcy) <= 40 and sub.shape[1] * 0.28 <= dx <= sub.shape[1] * 0.55:
                 return True
 
         return False
