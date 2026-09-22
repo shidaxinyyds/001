@@ -910,6 +910,17 @@ RIVER_CONF = {
 # 才判定此前计数为误检虚高并回退（单帧抖动绝不触发）。
 RIVER_REGRET_FRAMES = 5
 
+# ===== 牌河/副露全图检测的区域差分门控（响应提速的关键修复）=====
+# 实测：detect_river_discards + detect_player_melds 单帧合计 600ms~1s（桌面），
+# 手机上 1.5~4s；而它们只是给「记牌器/剩余活牌」供数，牌河只在有人出牌时才变（几秒一次）。
+# 旧实现却在每个非跳帧的 ok 帧都无条件重跑这两坨全图扫描，把关键路径（牌面+建议）
+# 一起拖到秒级——加上 Java 的 busy 互斥锁在处理期间丢弃新截图，表现就是「牌局早变了、
+# 弹窗还显示刚才的牌面和建议」。定缺徽章/对手徽章/阶段探测都已按帧节流，唯独这两个
+# 最重的全图扫描漏了节流。修复：只对「牌桌中央牌河区」算一个廉价分块签名（~1ms），
+# 区内容未变就整块跳过昂贵检测、复用跨帧持久的累计账本（跳过绝不清空记牌器）。
+RIVER_SCAN_DIFF_THRESH = 8.0   # 牌河区块均值 L1 距离低于此值视为未变（静止≈0~3，一张弃牌≈30+）
+RIVER_SCAN_MAX_INTERVAL = 10   # 即便签名判未变，最多攒这么多帧也强制重扫一次（兜底防漏检漂移）
+
 
 def _tile_content_key(tile_crop: np.ndarray):
     """切片内容指纹（8x8 缩略 hash）：牌河未变时同一切片命中缓存 → 零分类。"""
@@ -1231,6 +1242,11 @@ class Engine:
         self._river_absent_streak: Dict[str, int] = {}
         # 四区牌河归属计数（"谁打的"展示；AI 仍按全局账本消费）
         self._river_zone_counts: Dict[str, int] = {"bottom": 0, "top": 0, "left": 0, "right": 0}
+        # 牌河/副露区域差分门控状态（见 RIVER_SCAN_DIFF_THRESH 注释）：
+        # _river_scan_sig = 上次真正跑牌河检测时的牌河区签名；_river_scan_wait = 距上次
+        # 检测攒下的帧数。None / 大值 → 下一帧强制检测（开局/新局/牌桌切换后先扫一次）。
+        self._river_scan_sig: Optional[np.ndarray] = None
+        self._river_scan_wait: int = RIVER_SCAN_MAX_INTERVAL
         # 副露独立账本（34 型）：碰/杠是全场可见信，但不入牌河，避免污染弃牌计数；
         # 与牌河一样经两帧确认后才递增（碰→杠 3→4 单调递增，同局不回退）。
         self._meld_counts_34: List[int] = [0] * 34
@@ -1442,6 +1458,51 @@ class Engine:
 
         return False
 
+    def _should_scan_river(self, image: np.ndarray) -> bool:
+        """牌河/副露全图检测的区域差分门控。返回 True 才跑昂贵的
+        detect_river_discards/detect_player_melds；返回 False 表示牌河区木然未变，
+        本帧跳过（累计账本跨帧持久，跳过不会清空记牌器）。
+
+        只对牌河纵向带（RIVER_CONF['row_yc']）算分块签名，并把中央骰子/倒计时盒
+        （RIVER_CONF['center_x']/['center_y']）抹平——否则倒计时数字每秒变一次会误
+        触发“牌河变了”而白白每帧重跑。签名与上次真正扫描时比较，变化超阈值或
+        攒满强制间隔才重扫，重扫后刷新签名基准。
+        """
+        ih, iw = image.shape[:2]
+        yc_lo, yc_hi = RIVER_CONF["row_yc"]
+        y0 = max(0, int(ih * yc_lo))
+        y1 = min(ih, int(ih * yc_hi))
+        band = image[y0:y1, :]
+        if band.size == 0 or band.shape[0] < 20:
+            return True  # 取不到牌河带 → 保守跑完整检测
+        # 抹掉中央骰子/倒计时盒（固定中性值），使签名只对“牌河是否多/少一张牌”敏感。
+        band = band.copy()
+        cx_lo, cx_hi = RIVER_CONF["center_x"]
+        cy_lo, cy_hi = RIVER_CONF["center_y"]
+        by0 = max(0, int((cy_lo - yc_lo) / max(1e-6, (yc_hi - yc_lo)) * band.shape[0]))
+        by1 = min(band.shape[0], int((cy_hi - yc_lo) / max(1e-6, (yc_hi - yc_lo)) * band.shape[0]))
+        bx0, bx1 = int(iw * cx_lo), int(iw * cx_hi)
+        if by1 > by0 and bx1 > bx0:
+            band[by0:by1, bx0:bx1] = 0
+        g = cv2.cvtColor(band, cv2.COLOR_BGR2GRAY) if band.ndim == 3 else band
+        # 降采样到固定尺度：保证跨帧签名维度一致，且把开销压到 ~1ms。
+        gh, gw = g.shape[:2]
+        longest = float(max(gh, gw))
+        if longest > 600:
+            inv = 600.0 / longest
+            g = cv2.resize(g, (max(1, int(gw * inv)), max(1, int(gh * inv))),
+                           interpolation=cv2.INTER_AREA)
+        cur = _block_diff_signature(g)
+        self._river_scan_wait += 1
+        if (self._river_scan_sig is not None
+                and self._river_scan_sig.shape == cur.shape
+                and float(np.abs(cur - self._river_scan_sig).sum()) < RIVER_SCAN_DIFF_THRESH
+                and self._river_scan_wait < RIVER_SCAN_MAX_INTERVAL):
+            return False
+        self._river_scan_sig = cur
+        self._river_scan_wait = 0
+        return True
+
     def _update_visual_ledger(self, discard_labels) -> None:
         """牌河视觉累计账本：两帧确认递增 + 多帧一致最小值回退，再与手牌差分推断
         账本逐张 max 合并到单调牌池（同局只增不减，但单帧误检虚高可经连续回退）。
@@ -1486,6 +1547,9 @@ class Engine:
         self._inferred_discards.clear()
         self._river_absent_streak.clear()
         self._river_zone_counts = {"bottom": 0, "top": 0, "left": 0, "right": 0}
+        # 清池后牌河基准失效：重置区域门控，下一帧强制重扫一次。
+        self._river_scan_sig = None
+        self._river_scan_wait = RIVER_SCAN_MAX_INTERVAL
 
     def _reset_game_state(self):
         """重置整局游戏的动态状态（新开局/返回大厅/结算时调用）。"""
@@ -1500,6 +1564,9 @@ class Engine:
         self._tile_voter.reset()
         self._hand_stab.reset()
         self._frame_skipper = _FrameSkipper()
+        # 新局/回大厅：牌河区域基准失效，重置门控使下一帧强制重扫。
+        self._river_scan_sig = None
+        self._river_scan_wait = RIVER_SCAN_MAX_INTERVAL
         self._stable_hand_mpsz = ""
         self._stable_hand_count = 0
         self._match_started = False
@@ -3095,7 +3162,12 @@ class Engine:
                 and (not is_dingque_mode(self.mode) or getattr(self, "_match_started", False) or dingque_suit is not None)
             )
 
-            if allow_river_scan:
+            # 牌河/副露检测区域差分门控：牌河区木然未变（只有自己摸打、中央牌河没新增）
+            # 时跳过昂贵的全图 detect_*，把关键路径（牌面+建议）单帧耗时从 ~600ms-1s 压回
+            # ~80-100ms；累计账本跨帧持久，跳过不清空记牌器。攒满强制间隔或牌河真变化才重扫。
+            run_river_scan = allow_river_scan and self._should_scan_river(image)
+
+            if run_river_scan:
                 yc_lo, yc_hi = RIVER_CONF["row_yc"]
                 for _i, row in enumerate(voted_rows):
                     if _i == hand_idx:
@@ -3202,7 +3274,9 @@ class Engine:
 
             # 牌池双账本（视觉累计）：同局内只增不减 + 两帧确认 + 多帧一致回退；
             # 与手牌差分推断分账，最后逐张 max 合并到单调牌池。
-            if allow_river_scan:
+            # 必须用 run_river_scan（真正跑了检测的帧）才更新：牌河未变而跳过时
+            # discard_labels 为空，若仍喂给账本会被当成“牌河消失”误回退，故跳过帧绝不喂。
+            if run_river_scan:
                 self._update_visual_ledger(discard_labels)
 
 
@@ -3488,7 +3562,10 @@ class Engine:
             history_lens = [len(s) // 2 for s in self._discard_history]
             disc_mpsz_out = disc_mpsz
             disc_counts_out = disc_counts
-            discarded_labels_out = discard_labels
+            # discard_count 必须与 discards 串同源（持久账本 _monotonic_discards）：
+            # 牌河门控跳过的帧 discard_labels 为空，若直接用它会让 discard_count=0 而
+            # discards 仍有牌，两字段自相矛盾。改由 disc_mpsz 反算，跨跳过帧稳定一致。
+            discarded_labels_out = [lab for lab in _mpsz_to_counter(disc_mpsz).elements()]
             if (len(history_lens) >= DISCARD_HISTORY_MIN_SAMPLES
                     and history_lens and current_disc_len > 0):
                 max_hist = max(history_lens)
