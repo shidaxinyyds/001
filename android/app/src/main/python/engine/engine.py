@@ -1891,6 +1891,12 @@ class Engine:
         calculate_ukeire_ex 全部返回 0 ukeire，无意义）—— 直接复用上次稳定 advice
         (self._advice)。这样 UI 不会因 1~2 帧识别不全而闪空，advice_n 始终 > 0。
         """
+        if self.trainer is None or getattr(self.trainer, "mode", None) != self.mode:
+            try:
+                from trainer.trainer import Trainer
+                self.trainer = Trainer(hand, mode=self.mode)
+            except Exception:
+                pass
         if self.trainer is None:
             return None, []
 
@@ -2958,16 +2964,9 @@ class Engine:
                 filtered.append(fr)
 
             if is_grid_det:
-                # 恢复 grid 主路径的多帧投票：网格切片位置确定、跨帧稳定，把本行投入
-                # _tile_voter 做时间加权多数表决以修正单帧错认。张数切换（13↔ 14）时，
-                # vote() 的"新位置无历史匹配→直接透传"逻辑保证不产生幽灵牌/整帧空白，
-                # 故无旧版空间错位聚合的延迟/幽灵问题（单帧时 vote 亦为透传）。
+                # TencentGridDetector 网格高精度切片直通，0 延迟透传，绝不经过历史帧投票器，
+                # 确保摸打、吃碰杠、出牌毫秒级实时感知与上屏
                 hand_row = filtered[0] if filtered else []
-                try:
-                    self._tile_voter.push(hand_row)
-                    hand_row = self._tile_voter.vote()
-                except Exception:
-                    traceback.print_exc()
                 voted_rows = [hand_row]
                 hand_idx = 0 if hand_row else None
             else:
@@ -3003,6 +3002,12 @@ class Engine:
             if is_grid_det:
                 valid_sizes_now = hsizes
                 if len(raw_labels) in valid_sizes_now:
+                    hand_mpsz = "".join(raw_labels)
+                    self._hand_stab.stable_mpsz = hand_mpsz
+                    self._hand_stab._stable_key = _counter_to_mpsz(Counter(raw_labels))
+                    self._hand_stab.pending = False
+                elif len(raw_labels) >= 1:
+                    # 摸打过渡帧或偶发张数，直接采信当前切片，绝不回退至旧手牌死锁
                     hand_mpsz = "".join(raw_labels)
                     self._hand_stab.stable_mpsz = hand_mpsz
                     self._hand_stab._stable_key = _counter_to_mpsz(Counter(raw_labels))
@@ -3075,9 +3080,12 @@ class Engine:
             if is_dingque_mode(self.mode):
                 self._phase_scan_tick += 1
                 ran_detector = (self._phase_scan_tick % 2 == 1)
+                swap_p, dq_p, pick_p = self._phase_cache
+                cands: List[str] = list(self._pick_cand_cache)
+                raw_swap = getattr(self, "_swap_raw", False)
                 if ran_detector:
                     swap_p = dq_p = pick_p = False
-                    cands: List[str] = []
+                    cands = []
                     # 1. 优先检测换三张阶段（右侧金色换牌大圆按钮 / 过按钮）
                     if hasattr(detector, "is_swap_phase") and detector.is_swap_phase(full_for_preview):
                         swap_p = True
@@ -3117,15 +3125,31 @@ class Engine:
                     self._swap_raw = raw_swap
                 is_swap_phase, is_dq_phase, is_pick_phase = self._phase_cache
                 pick_candidates = list(self._pick_cand_cache)
+
                 # 连续确认只在「真正跑了探测器」的帧计数，且以「本帧真实检测」(raw_swap) 为准：
                 # 迟滞保持出来的 swap 不参与清池计数，避免把上一帧漏检也当成换牌确检反复清池。
-                if ran_detector and (getattr(self, "_swap_raw", False) or is_dq_phase):
+                if ran_detector and (getattr(self, "_swap_raw", False) or dq_p):
                     self._phase_confirm_frames += 1
-                    if self._phase_confirm_frames >= 2:
+                    if self._phase_confirm_frames >= 2 or (dq_p and curr_raw_n >= 13):
                         self._reset_game_state()
                         self._match_started = True
+                        if dq_p:
+                            is_dq_phase = True
                 elif ran_detector:
                     self._phase_confirm_frames = 0
+
+                # 摸打物理排他铁律：
+                # 1. 立牌张数 < 13 张（例如碰/杠后的 11、10、7、4 张），物理上 100% 处于摸打阶段，绝不可能处于换牌或定缺阶段。
+                # 2. 已有弃牌或副露时，若无实证定缺盘（not dq_p），绝不允许换三张迟滞或幽灵定缺跨阶段泄露与永久粘连。
+                total_discards = sum(self._monotonic_discards.values()) + sum(self._inferred_discards.values())
+                total_melds = sum(self._meld_counts_34)
+                if (0 < curr_raw_n < 13) or ((total_discards > 0 or total_melds > 0) and not dq_p):
+                    is_swap_phase = False
+                    self._swap_hold_frames = 0
+                    self._swap_raw = False
+                    if not dq_p:
+                        is_dq_phase = False
+                    self._phase_cache = (is_swap_phase, is_dq_phase, is_pick_phase)
 
             # 定缺状态判定：
             # 若正处于定缺选门交互中（中央出现三色大圆盘），此时玩家正在选门，尚未敲定，保持 None；
@@ -3954,8 +3978,8 @@ class Engine:
                     "hand" if _i == hand_idx else "discard",
                 ])
 
-            # 严格门控：当对局未开始或彻底无牌时，强制清空手牌与出牌建议，严防幽灵手牌与残存信息泄漏
-            if status in ("waiting", "no_tiles") or not getattr(self, "_match_started", False):
+            # 严格门控：仅在确无手牌且处于非对局等待时清空，绝不误杀真实手牌与定缺/换牌阶段合法手牌
+            if status in ("waiting", "no_tiles") and (not hand_mpsz or tile_count == 0):
                 hand_mpsz = ""
                 tile_count = 0
                 advice = []

@@ -1261,8 +1261,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final shanten = result?['shanten'];
     final int count = ((result?['count'] as num?)?.toInt() ?? 0);
     final String status = (result?['status'] as String?) ?? '';
+    final String discards = (result?['discards'] as String?) ?? '';
     final bool isDingquePhase = (result?['dingque_phase'] == true || status == 'dingque');
-    final bool isSwapPhase = (result?['swap_phase'] == true || status == 'swap');
+    final bool isSwapPhase = (result?['swap_phase'] == true || status == 'swap') && (count >= 13) && discards.isEmpty;
     final bool isPickPhase = (result?['pick_phase'] == true || status == 'pick');
     final bool inMatch = status != 'waiting' && status != 'no_tiles' && count >= 4;
     final adviceList = ((inMatch || isDingquePhase || isPickPhase) && _shownAdvice.isNotEmpty)
@@ -2199,8 +2200,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
   Widget _adviceSection(List<dynamic> advice, String best, int count) {
     final status = result?['status'] as String? ?? '';
+    final String discards = (result?['discards'] as String?) ?? '';
     final bool isDingquePhase = (result?['dingque_phase'] == true || status == 'dingque');
-    final bool isSwapPhase = (result?['swap_phase'] == true || status == 'swap');
+    final bool isSwapPhase = (result?['swap_phase'] == true || status == 'swap') && (count >= 13) && discards.isEmpty;
     final bool isPickPhase = (result?['pick_phase'] == true || status == 'pick');
     final bool inMatch = status != 'waiting' && status != 'no_tiles' && count >= 4;
     final List<dynamic> activeAdvice = (inMatch || isDingquePhase || isSwapPhase || isPickPhase) ? advice : const [];
@@ -2644,8 +2646,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       final List<dynamic> advice = _shownAdvice;
       final String best = _shownBest;
       final String status = (result?['status'] as String?) ?? '';
+      final String discards = (result?['discards'] as String?) ?? '';
       final bool isDingquePhase = (result?['dingque_phase'] == true || status == 'dingque');
-      final bool isSwapPhase = (result?['swap_phase'] == true || status == 'swap');
+      final bool isSwapPhase = (result?['swap_phase'] == true || status == 'swap') && (count >= 13) && discards.isEmpty;
       final bool isPickPhase = (result?['pick_phase'] == true || status == 'pick');
       // inMatch：对局已进行中（有手牌且不是等待状态），不再要求 remaining_matrix（swap/pick阶段无牌河）
       final bool inMatch = status != 'waiting' &&
