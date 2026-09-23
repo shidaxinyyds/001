@@ -531,18 +531,33 @@ public class MainActivity extends FlutterActivity {
     if (mode == null || mode.trim().isEmpty()) return -1;
     String m = mode.trim().toLowerCase();
     if (!Pattern.matches("[a-z0-9_]+", m)) return -2;
+    int rc = -3;
     try {
-      File dir = getApplicationContext().getExternalFilesDir(null);
-      if (dir == null) return -3;
-      if (!dir.exists()) dir.mkdirs();
-      File f = new File(dir, "mahjong_mode.json");
-      try (FileOutputStream out = new FileOutputStream(f, false)) {
-        byte[] body = ("{\"mode\":\"" + m + "\"}").getBytes("UTF-8");
-        out.write(body);
-        out.flush();
+      byte[] body = ("{\"mode\":\"" + m + "\"}").getBytes("UTF-8");
+      // 1. 外部私有目录
+      File extDir = getApplicationContext().getExternalFilesDir(null);
+      if (extDir != null) {
+        if (!extDir.exists()) extDir.mkdirs();
+        File f = new File(extDir, "mahjong_mode.json");
+        try (FileOutputStream out = new FileOutputStream(f, false)) {
+          out.write(body);
+          out.flush();
+        }
+        TimedLog.i(TAG, "writeModeFile ext: " + m + " -> " + f.getAbsolutePath());
+        rc = 0;
       }
-      TimedLog.i(TAG, "writeModeFile: " + m + " -> " + f.getAbsolutePath());
-      return 0;
+      // 2. 内部私有目录（双保险）
+      File intDir = getApplicationContext().getFilesDir();
+      if (intDir != null) {
+        if (!intDir.exists()) intDir.mkdirs();
+        File f2 = new File(intDir, "mahjong_mode.json");
+        try (FileOutputStream out = new FileOutputStream(f2, false)) {
+          out.write(body);
+          out.flush();
+        }
+        rc = 0;
+      }
+      return rc;
     } catch (Throwable t) {
       TimedLog.e(TAG, "writeModeFile failed: " + t);
       return -4;

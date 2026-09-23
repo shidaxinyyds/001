@@ -93,6 +93,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (event is Map && event['type'] == 'reset_match') {
         channel.invokeMethod<dynamic>('resetMatch');
       }
+      // 悬浮窗「切换玩法」：把玩法经主引擎 MethodChannel 转给 Java/引擎，并同步更新主页状态
+      if (event is Map && event['type'] == 'set_mode') {
+        final mode = event['mode'] as String?;
+        if (mode != null && mode.isNotEmpty) {
+          GameMode.set(mode).then((ok) {
+            if (ok && mounted) {
+              setState(() {
+                selectedMode = mode;
+              });
+            }
+          });
+        }
+      }
     });
   }
 

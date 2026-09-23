@@ -485,7 +485,7 @@ class TencentGridDetector(Detector):
 
     def is_pick_phase(self, image_bgr: np.ndarray) -> bool:
         """检测腾讯欢乐麻将「请任选一张牌」弹窗或选牌确定界面。"""
-        if image_bgr is None or image_bgr.size == 0:
+        if image_bgr is None or image_bgr.size == 0 or not self.is_available:
             return False
         ih, iw = image_bgr.shape[:2]
 
@@ -501,26 +501,29 @@ class TencentGridDetector(Detector):
                 gold = (hsv_txt[:, :, 0] >= 14) & (hsv_txt[:, :, 0] <= 36) & (hsv_txt[:, :, 1] >= 100) & (hsv_txt[:, :, 2] >= 130)
                 gold_ratio = float(np.mean(gold))
                 if white_ratio >= 0.15 and gold_ratio >= 0.028:
-                    return True
+                    # 必须确认为真实麻将牌，排除遮阳伞/冰淇淋等卡通背景误报
+                    lbl, sc = self.classify_tile(tile_crop)
+                    if sc >= 0.50:
+                        return True
 
         # 形式2：任选牌弹窗（深色圆角弹窗背景 + 内嵌白色候选牌横排）。
-        # 【一致性修复】本窗口必须与真正读取候选牌的 detect_pick_candidates 使用同一
-        # 区域：后者取 y:60%~77%（弹窗主体牌行），故弹窗实际位于 y≈60%~77%。旧实现
-        # 这里却扫 y:50%~65%，与弹窗真实位置错位：① 真选牌弹窗因大部分牌落在 65% 以下
-        # 而系统性漏检（弹窗出现却仍显示正常出牌建议）；② y:50%~65% 恰好扫到换牌屏中央
-        # 骰子/计时面板的深色块，把「换牌中」误判成选牌。现对齐到 y:56%~78%（含弹窗标题
-        # 条与候选牌行），使「检测到弹窗」与「能读出弹窗里的牌」两个判据同源一致。
-        # 深色圆角弹窗面板是选牌弹窗专属特征：正常摸打时该带为牌河/桌布/手牌，无整片
-        # 深色面板（dark_bg 达不到 0.15），不会误触发。
+        # 严格门控：仅在尚未建立稳定摸打手牌、且真正读出选牌候选时成立
         row = image_bgr[int(ih * 0.56):int(ih * 0.78), int(iw * 0.15):int(iw * 0.92)]
         if row.size > 0:
             hsv = cv2.cvtColor(row, cv2.COLOR_BGR2HSV)
-            # 弹窗深色背景（V<80, S<60）
             dark_bg = float(np.mean((hsv[:, :, 2] < 80) & (hsv[:, :, 1] < 60)))
-            # 弹窗内白色牌面（V>180, S<50）
             white_tiles = float(np.mean((hsv[:, :, 2] > 180) & (hsv[:, :, 1] < 50)))
-            if dark_bg >= 0.15 and white_tiles >= 0.05:
-                return True
+            if dark_bg >= 0.18 and white_tiles >= 0.08:
+                # 排除带有吃碰杠胡动作按钮的局中提示
+                btn_zone = image_bgr[int(ih * 0.50):int(ih * 0.65), int(iw * 0.35):int(iw * 0.75)]
+                hsv_b = cv2.cvtColor(btn_zone, cv2.COLOR_BGR2HSV)
+                blue_action = np.sum((hsv_b[:, :, 0] >= 95) & (hsv_b[:, :, 0] <= 125) & (hsv_b[:, :, 1] >= 100) & (hsv_b[:, :, 2] >= 100))
+                if blue_action > 50:
+                    return False
+                # 检查候选牌：必须实际提取出至少 3 张不同候选牌
+                cands = self.detect_pick_candidates(image_bgr)
+                if len(cands) >= 3:
+                    return True
 
         return False
 
@@ -623,6 +626,28 @@ class TencentGridDetector(Detector):
             return []
 
         boxes.sort(key=lambda b: b[0])
+
+        # 水平手牌块合并：当主手牌区被阴影/弹窗边缘遮挡分割成多个相邻块时，
+        # 同一底边基线（底边 y 差 <= 22px）且后块宽度大于单张摸牌（> 1.4 * face_w）时合并
+        merged_boxes = []
+        for b in boxes:
+            if not merged_boxes:
+                merged_boxes.append(b)
+                continue
+            prev_b = merged_boxes[-1]
+            prev_bot = prev_b[1] + prev_b[3]
+            curr_bot = b[1] + b[3]
+            gap = b[0] - (prev_b[0] + prev_b[2])
+            std_w = b[3] / 1.35 if b[3] >= 30 else 50
+            if abs(prev_bot - curr_bot) <= 22 and 0 <= gap <= std_w * 2.5 and b[2] > std_w * 1.4:
+                new_x = prev_b[0]
+                new_y = min(prev_b[1], b[1])
+                new_w = (b[0] + b[2]) - new_x
+                new_h = max(prev_bot, curr_bot) - new_y
+                merged_boxes[-1] = (new_x, new_y, new_w, new_h)
+                continue
+            merged_boxes.append(b)
+        boxes = merged_boxes
 
         main_box = max(boxes, key=lambda b: b[2])
         bx, by, bw, bh = main_box

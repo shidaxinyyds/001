@@ -1610,7 +1610,14 @@ class Engine:
     def set_mode(self, key) -> None:
         """Java 侧显式推送当前玩法（内存优先级最高，不等磁盘轮询）。"""
         try:
-            _modes_set_mode_explicit(str(key) if key else "")
+            m = str(key).strip().lower() if key else ""
+            if m:
+                _modes_set_mode_explicit(m)
+                if m != getattr(self, "mode", None):
+                    self.mode = m
+                    self._prev_mode = m
+                    self._reset_game_state()
+                    print(f"[engine] set_mode 立即重置对局并切换生效: {m}")
         except Exception:
             pass
 
@@ -3025,18 +3032,9 @@ class Engine:
             # 防误杀：瞬态丢帧（如出牌飞行阴影、摸打遮挡等 1~5 帧）绝不误重置牌局与建议。
             if (self._match_started and self._prev_raw_n >= 4 and curr_raw_n == 0):
                 self._prev_raw_n_before_clear += 1
-                if (self._prev_raw_n_before_clear >= 12
+                if (self._prev_raw_n_before_clear >= 20
                         and sum(self._monotonic_discards.values()) > 0):
-                    self._clear_discard_ledgers()
-                    self._discard_history.clear()
-                    self._meld_counts_34 = [0] * 34
-                    self._pending_melds_34 = [0] * 34
-                    self._match_started = False
-                    self._last_stable_counter = Counter()
-                    self._last_stable_n = 0
-                    self._last_trusted_matrix = None
-                    self._advice_key = None
-                    self._advice = []
+                    self._reset_game_state()
                     self._prev_raw_n_before_clear = 0
                     self._prev_raw_n = -1  # 哨兵：复位比较基线，防新局首帧误判 0->n 跳变
             else:
@@ -3124,8 +3122,8 @@ class Engine:
                 if ran_detector and (getattr(self, "_swap_raw", False) or is_dq_phase):
                     self._phase_confirm_frames += 1
                     if self._phase_confirm_frames >= 2:
-                        self._clear_discard_ledgers()
-                        self._match_started = False
+                        self._reset_game_state()
+                        self._match_started = True
                 elif ran_detector:
                     self._phase_confirm_frames = 0
 
@@ -3955,6 +3953,19 @@ class Engine:
                     round(float(sum(cs)) / len(cs), 2) if cs else 0.0,
                     "hand" if _i == hand_idx else "discard",
                 ])
+
+            # 严格门控：当对局未开始或彻底无牌时，强制清空手牌与出牌建议，严防幽灵手牌与残存信息泄漏
+            if status in ("waiting", "no_tiles") or not getattr(self, "_match_started", False):
+                hand_mpsz = ""
+                tile_count = 0
+                advice = []
+                best = ""
+                swap_advice = None
+                fast_advice = None
+                big_advice = None
+                shanten = None
+                defense_radar = []
+                ting_details = []
 
             result = {
                 "mode": self.mode,

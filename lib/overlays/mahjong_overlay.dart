@@ -448,6 +448,19 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   static const double _kCapsuleH = 38;
   // 9x3 剩余牌矩阵面板折叠态：默认折叠，弹窗小巧简约不眼花
   bool _matrixExpanded = false;
+  // 悬浮窗内 10 种玩法切换菜单展开态
+  bool _showModeSelector = false;
+
+  void _selectMode(String key) {
+    final norm = GameMode.normalizeKey(key);
+    setState(() {
+      selectedMode = norm;
+      _showModeSelector = false;
+    });
+    FlutterOverlayWindow.shareData({'type': 'set_mode', 'mode': norm}).catchError((_) {});
+    _requestResetMatch();
+  }
+
   // 默认小巧面板：宽度 220dp，高度 210dp
   double panelW = 220;
   double panelH = 210;
@@ -738,7 +751,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     _pendingJson = null;
     setState(() {
       result = json;
-      if (json['status'] == 'waiting') {
+      final st = json['status'];
+      final c = (json['count'] as num?)?.toInt() ?? 0;
+      if (st == 'waiting' || st == 'no_tiles' || c == 0) {
         _shownAdvice = const [];
         _shownBest = '';
       } else {
@@ -1051,6 +1066,140 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildModeSelectorOverlay() {
+    return Positioned.fill(
+      child: Container(
+        decoration: BoxDecoration(
+          color: const Color(0xF812151B),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: const Color(0xFFFFD54F).withAlpha(140), width: 1.0),
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.tune_rounded, color: Color(0xFFFFD54F), size: 14),
+                const SizedBox(width: 5),
+                const Expanded(
+                  child: Text(
+                    '切换玩法 (10种规则)',
+                    style: TextStyle(
+                      color: Color(0xFFFFF9C4),
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.bold,
+                      decoration: TextDecoration.none,
+                    ),
+                  ),
+                ),
+                GestureDetector(
+                  onTap: () => setState(() => _showModeSelector = false),
+                  behavior: HitTestBehavior.opaque,
+                  child: Container(
+                    padding: const EdgeInsets.all(2),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withAlpha(20),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.close_rounded, color: Colors.white70, size: 13),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 5),
+            Expanded(
+              child: ListView.separated(
+                physics: const BouncingScrollPhysics(),
+                itemCount: GameMode.allModes.length,
+                separatorBuilder: (_, __) => const SizedBox(height: 3),
+                itemBuilder: (context, index) {
+                  final info = GameMode.allModes[index];
+                  final isCurrent = GameMode.normalizeKey(selectedMode) == info.key;
+                  return GestureDetector(
+                    onTap: () => _selectMode(info.key),
+                    behavior: HitTestBehavior.opaque,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4.5),
+                      decoration: BoxDecoration(
+                        color: isCurrent
+                            ? const Color(0xFFE65100).withAlpha(100)
+                            : Colors.white.withAlpha(12),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(
+                          color: isCurrent ? const Color(0xFFFFB74D) : Colors.white12,
+                          width: isCurrent ? 1.0 : 0.5,
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Flexible(
+                                      child: Text(
+                                        info.name,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: isCurrent ? const Color(0xFFFFD54F) : Colors.white,
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.bold,
+                                          decoration: TextDecoration.none,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 0.5),
+                                      decoration: BoxDecoration(
+                                        color: isCurrent
+                                            ? const Color(0xFFFFD54F).withAlpha(40)
+                                            : Colors.white.withAlpha(20),
+                                        borderRadius: BorderRadius.circular(2),
+                                      ),
+                                      child: Text(
+                                        info.status,
+                                        style: TextStyle(
+                                          color: isCurrent ? const Color(0xFFFFD54F) : Colors.white60,
+                                          fontSize: 7,
+                                          fontWeight: FontWeight.w600,
+                                          decoration: TextDecoration.none,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 1),
+                                Text(
+                                  info.brief,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: Colors.white.withAlpha(160),
+                                    fontSize: 8,
+                                    decoration: TextDecoration.none,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (isCurrent)
+                            const Icon(Icons.check_circle_rounded, color: Color(0xFFFFD54F), size: 14),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -1573,7 +1722,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // ---------- 内容区小部件 ----------
 
   Widget _handSection(String hand, int count) {
-    if (hand.isEmpty || count == 0) {
+    final status = result?['status'] as String? ?? '';
+    if (hand.isEmpty || count == 0 || status == 'waiting' || status == 'no_tiles') {
       return const SizedBox.shrink();
     }
     // 合法麻将立牌张数：1/2 (碰4次), 4/5 (碰3次), 7/8 (碰2次), 10/11 (碰1次), 13/14 (门清)
@@ -2228,7 +2378,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
     // ===== 4. 正常摸打对局：activeAdvice 为空时的友好占位 =====
     if (activeAdvice.isEmpty) {
-      if (tingRadarWidget != null) {
+      if (inMatch && tingRadarWidget != null) {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -2238,7 +2388,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         );
       }
       final String hint;
-      if (status == 'waiting') {
+      if (status == 'waiting' || (!inMatch && count == 0)) {
         hint = '等待牌局开始（进入游戏后自动识别）';
       } else if (status == 'animation' ||
           status == 'py_error' ||
@@ -2249,7 +2399,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       } else if (count > 0) {
         hint = '手牌识别中，正在推演建议…';
       } else {
-        hint = '未检测到手牌，请让底部手牌区完整入镜';
+        hint = '未检测到有效手牌，正在重新对齐…';
       }
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -2557,22 +2707,41 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                                 children: [
                                   const MahjongTileIcon(size: 15),
                                   const SizedBox(width: 5),
-                                  Flexible(
-                                    child: Text(
-                                      // 【v4 玩法可见】优先显示引擎回传的实际玩法名：
-                                      // 屏上规则真身由引擎 mode 驱动，标题与引擎同源
-                                      // 才能证明切换已生效（本地 selectedMode 仅作回退）。
-                                      (result?['mode_name'] as String?)?.isNotEmpty == true
-                                          ? result!['mode_name'] as String
-                                          : GameMode.label(selectedMode),
-                                      overflow: TextOverflow.ellipsis,
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.bold,
-                                        fontSize: 11,
-                                        letterSpacing: 0.2,
-                                        decoration: TextDecoration.none,
-                                      ),
+                                  GestureDetector(
+                                    onTap: () {
+                                      setState(() {
+                                        _showModeSelector = !_showModeSelector;
+                                      });
+                                    },
+                                    behavior: HitTestBehavior.opaque,
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Flexible(
+                                          child: Text(
+                                            // 【v4 玩法可见】优先显示引擎回传的实际玩法名：
+                                            // 屏上规则真身由引擎 mode 驱动，标题与引擎同源
+                                            // 才能证明切换已生效（本地 selectedMode 仅作回退）。
+                                            (result?['mode_name'] as String?)?.isNotEmpty == true
+                                                ? result!['mode_name'] as String
+                                                : GameMode.label(selectedMode),
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 11,
+                                              letterSpacing: 0.2,
+                                              decoration: TextDecoration.none,
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 2),
+                                        const Icon(
+                                          Icons.arrow_drop_down_rounded,
+                                          color: Color(0xFFFFD54F),
+                                          size: 15,
+                                        ),
+                                      ],
                                     ),
                                   ),
                                   const SizedBox(width: 4),
@@ -2747,6 +2916,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             ),
           ),
           _resizeHandle(),
+          if (_showModeSelector)
+            _buildModeSelectorOverlay(),
         ],
       ),
     );

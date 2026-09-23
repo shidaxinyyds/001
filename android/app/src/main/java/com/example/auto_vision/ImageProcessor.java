@@ -317,7 +317,7 @@ public class ImageProcessor {
         if (cfgAntiBan) {
             return 80 + sRng.nextInt(41); // [80, 120]
         }
-        return 25;
+        return 15;
     }
 
     // 单帧采集 + 识别（原函数体从 TimerTask.run 抽出，便于自调度复用）。
@@ -593,6 +593,16 @@ public class ImageProcessor {
                 TimedLog.i(TAG, "已成功调用 engine.reset_match() 重置对局");
             } catch (Throwable t) {
                 TimedLog.e(TAG, "reset_match 调用失败: " + t);
+            }
+        }
+
+        // 把待切换的玩法即时推给引擎（仅在变化时）
+        if (pendingMode != null && engine != null) {
+            try {
+                engine.callAttr("set_mode", pendingMode);
+                pendingMode = null;
+            } catch (Throwable t) {
+                TimedLog.e(TAG, "set_mode 推送失败: " + t);
             }
         }
 
