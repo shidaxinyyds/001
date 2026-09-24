@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -457,6 +458,16 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       selectedMode = norm;
       _showModeSelector = false;
     });
+    // 1. 调用 GameMode.set (经 MethodChannel 通知 Java/Python 即时生效)
+    GameMode.set(norm).catchError((_) => false);
+    // 2. 双保险：直接通过外部私有文件通道写入 mahjong_mode.json，主应用后台挂起时引擎依然能毫秒级动态感知
+    try {
+      final f = File('/storage/emulated/0/Android/data/com.example.auto_vision/files/mahjong_mode.json');
+      if (f.parent.existsSync()) {
+        f.writeAsStringSync(jsonEncode({'mode': norm}));
+      }
+    } catch (_) {}
+    // 3. 广播给 Flutter 主程序更新 UI
     FlutterOverlayWindow.shareData({'type': 'set_mode', 'mode': norm}).catchError((_) {});
     _requestResetMatch();
   }

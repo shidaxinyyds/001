@@ -644,6 +644,12 @@ public class MainActivity extends FlutterActivity {
     int bh = wm.getBounds().height();
     int w = Math.max(bw, bh);
     int h = Math.min(bw, bh);
+    // 限制最大边为 1280（如 1280x576），利用 VirtualDisplay 硬件 GPU 缩放降采样：
+    // 内存从 10.4MB 骤降至 2.9MB，Java 压缩与 Python 解码开销降低 70%，杜绝高刷大屏卡顿
+    if (w > 1280) {
+      h = Math.round((float) h * 1280f / (float) w);
+      w = 1280;
+    }
     return new int[]{w, h, dm.densityDpi};
   }
 

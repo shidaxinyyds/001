@@ -349,12 +349,10 @@ def _get_candidate_paths(filename: str) -> List[str]:
 def load_mode() -> str:
     """从内存显式配置或共享文件读取当前玩法键，带内存与时间戳缓存防每帧磁盘 IO 阻塞。"""
     global _EXPLICIT_MODE
-    if _EXPLICIT_MODE is not None:
-        return _EXPLICIT_MODE
 
     now = time.time()
-    if now - _MODE_CACHE["check_time"] < 0.5:
-        return _MODE_CACHE["mode"]
+    if now - _MODE_CACHE["check_time"] < 0.2:
+        return _EXPLICIT_MODE if _EXPLICIT_MODE is not None else _MODE_CACHE["mode"]
     _MODE_CACHE["check_time"] = now
 
     candidate_paths = _get_candidate_paths("mahjong_mode.json")
@@ -363,20 +361,22 @@ def load_mode() -> str:
             if not os.path.exists(path):
                 continue
             mtime = os.path.getmtime(path)
-            if path == _MODE_CACHE["path"] and mtime == _MODE_CACHE["mtime"]:
-                return _MODE_CACHE["mode"]
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            m = data.get("mode", DEFAULT_MODE)
-            res = ALIASES.get(m, m) if m in MODES or m in ALIASES else DEFAULT_MODE
-            _MODE_CACHE["path"] = path
-            _MODE_CACHE["mtime"] = mtime
-            _MODE_CACHE["mode"] = res
-            return res
+            if mtime != _MODE_CACHE["mtime"]:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                m = data.get("mode", DEFAULT_MODE)
+                res = ALIASES.get(m, m) if m in MODES or m in ALIASES else DEFAULT_MODE
+                _MODE_CACHE["path"] = path
+                _MODE_CACHE["mtime"] = mtime
+                _MODE_CACHE["mode"] = res
+                _EXPLICIT_MODE = res
+                return res
+            elif path == _MODE_CACHE["path"]:
+                return _EXPLICIT_MODE if _EXPLICIT_MODE is not None else _MODE_CACHE["mode"]
         except (OSError, ValueError, TypeError):
             continue
 
-    return _MODE_CACHE["mode"]
+    return _EXPLICIT_MODE if _EXPLICIT_MODE is not None else _MODE_CACHE["mode"]
 
 
 def save_mode(key: str) -> bool:

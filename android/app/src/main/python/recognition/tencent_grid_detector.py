@@ -514,13 +514,7 @@ class TencentGridDetector(Detector):
             dark_bg = float(np.mean((hsv[:, :, 2] < 80) & (hsv[:, :, 1] < 60)))
             white_tiles = float(np.mean((hsv[:, :, 2] > 180) & (hsv[:, :, 1] < 50)))
             if dark_bg >= 0.18 and white_tiles >= 0.08:
-                # 排除带有吃碰杠胡动作按钮的局中提示
-                btn_zone = image_bgr[int(ih * 0.50):int(ih * 0.65), int(iw * 0.35):int(iw * 0.75)]
-                hsv_b = cv2.cvtColor(btn_zone, cv2.COLOR_BGR2HSV)
-                blue_action = np.sum((hsv_b[:, :, 0] >= 95) & (hsv_b[:, :, 0] <= 125) & (hsv_b[:, :, 1] >= 100) & (hsv_b[:, :, 2] >= 100))
-                if blue_action > 50:
-                    return False
-                # 检查候选牌：必须实际提取出至少 3 张不同候选牌
+                # 检查候选牌：弹窗内必须实际提取出至少 3 张不同候选牌
                 cands = self.detect_pick_candidates(image_bgr)
                 if len(cands) >= 3:
                     return True

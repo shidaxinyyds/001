@@ -1,4 +1,5 @@
 from __future__ import annotations
+import concurrent.futures
 import hashlib
 import traceback
 from collections import Counter, deque
@@ -1247,6 +1248,8 @@ class Engine:
         # 检测攒下的帧数。None / 大值 → 下一帧强制检测（开局/新局/牌桌切换后先扫一次）。
         self._river_scan_sig: Optional[np.ndarray] = None
         self._river_scan_wait: int = RIVER_SCAN_MAX_INTERVAL
+        self._river_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self._river_future: Optional[concurrent.futures.Future] = None
         # 副露独立账本（34 型）：碰/杠是全场可见信，但不入牌河，避免污染弃牌计数；
         # 与牌河一样经两帧确认后才递增（碰→杠 3→4 单调递增，同局不回退）。
         self._meld_counts_34: List[int] = [0] * 34
@@ -1553,11 +1556,7 @@ class Engine:
 
     def _reset_game_state(self):
         """重置整局游戏的动态状态（新开局/返回大厅/结算时调用）。"""
-        self._monotonic_discards.clear()
-        self._pending_discards.clear()
-        self._visual_discards.clear()
-        self._inferred_discards.clear()
-        self._river_zone_counts = {"bottom": 0, "top": 0, "left": 0, "right": 0}
+        self._clear_discard_ledgers()
         self._meld_counts_34 = [0] * 34
         self._pending_melds_34 = [0] * 34
         self._discard_history.clear()
@@ -1585,6 +1584,20 @@ class Engine:
         self._advice_key = None
         self._advice = []
         self.trainer = None
+        self._river_future = None
+
+    @staticmethod
+    def _run_bg_river_and_melds(image, detector, mode, hand_row):
+        """后台异步执行的牌河与副露全图检测，将2~3秒阻塞完全移出主识别流水线。"""
+        try:
+            r_entries = detect_river_discards(image, detector, mode=mode, hand_row=hand_row)
+        except Exception:
+            r_entries = []
+        try:
+            m_entries = detect_player_melds(image, detector, mode=mode, hand_row=hand_row)
+        except Exception:
+            m_entries = []
+        return r_entries, m_entries
 
     def reset_match(self) -> None:
         """用户或外部显式请求「新对局重置」：瞬间清空牌池、手牌记忆，108张活牌满血恢复。"""
@@ -2767,8 +2780,9 @@ class Engine:
             # ===== 牌桌场景校验（过滤大厅/菜单/结算，加入防抖）=====
             if not self._is_mahjong_table(image):
                 self._non_table_frames += 1
-                # 若尚未开局，一旦检测到非牌桌画面立即重置并返回等待；若在局中，连续 4 帧非牌桌判定为离开对局
-                if not getattr(self, "_match_started", False) or self._non_table_frames >= 4:
+                # 若尚未开局，连续 2 帧非牌桌画面立即重置并返回等待；若在局中，连续 20 帧（持续 ~1.5秒）非牌桌才判定离开对局（结算/大厅），杜绝局中大字报、碰杠特效导致游戏状态突然重置
+                need_reset = (self._non_table_frames >= 2) if not getattr(self, "_match_started", False) else (self._non_table_frames >= 20)
+                if need_reset:
                     self._reset_game_state()
                     return EngineResult(
                         image=_make_preview(image),
@@ -3078,64 +3092,49 @@ class Engine:
             # 现在：阶段检测无条件运行（保留 %2 节流）；"命中阶段即清池"改为需连续
             # ≥2 次检测命中才生效，杜绝单帧误检误清新局牌池。
             if is_dingque_mode(self.mode):
-                self._phase_scan_tick += 1
-                ran_detector = (self._phase_scan_tick % 2 == 1)
-                swap_p, dq_p, pick_p = self._phase_cache
-                cands: List[str] = list(self._pick_cand_cache)
-                raw_swap = getattr(self, "_swap_raw", False)
-                if ran_detector:
-                    swap_p = dq_p = pick_p = False
-                    cands = []
-                    # 1. 优先检测换三张阶段（右侧金色换牌大圆按钮 / 过按钮）
-                    if hasattr(detector, "is_swap_phase") and detector.is_swap_phase(full_for_preview):
-                        swap_p = True
-                    # 2. 定缺选门阶段（中央万/条/筒三色大圆盘）
-                    elif hasattr(detector, "is_dingque_phase") and detector.is_dingque_phase(full_for_preview):
-                        dq_p = True
-                    # 3. 选一张牌阶段（屏幕中央大牌确认 或 候选横排）
-                    elif hasattr(detector, "is_pick_phase") and detector.is_pick_phase(full_for_preview):
-                        try:
-                            cands = detector.detect_pick_candidates(full_for_preview)
-                        except Exception:
-                            cands = []
-                        # 【选牌阶段不变量】只有「真正能读出候选牌」时才成立。若
-                        # is_pick_phase 命中但候选读不出（<2 张），说明是弹窗色盘/
-                        # 大厅卡片等误触发（悬浮窗只会显示「等待选牌弹窗识别…」的空
-                        # 面板，属明确的误报），绝不进入选牌阶段，退回其它阶段/正常判定。
-                        # 真选牌弹窗候选充足（通常 9 张），不受此门影响。
-                        pick_p = len(cands) >= 2
-                    raw_swap = swap_p
-                    # ===== 换牌阶段时间迟滞（纯状态机逻辑，不改任何像素阈值）=====
-                    # 换三张是持续 ~10s 的连续交互，金换牌钮 + 青过钮全程在场；单帧因
-                    # 换牌浮起动画遮挡/采样抖动漏检时，绝不应立刻掉回 pick/ok 而把「换牌中」
-                    # 错显成「定缺/选牌/正常出牌」UI。一旦本帧确检换牌即置满保持窗口；探测到
-                    # 定缺/选牌说明阶段已推进 → 立即清零退出，杜绝跨阶段粘连；否则逐检测周期
-                    # 递减以桥接瞬时漏检。窗口取 3 个检测周期（≈6 采集帧 ≈150ms），远小于换牌
-                    # 时长、又足以吞掉抖动；换牌结束至多让「换牌」UI 延续 ~150ms（换牌面板本就
-                    # 会短暂残留），不影响后续正常出牌。
-                    if raw_swap:
-                        self._swap_hold_frames = 3
-                    elif dq_p or pick_p:
-                        self._swap_hold_frames = 0
-                    elif self._swap_hold_frames > 0:
-                        self._swap_hold_frames -= 1
-                        swap_p = True  # 迟滞保持：本帧虽漏检，仍视为换牌延续
-                    self._phase_cache = (swap_p, dq_p, pick_p)
-                    self._pick_cand_cache = cands
-                    self._swap_raw = raw_swap
+                swap_p = dq_p = pick_p = False
+                cands = []
+                # 1. 优先检测换三张阶段（右侧金色换牌大圆按钮 / 过按钮）
+                if hasattr(detector, "is_swap_phase") and detector.is_swap_phase(full_for_preview):
+                    swap_p = True
+                # 2. 定缺选门阶段（中央万/条/筒三色大圆盘）
+                elif hasattr(detector, "is_dingque_phase") and detector.is_dingque_phase(full_for_preview):
+                    dq_p = True
+                # 3. 选一张牌阶段（屏幕中央大牌确认 或 候选横排）
+                elif hasattr(detector, "is_pick_phase") and detector.is_pick_phase(full_for_preview):
+                    try:
+                        cands = detector.detect_pick_candidates(full_for_preview)
+                    except Exception:
+                        cands = []
+                    # 【选牌阶段不变量】只有「真正能读出候选牌」时才成立。若
+                    # is_pick_phase 命中但候选读不出（<2 张），说明是弹窗色盘/
+                    # 大厅卡片等误触发，退回其它阶段/正常判定。
+                    pick_p = len(cands) >= 2
+                raw_swap = swap_p
+                # ===== 换牌阶段时间迟滞 =====
+                if raw_swap:
+                    self._swap_hold_frames = 3
+                elif dq_p or pick_p:
+                    self._swap_hold_frames = 0
+                elif self._swap_hold_frames > 0:
+                    self._swap_hold_frames -= 1
+                    swap_p = True  # 迟滞保持：本帧虽漏检，仍视为换牌延续
+                self._phase_cache = (swap_p, dq_p, pick_p)
+                self._pick_cand_cache = cands
+                self._swap_raw = raw_swap
                 is_swap_phase, is_dq_phase, is_pick_phase = self._phase_cache
                 pick_candidates = list(self._pick_cand_cache)
 
-                # 连续确认只在「真正跑了探测器」的帧计数，且以「本帧真实检测」(raw_swap) 为准：
+                # 连续确认以「本帧真实检测」(raw_swap / dq_p) 为准：
                 # 迟滞保持出来的 swap 不参与清池计数，避免把上一帧漏检也当成换牌确检反复清池。
-                if ran_detector and (getattr(self, "_swap_raw", False) or dq_p):
+                if (getattr(self, "_swap_raw", False) or dq_p):
                     self._phase_confirm_frames += 1
                     if self._phase_confirm_frames >= 2 or (dq_p and curr_raw_n >= 13):
                         self._reset_game_state()
                         self._match_started = True
                         if dq_p:
                             is_dq_phase = True
-                elif ran_detector:
+                else:
                     self._phase_confirm_frames = 0
 
                 # 摸打物理排他铁律：
@@ -3143,7 +3142,7 @@ class Engine:
                 # 2. 已有弃牌或副露时，若无实证定缺盘（not dq_p），绝不允许换三张迟滞或幽灵定缺跨阶段泄露与永久粘连。
                 total_discards = sum(self._monotonic_discards.values()) + sum(self._inferred_discards.values())
                 total_melds = sum(self._meld_counts_34)
-                if (0 < curr_raw_n < 13) or ((total_discards > 0 or total_melds > 0) and not dq_p):
+                if (0 < curr_raw_n < 13) or ((total_discards > 0 or total_melds > 0) and not dq_p and not getattr(self, "_swap_raw", False)):
                     is_swap_phase = False
                     self._swap_hold_frames = 0
                     self._swap_raw = False
@@ -3178,15 +3177,50 @@ class Engine:
 
             ih, _ = image.shape[:2]
             discard_labels = []
+
+            # 接收后台异步完成的牌河与副露扫描结果，更新视觉累计账本
+            rf = getattr(self, "_river_future", None)
+            if rf is not None and rf.done():
+                try:
+                    bg_river_entries, bg_meld_entries = rf.result()
+                    if bg_river_entries:
+                        bg_zone_counts: Dict[str, int] = {"bottom": 0, "top": 0, "left": 0, "right": 0}
+                        bg_discards = []
+                        for cd, zn in bg_river_entries:
+                            if cd and mpsz_to_tile34_index(cd) in avail:
+                                bg_discards.append(cd)
+                                if zn in bg_zone_counts:
+                                    bg_zone_counts[zn] += 1
+                        self._river_zone_counts = bg_zone_counts
+                        self._update_visual_ledger(bg_discards)
+                    if bg_meld_entries:
+                        frame_melds = [0] * 34
+                        for _region, md, n_tiles in bg_meld_entries:
+                            try:
+                                midx = mpsz_to_tile34_index(md)
+                            except Exception:
+                                continue
+                            if md and midx in avail:
+                                frame_melds[midx] += n_tiles
+                        for i in range(34):
+                            if frame_melds[i] > self._meld_counts_34[i]:
+                                if self._pending_melds_34[i] >= frame_melds[i]:
+                                    self._meld_counts_34[i] = frame_melds[i]
+                                else:
+                                    self._pending_melds_34[i] = frame_melds[i]
+                            elif frame_melds[i] == 0:
+                                self._pending_melds_34[i] = self._meld_counts_34[i]
+                except Exception:
+                    pass
+                self._river_future = None
+
             # 仅在非定缺/换牌/任选牌阶段且进入正式对局后扫描牌河
             allow_river_scan = (
                 not is_dq_phase and not is_swap_phase and not is_pick_phase
                 and (not is_dingque_mode(self.mode) or getattr(self, "_match_started", False) or dingque_suit is not None)
             )
 
-            # 牌河/副露检测区域差分门控：牌河区木然未变（只有自己摸打、中央牌河没新增）
-            # 时跳过昂贵的全图 detect_*，把关键路径（牌面+建议）单帧耗时从 ~600ms-1s 压回
-            # ~80-100ms；累计账本跨帧持久，跳过不清空记牌器。攒满强制间隔或牌河真变化才重扫。
+            # 牌河/副露检测区域差分门控：未变时跳过；变动或强制间隔时异步重扫
             run_river_scan = allow_river_scan and self._should_scan_river(image)
 
             if run_river_scan:
@@ -3194,7 +3228,6 @@ class Engine:
                 for _i, row in enumerate(voted_rows):
                     if _i == hand_idx:
                         continue
-                    # 牌河物理位置先验：牌河只能位于牌桌中央区域（比例可配）
                     ys = [d[0][1] for d in row]
                     yc = sum(ys) / len(ys) if ys else 0
                     if yc < yc_lo * ih or yc > yc_hi * ih:
@@ -3207,43 +3240,17 @@ class Engine:
                             except Exception:
                                 pass
 
-                # 融合牌桌中央区域四方牌河的多角度弃牌检测（仅在已识别出有效手牌时提取，杜绝非对局/大厅/未开局误报）
-                _t_river = time.time()
-                if hand_row and (len(hand_row) >= 4 or len(hand_mpsz) >= 4):
+                # 异步派发全图牌河与副露检测至独立后台线程池，主线程零等待立即返回（单帧耗时从 1~3s 压减至 0ms）
+                cur_rf = getattr(self, "_river_future", None)
+                if (cur_rf is None or cur_rf.done()) and hand_row and (len(hand_row) >= 4 or len(hand_mpsz) >= 4):
                     try:
-                        river_entries = detect_river_discards(image, self._detector, mode=self.mode, hand_row=hand_row)
-                        # 四区归属计数（仅供展示"谁打的"；AI 仍按全局 discard_labels 消费）
-                        zone_counts: Dict[str, int] = {"bottom": 0, "top": 0, "left": 0, "right": 0}
-                        for cd, zn in river_entries:
-                            if cd and mpsz_to_tile34_index(cd) in avail:
-                                discard_labels.append(cd)
-                                if zn in zone_counts:
-                                    zone_counts[zn] += 1
-                        self._river_zone_counts = zone_counts
+                        img_bg = image.copy()
+                        h_row_bg = list(hand_row) if hand_row else None
+                        self._river_future = self._river_executor.submit(
+                            self._run_bg_river_and_melds, img_bg, self._detector, self.mode, h_row_bg
+                        )
                     except Exception:
                         pass
-                    try:
-                        meld_entries = detect_player_melds(image, self._detector, mode=self.mode, hand_row=hand_row)
-                        frame_melds = [0] * 34
-                        for _region, md, n_tiles in meld_entries:
-                            try:
-                                midx = mpsz_to_tile34_index(md)
-                            except Exception:
-                                continue
-                            if md and midx in avail:
-                                frame_melds[midx] += n_tiles
-                        # 副露不再混入牌河 discard_labels，改走独立账本 + 两帧确认递增
-                        for i in range(34):
-                            if frame_melds[i] > self._meld_counts_34[i]:
-                                if self._pending_melds_34[i] >= frame_melds[i]:
-                                    self._meld_counts_34[i] = frame_melds[i]
-                                else:
-                                    self._pending_melds_34[i] = frame_melds[i]
-                            elif frame_melds[i] == 0:
-                                self._pending_melds_34[i] = self._meld_counts_34[i]
-                    except Exception:
-                        pass
-                self._perf_ms["river"].append((time.time() - _t_river) * 1000.0)
 
             curr_cnt = _mpsz_to_counter(hand_mpsz) if hand_mpsz else Counter()
             curr_n = sum(curr_cnt.values())
@@ -3404,42 +3411,68 @@ class Engine:
                 tile_count = len(hand_mpsz) // 2 if hand_mpsz else 0
                 if pick_candidates and hand_mpsz:
                     try:
-                        from sichuan import SichuanAnalyzer
-                        h_counts = [0] * 34
-                        for i in range(0, len(hand_mpsz), 2):
+                        from mahjong.shanten import Shanten
+                        from trainer.utils.ukeire import calculate_ukeire
+                        shanten_calc = Shanten()
+                        dq_suit_char = None
+                        if is_dingque_mode(self.mode):
                             try:
-                                h_counts[mpsz_to_tile34_index(hand_mpsz[i:i+2])] += 1
+                                from sichuan import SichuanAnalyzer
+                                h_indices = SichuanAnalyzer.parse_hand_mpsz(hand_mpsz) if hand_mpsz else []
+                                h_cnts = SichuanAnalyzer.counts_from_tiles(h_indices)
+                                rec_dq = SichuanAnalyzer.recommend_dingque(h_cnts)
+                                dq_suit_char = rec_dq.get("suit_char")
                             except Exception:
-                                pass
-                        # 对每张候选牌计算加入手牌后的向听数变化，选择向听减少最多（或最多进张）的牌
-                        best_cand = None
-                        best_shanten = 8
-                        cand_results = []
-                        for cand in set(pick_candidates):
+                                dq_suit_char = None
+
+                        cand_evals = []
+                        for cand in sorted(set(pick_candidates)):
                             try:
+                                is_dq = (dq_suit_char is not None and cand.endswith(dq_suit_char))
                                 test_mpsz = hand_mpsz + cand
                                 test_hand_obj = TileCollection.from_mpsz(test_mpsz)
-                                # 计算加入候选牌后手牌（14张）的向听数
-                                from mahjong.shanten import Shanten
-                                sh = Shanten().calculate_shanten(tiles_34=test_hand_obj.tiles34)
-                                cand_results.append((cand, sh))
-                                if sh < best_shanten:
-                                    best_shanten = sh
-                                    best_cand = cand
+                                sh = shanten_calc.calculate_shanten(tiles_34=test_hand_obj.tiles34)
+                                best_u = 0
+                                t_tiles = [test_mpsz[i:i+2] for i in range(0, len(test_mpsz), 2)]
+                                seen_discards = set()
+                                for idx, d_tile in enumerate(t_tiles):
+                                    if d_tile in seen_discards:
+                                        continue
+                                    seen_discards.add(d_tile)
+                                    rem_tiles = "".join(t_tiles[:idx] + t_tiles[idx+1:])
+                                    rem_obj = TileCollection.from_mpsz(rem_tiles)
+                                    rem_sh = shanten_calc.calculate_shanten(tiles_34=rem_obj.tiles34)
+                                    if rem_sh <= sh:
+                                        try:
+                                            u = calculate_ukeire(rem_obj)
+                                            if u > best_u:
+                                                best_u = u
+                                        except Exception:
+                                            pass
+                                score_key = (1 if is_dq else 0, sh, -best_u)
+                                cand_evals.append((score_key, cand, sh, best_u, is_dq))
                             except Exception:
                                 pass
-                        if best_cand is not None:
-                            cand_str = ' '.join(f"{c}({s}向听)" for c, s in cand_results)
-                            message = f"选牌建议：选 {best_cand}（向听最小={best_shanten}）"
-                            advice = [{
-                                "tile": best_cand,
-                                "ukeire": max(0, 8 - best_shanten),
-                                "shanten": best_shanten,
-                                "ev": 9000.0,
-                                "reason": f"选{best_cand}后向听数最优（{best_shanten}向听）",
-                                "ting_tiles": [],
-                                "is_pick": True,
-                            }]
+
+                        if cand_evals:
+                            cand_evals.sort(key=lambda x: x[0])
+                            _, best_cand, best_shanten, best_u, is_dq = cand_evals[0]
+                            c_cn = tile_to_chinese(best_cand)
+                            u_str = f" · 进张{best_u}张" if best_u > 0 else ""
+                            message = f"选牌建议：选 {c_cn}（{best_shanten}向听{u_str}）"
+                            advice = []
+                            for _, c, s, u, dq in cand_evals:
+                                cn = tile_to_chinese(c)
+                                reason_u = f"，进张{u}张" if u > 0 else ""
+                                advice.append({
+                                    "tile": c,
+                                    "ukeire": u,
+                                    "shanten": s,
+                                    "ev": 9000.0 - s * 1000.0 + u * 10.0,
+                                    "reason": f"选{cn}后{s}向听{reason_u}",
+                                    "ting_tiles": [],
+                                    "is_pick": True,
+                                })
                             best = best_cand
                         else:
                             message = f"候选牌: {' '.join(pick_candidates)}"

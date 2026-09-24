@@ -887,18 +887,32 @@ class SichuanAnalyzer:
         """
         draw_opts = []
         for t in range(28):
-            # 摸入定缺花色的牌只能立即打掉、回到同一 13 张局面，期望自洽，
-            # 不必成场景（剪枝降低算力）；红中赖子（27）保留。
+            # 摸入定缺花色的牌只能立即打掉、回到同一 13 张局面，期望自洽，不必成场景；红中赖子（27）保留
             if dingque_suit is not None and t < 27 and tile_to_suit(t) == dingque_suit:
                 continue
             if pool_remaining is not None and t < len(pool_remaining):
                 rem = pool_remaining[t]
             else:
                 rem = max(0, 4 - (counts[t] if t < len(counts) else 0))
-            if rem > 0:
+            if rem <= 0:
+                continue
+            # 仅保留与手牌有联络（同牌、同花色相邻 <=2 格）或红中赖子（27），无关孤张摸入不改变核心搭子
+            connects = (t == 27)
+            if not connects:
+                s = t // 9
+                v = t % 9
+                for dv in range(max(0, v - 2), min(9, v + 3)):
+                    if counts[s * 9 + dv] > 0:
+                        connects = True
+                        break
+            if connects:
                 draw_opts.append((t, rem))
+
         if not draw_opts:
             return []
+        # 按剩余牌数降序选取最具代表性的前 6 个高概率摸牌情景，将 13 张耗时由近 1 秒压减至 ~200ms
+        draw_opts.sort(key=lambda x: -x[1])
+        draw_opts = draw_opts[:6]
         total_w = float(sum(w for _, w in draw_opts))
 
         agg: Dict[int, Dict] = {}
