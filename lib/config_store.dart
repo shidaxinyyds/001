@@ -49,9 +49,28 @@ class DebugConfig {
   // 牌河 YOLO 影子对比（E）：引擎每帧额外跑 YOLO 条带法检测牌河，只写
   // diag/日志供离线对比，绝不参与显示与建议。默认关闭（有推理开销）。
   static const bool defYoloRiver = false;
+  // 牌势感知与军师安抚：实时研判顺逆风局势，提供情绪安抚与防上头防守策略。默认开启。
+  static const bool defMoodGuard = true;
 
-  /// 好牌机率可选项（百分比）。
+  /// 好牌期望策略可选档位（百分比）。
   static const List<int> rates = [10, 20, 30, 40, 50, 60, 70, 80, 90];
+
+  static String rateStrategyName(int rate) {
+    if (rate <= 10) return '兼收并蓄流';
+    if (rate <= 30) return '均衡提速流';
+    if (rate <= 50) return '优质厚张流';
+    if (rate <= 70) return '顺风进攻流';
+    return '天选神张流';
+  }
+
+  static String rateStrategyDesc(int rate) {
+    final int minU = ((rate ~/ 10).clamp(1, 9)).toInt();
+    if (rate <= 10) return '进张 ≥ $minU 张 · 广进张快下叫，入门推荐';
+    if (rate <= 30) return '进张 ≥ $minU 张 · 兼顾牌效与速度，平衡推荐';
+    if (rate <= 50) return '进张 ≥ $minU 张 · 筛选宽阔进张，稳健提速';
+    if (rate <= 70) return '进张 ≥ $minU 张 · 锁定大进张面，乘胜追击';
+    return '进张 ≥ $minU 张 · 苛求极佳牌效，自带智能保底';
+  }
 
   bool autoOrient;
   bool bootstrap;
@@ -65,6 +84,7 @@ class DebugConfig {
   bool dumpFrames;
   bool collectRiver;
   bool yoloRiver;
+  bool moodGuard;
 
   DebugConfig({
     this.autoOrient = defAutoOrient,
@@ -79,11 +99,12 @@ class DebugConfig {
     this.dumpFrames = defDumpFrames,
     this.collectRiver = defCollectRiver,
     this.yoloRiver = defYoloRiver,
+    this.moodGuard = defMoodGuard,
   });
 
-  /// 好牌机率 → 引擎「进张数下限」。
+  /// 好牌期望策略 → 引擎「进张数下限」。
   /// 10%→1 张 … 90%→9 张：贴合真实麻将进张数区间，语义直观。
-  /// 阈值过高会把所有打法过滤掉，此时引擎返回空建议列表。
+  /// 引擎端已加装智能兜底，即使门槛过高也绝不出现空白无建议。
   int get minUkeire => ((rate ~/ 10).clamp(1, 9)).toInt();
 
   DebugConfig copyWith({
@@ -99,6 +120,7 @@ class DebugConfig {
     bool? dumpFrames,
     bool? collectRiver,
     bool? yoloRiver,
+    bool? moodGuard,
   }) {
     return DebugConfig(
       autoOrient: autoOrient ?? this.autoOrient,
@@ -113,6 +135,7 @@ class DebugConfig {
       dumpFrames: dumpFrames ?? this.dumpFrames,
       collectRiver: collectRiver ?? this.collectRiver,
       yoloRiver: yoloRiver ?? this.yoloRiver,
+      moodGuard: moodGuard ?? this.moodGuard,
     );
   }
 
@@ -129,6 +152,7 @@ class DebugConfig {
   static const String _kDumpFrames = 'dbg_dump_frames';
   static const String _kCollectRiver = 'dbg_collect_river';
   static const String _kYoloRiver = 'dbg_yolo_river';
+  static const String _kMoodGuard = 'dbg_mood_guard';
 
   static Future<DebugConfig> load() async {
     try {
@@ -148,6 +172,7 @@ class DebugConfig {
         dumpFrames: p.getBool(_kDumpFrames) ?? defDumpFrames,
         collectRiver: p.getBool(_kCollectRiver) ?? defCollectRiver,
         yoloRiver: p.getBool(_kYoloRiver) ?? defYoloRiver,
+        moodGuard: p.getBool(_kMoodGuard) ?? defMoodGuard,
       );
     } catch (_) {
       return DebugConfig();
@@ -169,6 +194,7 @@ class DebugConfig {
       await p.setBool(_kDumpFrames, dumpFrames);
       await p.setBool(_kCollectRiver, collectRiver);
       await p.setBool(_kYoloRiver, yoloRiver);
+      await p.setBool(_kMoodGuard, moodGuard);
     } catch (_) {
       // 存不下就算了，不能因为本地存储失败影响识别主流程
     }
@@ -231,6 +257,8 @@ class DebugConfig {
       'collect_river': collectRiver,
       // 牌河 YOLO 影子对比：只写 diag/日志供离线评测，不影响显示。
       'yolo_river': yoloRiver,
+      // 牌势感知与安抚：
+      'mood_guard': moodGuard,
     }.entries) {
       try {
         await _ch.invokeMethod<dynamic>('setConfig', {
@@ -249,6 +277,7 @@ class DebugConfig {
         'minUkeire': minUkeire,
         'warnDealIn': warnDealIn,
         'warnPonKong': warnPonKong,
+        'moodGuard': moodGuard,
       });
       if (rc != 0) ok = false;
     } catch (_) {

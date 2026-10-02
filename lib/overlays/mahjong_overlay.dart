@@ -2310,6 +2310,90 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     );
   }
 
+  /// 牌势研判与军师安抚组件：根据局势顺逆动态显示攻防心理安抚与策略导向
+  Widget _buildMoodWidget(Map<String, dynamic> mood) {
+    final state = (mood['state'] as String?) ?? 'steady';
+    final badge = (mood['badge'] as String?) ?? '';
+    final desc = (mood['desc'] as String?) ?? '';
+    final level = (mood['level'] as String?) ?? 'blue';
+
+    Color primaryColor;
+    Color bgGradientStart;
+    Color bgGradientEnd;
+    IconData iconData;
+
+    if (level == 'green' || state == 'favorable') {
+      primaryColor = const Color(0xFF00E676);
+      bgGradientStart = const Color(0x38004D40);
+      bgGradientEnd = const Color(0x22002E26);
+      iconData = Icons.trending_up_rounded;
+    } else if (level == 'orange' || state == 'defensive') {
+      primaryColor = const Color(0xFFFFB74D);
+      bgGradientStart = const Color(0x384E342E);
+      bgGradientEnd = const Color(0x22372722);
+      iconData = Icons.shield_rounded;
+    } else {
+      primaryColor = const Color(0xFF64B5F6);
+      bgGradientStart = const Color(0x381A237E);
+      bgGradientEnd = const Color(0x2210164D);
+      iconData = Icons.balance_rounded;
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5.5),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [bgGradientStart, bgGradientEnd],
+        ),
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: primaryColor.withAlpha(70), width: 0.7),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x18000000),
+            blurRadius: 3,
+            offset: Offset(0, 1),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(iconData, color: primaryColor, size: 12.5),
+              const SizedBox(width: 4.5),
+              Text(
+                badge,
+                style: TextStyle(
+                  color: primaryColor,
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 0.2,
+                  decoration: TextDecoration.none,
+                ),
+              ),
+            ],
+          ),
+          if (desc.isNotEmpty) ...[
+            const SizedBox(height: 2),
+            Text(
+              desc,
+              style: const TextStyle(
+                color: Colors.white70,
+                fontSize: 9.5,
+                height: 1.25,
+                decoration: TextDecoration.none,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   /// 次选进张标签：引擎算出真实进张时恒 >0；
   /// `ukeire==0 且 shanten>=2` 表示尚未算得真实进张，显示“—”避免误导“绝张 0 张”。
   String _ukeireLabel(dynamic item) {
@@ -2349,6 +2433,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         : null;
     final Widget? tingRadarWidget = (shanten == 0 || tingDetails.isNotEmpty)
         ? _buildTingRadarWidget(tingDetails, shanten)
+        : null;
+    final moodData = result?['mood'] as Map<String, dynamic>?;
+    final Widget? moodWidget = (moodData != null && moodData['badge'] != null)
+        ? _buildMoodWidget(moodData)
         : null;
 
     // ===== 1. 换牌阶段专用 UI =====
@@ -2512,6 +2600,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             if (alertWidget != null) alertWidget,
+            if (moodWidget != null) moodWidget,
             tingRadarWidget,
           ],
         );
@@ -2530,25 +2619,32 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       } else {
         hint = '未检测到有效手牌，正在重新对齐…';
       }
-      return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6.5),
-        decoration: BoxDecoration(
-          color: Colors.white.withAlpha(6),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Colors.white10, width: 0.5),
-        ),
-        child: Row(
-          children: [
-            const Icon(Icons.tips_and_updates_outlined, color: Color(0xFFFFD54F), size: 14),
-            const SizedBox(width: 6),
-            Expanded(
-              child: Text(
-                hint,
-                style: const TextStyle(color: Colors.white70, fontSize: 9.5),
-              ),
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (alertWidget != null) alertWidget,
+          if (moodWidget != null) moodWidget,
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6.5),
+            decoration: BoxDecoration(
+              color: Colors.white.withAlpha(6),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.white10, width: 0.5),
             ),
-          ],
-        ),
+            child: Row(
+              children: [
+                const Icon(Icons.tips_and_updates_outlined, color: Color(0xFFFFD54F), size: 14),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    hint,
+                    style: const TextStyle(color: Colors.white70, fontSize: 9.5),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       );
     }
 
@@ -2575,6 +2671,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         if (alertWidget != null) alertWidget,
         if (tingRadarWidget != null) tingRadarWidget,
         if (dualStrategyWidget != null) dualStrategyWidget,
+        if (moodWidget != null) moodWidget,
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
           decoration: BoxDecoration(

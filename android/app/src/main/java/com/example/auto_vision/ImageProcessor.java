@@ -682,6 +682,9 @@ public class ImageProcessor {
                         if (nativeObj.has("remaining_matrix")) {
                             pyObj.put("remaining_matrix", nativeObj.optJSONObject("remaining_matrix"));
                         }
+                        if (nativeObj.has("mood")) {
+                            pyObj.put("mood", nativeObj.optJSONObject("mood"));
+                        }
                         pyObj.put("inferred_discard", nativeObj.optInt("inferred_discard", -1));
 
                         org.json.JSONArray nativeAdvice = nativeObj.optJSONArray("advice");

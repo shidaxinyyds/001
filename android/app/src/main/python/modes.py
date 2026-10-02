@@ -414,6 +414,7 @@ DEFAULT_MIN_UKEIRE = 0
 # 不是精确的对战读心。详情见 engine.build_advice 内的 _danger_* 注释。
 DEFAULT_WARN_DEAL_IN = False
 DEFAULT_WARN_PON_KONG = False
+DEFAULT_MOOD_GUARD = True
 
 _ADVICE_CACHE = {
     "path": "",
@@ -424,6 +425,7 @@ _ADVICE_CACHE = {
         "min_ukeire": DEFAULT_MIN_UKEIRE,
         "warn_deal_in": DEFAULT_WARN_DEAL_IN,
         "warn_pon_kong": DEFAULT_WARN_PON_KONG,
+        "mood_guard": DEFAULT_MOOD_GUARD,
     },
 }
 
@@ -436,6 +438,7 @@ def load_advice_config() -> Dict:
     - min_ukeire   (int)  ：>0 时只保留「进张数 >= 该阈值」的打法（调试页"好牌机率"）。
     - warn_deal_in (bool) ：开启后在建议里附「防点炮」危险度（生张/现物）。
     - warn_pon_kong(bool) ：开启后在建议里附「防杠/碰」危险度（基于牌河可见度的粗略信号）。
+    - mood_guard   (bool) ：开启后根据起手向听与进张面实时研判顺逆风局势并安抚防上头。
 
     与 load_mode 同策略：文件缺失/损坏/字段类型不对时**静默回退默认值**，
     识别链路绝不因配置文件坏掉而抛异常或崩溃。
@@ -448,6 +451,7 @@ def load_advice_config() -> Dict:
     minu = DEFAULT_MIN_UKEIRE
     wdi = DEFAULT_WARN_DEAL_IN
     wpk = DEFAULT_WARN_PON_KONG
+    mg = DEFAULT_MOOD_GUARD
 
     candidate_paths = _get_candidate_paths("mahjong_advice.json")
     for path in candidate_paths:
@@ -471,11 +475,15 @@ def load_advice_config() -> Dict:
             k = data.get("warn_pon_kong", wpk)
             if isinstance(k, bool):
                 wpk = k
+            m = data.get("mood_guard", mg)
+            if isinstance(m, bool):
+                mg = m
             cfg = {
                 "show_advice": show,
                 "min_ukeire": minu,
                 "warn_deal_in": wdi,
                 "warn_pon_kong": wpk,
+                "mood_guard": mg,
             }
             _ADVICE_CACHE["path"] = path
             _ADVICE_CACHE["mtime"] = mtime

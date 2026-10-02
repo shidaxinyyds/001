@@ -202,17 +202,20 @@ public class MainActivity extends FlutterActivity {
         Object aShow = call.argument("showAdvice");
         Object aWdi = call.argument("warnDealIn");
         Object aWpk = call.argument("warnPonKong");
+        Object aMood = call.argument("moodGuard");
         int minUkeire = (aMin instanceof Number) ? ((Number) aMin).intValue() : 0;
         if (minUkeire < 0) minUkeire = 0;
         boolean showAdvice = (aShow instanceof Boolean) ? (Boolean) aShow : true;
         boolean warnDealIn = (aWdi instanceof Boolean) ? (Boolean) aWdi : false;
         boolean warnPonKong = (aWpk instanceof Boolean) ? (Boolean) aWpk : false;
+        boolean moodGuard = (aMood instanceof Boolean) ? (Boolean) aMood : true;
         final int finalMin = minUkeire;
         final boolean finalShow = showAdvice;
         final boolean finalWdi = warnDealIn;
         final boolean finalWpk = warnPonKong;
+        final boolean finalMood = moodGuard;
         toRun = () -> {
-          int rc = writeAdviceFile(finalMin, finalShow, finalWdi, finalWpk);
+          int rc = writeAdviceFile(finalMin, finalShow, finalWdi, finalWpk, finalMood);
           result.success(rc);
         };
       }
@@ -570,18 +573,19 @@ public class MainActivity extends FlutterActivity {
    * 文件名必须与 Python modes.ADVICE_PATH 一致，否则引擎读不到而静默用默认值。
    */
   private int writeAdviceFile(int minUkeire, boolean showAdvice,
-                              boolean warnDealIn, boolean warnPonKong) {
+                              boolean warnDealIn, boolean warnPonKong, boolean moodGuard) {
     try {
       File dir = getApplicationContext().getExternalFilesDir(null);
       if (dir == null) return -3;
       if (!dir.exists()) dir.mkdirs();
       File f = new File(dir, "mahjong_advice.json");
       // 字段名必须与 Python modes.load_advice_config 严格一致：
-      // show_advice / min_ukeire / warn_deal_in / warn_pon_kong
+      // show_advice / min_ukeire / warn_deal_in / warn_pon_kong / mood_guard
       String body = "{\"show_advice\":" + (showAdvice ? "true" : "false")
           + ",\"min_ukeire\":" + minUkeire
           + ",\"warn_deal_in\":" + (warnDealIn ? "true" : "false")
-          + ",\"warn_pon_kong\":" + (warnPonKong ? "true" : "false") + "}";
+          + ",\"warn_pon_kong\":" + (warnPonKong ? "true" : "false")
+          + ",\"mood_guard\":" + (moodGuard ? "true" : "false") + "}";
       try (FileOutputStream out = new FileOutputStream(f, false)) {
         out.write(body.getBytes("UTF-8"));
         out.flush();

@@ -195,7 +195,33 @@ Java_com_example_auto_vision_NativeEngine_nativeEvaluate(
     ss << "],";
 
     // 9x3 剩余牌矩阵
-    ss << "\"remaining_matrix\":" << g_memory->get_remaining_matrix_json();
+    ss << "\"remaining_matrix\":" << g_memory->get_remaining_matrix_json() << ",";
+
+    // 牌势感知与军师安抚 (Mood Guard)
+    int top_ukeire = advices.empty() ? 0 : advices[0].ukeire_live;
+    ss << "\"mood\":{";
+    if (shanten >= 3 || top_ukeire <= 2) {
+        ss << "\"state\":\"defensive\",";
+        ss << "\"badge\":\"🛡️ 逆风抗压 · 防守保分\",";
+        ss << "\"desc\":\"起手牌型较散（处于摸牌波谷），切忌急躁，优先扣下生张稳扎稳打。\",";
+        ss << "\"level\":\"orange\"";
+    } else if (shanten == 0 || (shanten == 1 && top_ukeire >= 8) || top_ukeire >= 12) {
+        ss << "\"state\":\"favorable\",";
+        ss << "\"badge\":\"🌊 牌势顺遂 · 乘胜追击\",";
+        if (shanten == 0) {
+            ss << "\"desc\":\"已达听牌绝佳状态！牌势凌厉，全力锁定胡牌张，乘胜追击！\",";
+        } else {
+            ss << "\"desc\":\"一向听优质大进张，进张面极宽，全力冲刺下叫！\",";
+        }
+        ss << "\"level\":\"green\"";
+    } else {
+        ss << "\"state\":\"steady\",";
+        ss << "\"badge\":\"⚖️ 局势平稳 · 见机行事\",";
+        ss << "\"desc\":\"当前牌局平稳推进中，进张面均衡，保持节奏等待良机。\",";
+        ss << "\"level\":\"blue\"";
+    }
+    ss << "}";
+
     ss << "}";
 
     std::string json_str = ss.str();

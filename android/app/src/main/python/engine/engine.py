@@ -1890,6 +1890,61 @@ class Engine:
         self.trainer = Trainer(hand, mode=self.mode)
         return None
 
+    @staticmethod
+    def _compute_mood_guard(
+        shanten: Optional[int],
+        advice: Optional[List[Dict]],
+        tenpai_alert: Optional[Dict],
+        tile_count: int,
+    ) -> Optional[Dict]:
+        """根据当前起手向听、有效进张与他家听牌态势，研判局势顺逆，提供军师安抚与攻防定位。
+
+        - 顺风（favorable）：听牌或一向听宽进张（>=8张），主动进攻、提速冲刺。
+        - 逆风（defensive）：向听较深（>=3向听）或进张极窄（<=2张）或他家疑似听牌，防守避锋、防上头点炮。
+        - 平稳（steady）：常规搭子推进中，保持摸打节奏。
+        """
+        if tile_count < 13 or shanten is None:
+            return None
+
+        top_ukeire = 0
+        if advice and isinstance(advice, list) and len(advice) > 0 and isinstance(advice[0], dict):
+            top_ukeire = int(advice[0].get("ukeire", 0))
+
+        has_alert = bool(tenpai_alert and isinstance(tenpai_alert, dict) and tenpai_alert.get("alert"))
+
+        if shanten >= 3 or top_ukeire <= 2 or has_alert:
+            if has_alert:
+                desc = "场上对手疑似下叫听牌，当前牌势凶险，优先跟熟避锋，防大番点炮！"
+            elif shanten >= 3:
+                desc = "起手牌型较散（处于摸牌波谷），切忌急躁，优先扣下生张稳扎稳打。"
+            else:
+                desc = "当前有效进张较窄，建议调整搭子结构或扣住下家危险牌。"
+            return {
+                "state": "defensive",
+                "badge": "🛡️ 逆风抗压 · 防守保分",
+                "desc": desc,
+                "level": "orange",
+            }
+
+        if shanten == 0 or (shanten == 1 and top_ukeire >= 8) or top_ukeire >= 12:
+            if shanten == 0:
+                desc = "已达听牌绝佳状态！牌势凌厉，全力锁定胡牌张，乘胜追击！"
+            else:
+                desc = f"一向听优质大进张（{top_ukeire}张活牌），进张面极宽，全力冲刺下叫！"
+            return {
+                "state": "favorable",
+                "badge": "🌊 牌势顺遂 · 乘胜追击",
+                "desc": desc,
+                "level": "green",
+            }
+
+        return {
+            "state": "steady",
+            "badge": "⚖️ 局势平稳 · 见机行事",
+            "desc": f"当前{shanten}向听（进张{top_ukeire}张），牌局平稳推进中，保持节奏等待良机。",
+            "level": "blue",
+        }
+
     def build_advice(self, hand: TileCollection, disc_counts=None, meld_counts=None):
         """返回 (向听数, 推荐打法列表)。
 
@@ -1979,6 +2034,26 @@ class Engine:
                         advice.append(entry)
                         if len(advice) >= 6:
                             break
+                    # 智能保底机制：若按门槛过滤后没有任何推荐（残局或深向听导致无>=min_ukeire打法），
+                    # 绝不能留空让界面变白，自动保底回退取最高进张的候选打法，并标注保底提示。
+                    if min_ukeire > 0 and not advice and _rule_results:
+                        for sr in _rule_results[:3]:
+                            u = sr.get("ukeire", 0)
+                            rsn = sr.get("reason", "")
+                            rsn = f"{rsn} · 智能保底" if rsn else f"进张{u}张 · 智能保底"
+                            entry = {
+                                "tile": sr.get("tile"),
+                                "ukeire": int(u),
+                                "shanten": sr.get("shanten", 0),
+                                "ev": sr.get("ev", 0.0),
+                                "reason": rsn,
+                                "ting_tiles": sr.get("ting_tiles", []),
+                                "ting_details": sr.get("ting_details", []),
+                                "is_dingque": sr.get("is_dingque", False),
+                            }
+                            if "max_fan" in sr:
+                                entry["max_fan"] = sr["max_fan"]
+                            advice.append(entry)
                 elif getattr(self.trainer, "general_results", None):
                     advice = []
                     for rank, gr in enumerate(self.trainer.general_results):
@@ -2016,22 +2091,46 @@ class Engine:
                         advice.append(entry)
                         if len(advice) >= 6:
                             break
+                    if min_ukeire > 0 and not advice and self.trainer.general_results:
+                        for rank, gr in enumerate(self.trainer.general_results[:3]):
+                            u = gr.get("ukeire", 0)
+                            sh = gr.get("shanten", shanten if shanten is not None else 2)
+                            t_str = gr.get("tile_str", str(gr.get("tile", "")))
+                            entry = {
+                                "tile": t_str,
+                                "ukeire": int(u),
+                                "shanten": sh,
+                                "ev": float(10000 - rank * 100 + int(u) * 10),
+                                "reason": f"进张{u}张 · 智能保底",
+                                "ting_tiles": gr.get("ting_tiles", []),
+                                "ting_details": gr.get("ting_details", []),
+                                "is_dingque": False,
+                            }
+                            advice.append(entry)
                 else:
                     items = sorted(raw.items(), key=lambda kv: -kv[1])
+                    filtered_items = items
+                    is_fallback = False
                     if min_ukeire > 0:
-                        items = [(t, u) for (t, u) in items if int(u) >= min_ukeire]
+                        cand = [(t, u) for (t, u) in items if int(u) >= min_ukeire]
+                        if cand:
+                            filtered_items = cand
+                        else:
+                            filtered_items = items[:3]
+                            is_fallback = True
 
                     advice = []
-                    for rank, (t, u) in enumerate(items[:6]):
+                    for rank, (t, u) in enumerate(filtered_items[:6]):
                         t_str = str(t)
+                        fb_tag = " · 智能保底" if is_fallback else ""
                         if shanten == 0:
-                            rsn = f"听牌 · 进张{u}张"
+                            rsn = f"听牌 · 进张{u}张{fb_tag}"
                         elif shanten == 1:
-                            rsn = f"一向听 · 进张{u}张"
+                            rsn = f"一向听 · 进张{u}张{fb_tag}"
                         elif shanten is not None and shanten >= 2:
-                            rsn = f"{shanten}向听 · 进张{u}张"
+                            rsn = f"{shanten}向听 · 进张{u}张{fb_tag}"
                         else:
-                            rsn = f"进张{u}张"
+                            rsn = f"进张{u}张{fb_tag}"
                         entry = {
                             "tile": t_str,
                             "ukeire": int(u),
@@ -4024,6 +4123,11 @@ class Engine:
                 defense_radar = []
                 ting_details = []
 
+            # 牌势感知与军师安抚 (Mood Guard)
+            mood = None
+            if getattr(self, "_advice_cfg", {}).get("mood_guard", True):
+                mood = self._compute_mood_guard(shanten, advice, tenpai_alert, tile_count)
+
             result = {
                 "mode": self.mode,
                 "mode_name": MODES.get(self.mode, {}).get("name", self.mode),
@@ -4069,6 +4173,7 @@ class Engine:
                 "ting_details": ting_details,
                 "fast_advice": fast_advice,
                 "big_advice": big_advice,
+                "mood": mood,
                 "hot_tiles": hot_tiles,
                 "dead_tiles": dead_tiles,
                 "opponents_dingque": opponent_dingque_suits,

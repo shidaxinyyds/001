@@ -77,7 +77,7 @@ class _DebugPageState extends State<DebugPage> {
     ));
   }
 
-  /// 好牌机率选择面板。
+  /// 好牌期望策略选择面板。
   ///
   /// 防坑要点（之前会触发 "BOTTOM OVERFLOWED BY 101 PIXELS"）：
   /// 1. `isScrollControlled: true` —— 让面板高度可突破默认 50% 屏幕约束。
@@ -102,28 +102,53 @@ class _DebugPageState extends State<DebugPage> {
               children: [
                 const Padding(
                   padding: EdgeInsets.symmetric(vertical: 14),
-                  child: Text('好牌机率',
+                  child: Text('好牌期望策略 (进张偏好)',
                       style: TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.w600,
                           color: _textMain)),
                 ),
+                Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: AppTokens.brand.withAlpha(20),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: AppTokens.brand.withAlpha(60), width: 0.8),
+                  ),
+                  child: const Row(
+                    children: [
+                      Icon(Icons.shield_outlined, color: AppTokens.brand, size: 16),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          '智能保底机制已激活：若残局活牌不足所设门槛，系统自动保底推送当前最优打法，绝不空白。',
+                          style: TextStyle(color: AppTokens.brand, fontSize: 11.5, height: 1.3),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 6),
                 ...DebugConfig.rates.map((r) => ListTile(
-                      title: Text('$r%',
+                      title: Text('$r% · ${DebugConfig.rateStrategyName(r)}',
                           style: const TextStyle(
-                              color: _textMain, fontSize: 15)),
-                      subtitle: Text('进张 ≥ ${(r ~/ 10).clamp(1, 9)} 张',
-                          style: const TextStyle(
-                              color: _textSub, fontSize: 12)),
+                              color: _textMain, fontSize: 14.5, fontWeight: FontWeight.w600)),
+                      subtitle: Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(DebugConfig.rateStrategyDesc(r),
+                            style: const TextStyle(
+                                color: _textSub, fontSize: 11.5)),
+                      ),
                       trailing: r == _cfg.rate
-                          ? const Icon(Icons.check, color: _kAccent)
+                          ? const Icon(Icons.check_circle_rounded, color: _kAccent)
                           : null,
                       onTap: () {
                         Navigator.of(ctx).pop();
                         _update(_cfg.copyWith(rate: r));
                       },
                     )),
-                const SizedBox(height: 8),
+                const SizedBox(height: 12),
               ],
             ),
           ),
@@ -184,6 +209,13 @@ class _DebugPageState extends State<DebugPage> {
                       _update(_cfg.copyWith(showAdvice: v)),
                 ),
                 _rateRow(),
+                _switchRow(
+                  title: '牌势感知与军师安抚',
+                  desc: '根据起手向听与进张面实时研判顺逆风局势。逆风时自动强化'
+                      '防点炮优先级并给予温和安抚，防上头保分',
+                  value: _cfg.moodGuard,
+                  onChanged: (v) => _update(_cfg.copyWith(moodGuard: v)),
+                ),
               ],
             ),
             const SizedBox(height: 16),
@@ -298,13 +330,28 @@ class _DebugPageState extends State<DebugPage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('好牌机率',
-                        style:
-                            TextStyle(fontSize: 15, color: _textMain)),
+                    Row(
+                      children: [
+                        const Text('好牌期望策略',
+                            style:
+                                TextStyle(fontSize: 15, color: _textMain, fontWeight: FontWeight.w500)),
+                        const SizedBox(width: 6),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: _kAccent.withAlpha(25),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            DebugConfig.rateStrategyName(_cfg.rate),
+                            style: const TextStyle(color: _kAccent, fontSize: 10, fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                      ],
+                    ),
                     const SizedBox(height: 4),
                     Text(
-                        '只推荐进张数 ≥ ${_cfg.minUkeire} 张的打法，'
-                        '档位越高推荐越少越精',
+                        '按全场活牌过滤打法（当前：进张 ≥ ${_cfg.minUkeire} 张）。档位越高推荐越精，智能保底绝不落空',
                         style: const TextStyle(
                             fontSize: 11, color: _textSub, height: 1.35)),
                   ],
