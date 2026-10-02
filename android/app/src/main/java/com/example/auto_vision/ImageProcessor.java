@@ -224,8 +224,11 @@ public class ImageProcessor {
             if (pendingMode != null) {
                 engine.callAttr("set_mode", pendingMode);
             }
+            if (pendingPlatform != null) {
+                engine.callAttr("set_platform", pendingPlatform);
+            }
         } catch (Throwable t) {
-            TimedLog.e(TAG, "配置目录/模式推入失败（不影响基础运行）: " + t);
+            TimedLog.e(TAG, "配置目录/模式/平台推入失败（不影响基础运行）: " + t);
         }
         // 牌河采集目录推给引擎（仅在配置了「牌河采集」时引擎才会真正写盘）。
         // 引擎用普通文件 IO 写应用私有外部目录，无需存储权限；adb pull 可取回。
@@ -243,6 +246,7 @@ public class ImageProcessor {
     }
 
     private volatile String pendingMode = null;
+    private volatile String pendingPlatform = null;
 
     public void setMode(String mode) {
         if (mode == null || mode.trim().isEmpty()) return;
@@ -254,6 +258,20 @@ public class ImageProcessor {
                 TimedLog.i(TAG, "setMode 即时推送到 Python 引擎: " + m);
             } catch (Throwable t) {
                 TimedLog.e(TAG, "setMode 推送失败（引擎将经文件轮询兜底读到新玩法）: " + t);
+            }
+        }
+    }
+
+    public void setPlatform(String platform) {
+        if (platform == null || platform.trim().isEmpty()) return;
+        String p = platform.trim().toLowerCase();
+        pendingPlatform = p;
+        if (engine != null) {
+            try {
+                engine.callAttr("set_platform", p);
+                TimedLog.i(TAG, "setPlatform 即时推送到 Python 引擎: " + p);
+            } catch (Throwable t) {
+                TimedLog.e(TAG, "setPlatform 推送失败（引擎将经文件轮询兜底读到新平台）: " + t);
             }
         }
     }

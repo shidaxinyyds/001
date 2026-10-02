@@ -44,6 +44,19 @@ from modes import (
     get_analyzer,
 )
 
+from platforms import (
+    load_platform,
+    get_platform,
+    get_hand_roi,
+    get_river_zones,
+    get_supported_modes,
+    set_platform_explicit,
+    PLATFORMS,
+    DEFAULT_PLATFORM,
+)
+from knowledge_base import KnowledgeBase
+
+
 # 一局中的合法手牌张数：含摸牌、打牌与吃碰杠副露全合法张数
 VALID_HAND_SIZES = (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1)
 
@@ -994,7 +1007,7 @@ def _classify_tile_fast(detector, tile_crop, avail, pref_rots, cache):
     return result
 
 
-def detect_river_discards(image: np.ndarray, detector, mode: str = "4p", hand_row=None) -> List[Tuple[str, str]]:
+def detect_river_discards(image: np.ndarray, detector, mode: str = "4p", hand_row=None, platform_key: str = "tencent") -> List[Tuple[str, str]]:
     """高精度牌桌弃牌检测：严格排除中央骰子盒、倒计时、房间名及头像，
     支持多牌相连自适应切片与多角度归一化，精准提取全场四方牌河弃牌。
     返回 (牌面 mpsz, 分区名) 列表，分区名 ∈ {bottom,top,left,right}。"""
@@ -1013,13 +1026,20 @@ def detect_river_discards(image: np.ndarray, detector, mode: str = "4p", hand_ro
             except Exception:
                 pass
 
-        # 四方牌河扫描区（避开中央指南针/骰子盒与外围UI）：
-        zones = [
-            ('bottom', int(iw * 0.30), int(ih * 0.58), int(iw * 0.70), int(ih * 0.74)),
-            ('top', int(iw * 0.30), int(ih * 0.16), int(iw * 0.70), int(ih * 0.38)),
-            ('left', int(iw * 0.20), int(ih * 0.28), int(iw * 0.42), int(ih * 0.64)),
-            ('right', int(iw * 0.58), int(ih * 0.28), int(iw * 0.80), int(ih * 0.64)),
-        ]
+        # 四方牌河扫描区（避开中央指南针/骰子盒与外围UI，动态适配所选平台）：
+        try:
+            raw_p_zones = get_river_zones(platform_key)
+            zones = [
+                (z[0], int(iw * z[1]), int(ih * z[2]), int(iw * z[3]), int(ih * z[4]))
+                for z in raw_p_zones
+            ]
+        except Exception:
+            zones = [
+                ('bottom', int(iw * 0.30), int(ih * 0.58), int(iw * 0.70), int(ih * 0.74)),
+                ('top', int(iw * 0.30), int(ih * 0.16), int(iw * 0.70), int(ih * 0.38)),
+                ('left', int(iw * 0.20), int(ih * 0.28), int(iw * 0.42), int(ih * 0.64)),
+                ('right', int(iw * 0.58), int(ih * 0.28), int(iw * 0.80), int(ih * 0.64)),
+            ]
 
         for zname, x1, y1, x2, y2 in zones:
             crop = image[y1:y2, x1:x2]
@@ -1224,6 +1244,11 @@ class Engine:
         # 当前模式（process() 每帧 reload，对比是否变了）
         self.mode: str = DEFAULT_MODE
         self._prev_mode: str = ""
+        # 游戏平台预设管理（腾讯、途游、微乐、JJ、通用）
+        self.platform: str = load_platform()
+        self._prev_platform: str = ""
+        self._last_doctrine: str = ""
+        self._last_mood_state: str = "steady"
         # 给主界面"知道什么时候画面没动"的提示用
         self._consecutive_skips: int = 0
         # 本帧帧差（在 process 每帧重算，供跳帧决策与分阶段诊断读取）
@@ -1590,10 +1615,10 @@ class Engine:
         self._river_future = None
 
     @staticmethod
-    def _run_bg_river_and_melds(image, detector, mode, hand_row):
+    def _run_bg_river_and_melds(image, detector, mode, hand_row, platform_key="tencent"):
         """后台异步执行的牌河与副露全图检测，将2~3秒阻塞完全移出主识别流水线。"""
         try:
-            r_entries = detect_river_discards(image, detector, mode=mode, hand_row=hand_row)
+            r_entries = detect_river_discards(image, detector, mode=mode, hand_row=hand_row, platform_key=platform_key)
         except Exception:
             r_entries = []
         try:
@@ -1601,6 +1626,17 @@ class Engine:
         except Exception:
             m_entries = []
         return r_entries, m_entries
+
+    def set_platform(self, platform_key: str) -> None:
+        """显式设置当前游戏平台预设（支持腾讯、途游、微乐、JJ、通用）。"""
+        set_platform_explicit(platform_key)
+        self.platform = platform_key
+        self._tile_voter.reset()
+        self._hand_stab.reset()
+        self._last_hand_y = None
+        self._frame_skipper = _FrameSkipper()
+        self._cached_rows = None
+        self._prev_platform = self.platform
 
     def reset_match(self) -> None:
         """用户或外部显式请求「新对局重置」：瞬间清空牌池、手牌记忆，108张活牌满血恢复。"""
@@ -2188,6 +2224,31 @@ class Engine:
                         "safe" if cnt >= 3 else ("risky" if cnt == 0 else "mid")
                     )
 
+        # 调用国手战术知识库，注入国手心法批注与战术加权调优
+        if advice:
+            try:
+                h_counts = [0] * 34
+                for t_obj in hand:
+                    t_idx = mpsz_to_tile34_index(str(t_obj))
+                    if 0 <= t_idx < 34:
+                        h_counts[t_idx] += 1
+                d_counts = disc_counts if disc_counts is not None else [0] * 34
+                m_counts = meld_counts if meld_counts is not None else [0] * 34
+                mood_st = getattr(self, "_last_mood_state", "steady")
+                kb_res = KnowledgeBase.evaluate_tactics(
+                    hand_counts=h_counts,
+                    disc_counts=d_counts,
+                    meld_counts=m_counts,
+                    mode=self.mode,
+                    shanten=shanten if shanten is not None else 2,
+                    advice_list=advice,
+                    danger_flow=None,
+                    mood_state=mood_st,
+                )
+                self._last_doctrine = kb_res.get("doctrine", "")
+            except Exception:
+                pass
+
         self._advice_key = key
         self._advice = advice
         return shanten, advice
@@ -2324,6 +2385,10 @@ class Engine:
         # 复用但标记一下"这一帧没真的识别"
         data["status"] = data.get("status") or "ok"
         data["frame_skipped"] = True
+        data["platform"] = getattr(self, "platform", "tencent")
+        data["platform_name"] = get_platform(getattr(self, "platform", "tencent")).get("name", "腾讯欢乐麻将")
+        if getattr(self, "_last_doctrine", ""):
+            data["knowledge_doctrine"] = self._last_doctrine
         return EngineResult(
             image=_make_preview(image),
             result=json.dumps(data),
@@ -2907,6 +2972,9 @@ class Engine:
                         result=json.dumps({
                             "mode": self.mode,
                             "mode_name": MODES.get(self.mode, {}).get("name", self.mode),
+                            "platform": self.platform,
+                            "platform_name": get_platform(self.platform).get("name", self.platform),
+                            "knowledge_doctrine": "【待机推演】等待牌局开始…",
                             "dingque": None,
                             "dingque_suit": None,
                             "hand": "",
@@ -2941,18 +3009,18 @@ class Engine:
             # 全图（方向归一后）留作预览与定缺用
             full_for_preview = image
 
-            # ===== 用户 ROI 裁剪 =====
-            # 只识别 [top,bottom] 纵向比例带内的画面。默认 None = 整屏。
-            # 切片后显式 .copy() 成 contiguous 数组：OpenCV 某些版本对
-            # 非连续（被父数组 stride 影响的）视图做运算会触发 C 层崩溃。
+            # ===== 用户 ROI / 平台预设专属 ROI 裁剪 =====
+            # 优先使用用户手动拖拽指定的 ROI；若未拖拽（None），则自适应套用当前平台专属 hand_roi
             try:
-                if self._roi is not None:
-                    ih, _ = image.shape[:2]
-                    y0 = max(0, min(ih, int(self._roi[0] * ih)))
-                    y1 = max(y0, min(ih, int(self._roi[1] * ih)))
-                    if y1 - y0 >= MIN_ROI_HEIGHT:
-                        image = np.ascontiguousarray(image[y0:y1, :])
-                    # 否则太窄，忽略 ROI，整屏识别
+                effective_roi = self._roi
+                if effective_roi is None:
+                    p_roi = get_hand_roi(self.platform)
+                    effective_roi = (p_roi[0], p_roi[1])
+                ih, _ = image.shape[:2]
+                y0 = max(0, min(ih, int(effective_roi[0] * ih)))
+                y1 = max(y0, min(ih, int(effective_roi[1] * ih)))
+                if y1 - y0 >= MIN_ROI_HEIGHT:
+                    image = np.ascontiguousarray(image[y0:y1, :])
             except Exception:
                 # ROI 切片异常（坏比例/坏尺寸）不阻塞主流程，回退整屏识别
                 pass
@@ -2989,25 +3057,27 @@ class Engine:
             if self._warmup_left <= 0:
                 self._motion_guard.is_spike(diff)
 
-            # ===== 玩法切换硬重置 =====
-            # 模式变了 → 投票窗口 / 行锁 / 缓存全部失效，必须清空重建。
+            # ===== 玩法与平台切换硬重置 =====
+            # 模式或平台变了 → 投票窗口 / 行锁 / 缓存全部失效，必须清空重建。
             self.mode = load_mode()
+            self.platform = load_platform()
             # 出牌建议配置每帧 reload（与 load_mode 同一时机，文件极小，开销可忽略）：
             # "显示出牌建议" 与 "好牌机率(进张下限)" 由调试页经 Java 写入。
             # 注意：改动 min_ukeire 会让 build_advice 的缓存键变化 → 自动重算。
             self._advice_cfg = load_advice_config()
-            if self.mode != self._prev_mode:
+            if self.mode != self._prev_mode or self.platform != self._prev_platform:
                 self._tile_voter.reset()
                 self._hand_stab.reset()
                 self._last_hand_y = None
                 self._stable_hand_mpsz = ""
                 self._stable_hand_count = 0
                 self._advice_key = None
-                self._frame_skipper = _FrameSkipper()  # 旧缓存与新玩法无关
+                self._frame_skipper = _FrameSkipper()  # 旧缓存与新玩法/新平台无关
                 # 玩法的合法手牌张数/可用牌集合都变了，旧 trainer 里的
                 # 历史手牌会让 diff 判定全乱，必须重建（下一帧自动建立）。
                 self.trainer = None
                 self._prev_mode = self.mode
+                self._prev_platform = self.platform
             avail = available_set(self.mode)
             hsizes = hand_sizes(self.mode)
 
@@ -3358,10 +3428,10 @@ class Engine:
                 cur_rf = getattr(self, "_river_future", None)
                 if (cur_rf is None or cur_rf.done()) and hand_row and (len(hand_row) >= 4 or len(hand_mpsz) >= 4):
                     try:
-                        img_bg = image.copy()
+                        img_bg = full_for_preview.copy()
                         h_row_bg = list(hand_row) if hand_row else None
                         self._river_future = self._river_executor.submit(
-                            self._run_bg_river_and_melds, img_bg, self._detector, self.mode, h_row_bg
+                            self._run_bg_river_and_melds, img_bg, self._detector, self.mode, h_row_bg, self.platform
                         )
                     except Exception:
                         pass
@@ -4192,9 +4262,31 @@ class Engine:
             if getattr(self, "_advice_cfg", {}).get("mood_guard", True):
                 mood = self._compute_mood_guard(shanten, advice, tenpai_alert, tile_count)
 
+            # 战术知识库终极校准（融合防守雷达与最新局势牌势研判）
+            if advice and hand_mpsz and tile_count > 0:
+                try:
+                    mood_st = mood.get("state", "steady") if mood else "steady"
+                    self._last_mood_state = mood_st
+                    kb_res = KnowledgeBase.evaluate_tactics(
+                        hand_counts=hand_counts_final,
+                        disc_counts=disc_counts_out,
+                        meld_counts=meld_counts_out,
+                        mode=self.mode,
+                        shanten=shanten if shanten is not None else 2,
+                        advice_list=advice,
+                        danger_flow=top_danger_flow,
+                        mood_state=mood_st,
+                    )
+                    self._last_doctrine = kb_res.get("doctrine", "")
+                except Exception:
+                    pass
+
             result = {
                 "mode": self.mode,
                 "mode_name": MODES.get(self.mode, {}).get("name", self.mode),
+                "platform": self.platform,
+                "platform_name": get_platform(self.platform).get("name", self.platform),
+                "knowledge_doctrine": getattr(self, "_last_doctrine", ""),
                 "dingque": dingque_name,
                 "dingque_suit": dingque_suit,
                 "dingque_phase": is_dq_phase,

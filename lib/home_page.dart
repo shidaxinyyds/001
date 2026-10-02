@@ -8,6 +8,8 @@ import 'package:auto_vision/channel.dart';
 import 'package:auto_vision/debug_page.dart';
 import 'package:auto_vision/device_info_card.dart';
 import 'package:auto_vision/mode_store.dart';
+import 'package:auto_vision/platform_store.dart';
+import 'package:auto_vision/knowledge_page.dart';
 import 'package:auto_vision/theme/app_tokens.dart';
 
 /// 配色统一读设计 token（明亮现代商务）。
@@ -36,6 +38,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String _selectedCategory = '川麻血流';
   bool _modeReady = true;
 
+  // 当前选中的游戏平台预设（腾讯、途游、微乐、JJ、通用）
+  String? selectedPlatform = GamePlatform.defaultPlatform;
+  bool _platformReady = true;
+
   // 悬浮窗→主 App 的回传订阅。必须持有并在 dispose 取消：旧实现只 listen
   // 不 cancel，页面每次被重建都叠加一个监听/或撞单订阅流报错，状态回传
   // 链路越用越卡甚至损坏。
@@ -45,6 +51,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+
+    // 拉一次当前游戏平台预设
+    GamePlatform.current().then((p) {
+      if (!mounted) return;
+      setState(() {
+        selectedPlatform = p;
+        _platformReady = true;
+      });
+    });
 
     // 拉一次当前玩法（来自 Java 写的共享文件，Python 引擎也读这个文件）
     GameMode.current().then((m) {
@@ -325,6 +340,27 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     ));
   }
 
+  Future<void> _selectPlatform(String platform) async {
+    if (platform == selectedPlatform) return;
+    final prev = selectedPlatform;
+    setState(() => selectedPlatform = platform);
+    final ok = await GamePlatform.set(platform);
+    if (!ok && mounted) {
+      if (selectedPlatform != platform) return;
+      setState(() => selectedPlatform = prev);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('切换到 ${GamePlatform.label(platform)} 失败，请重试'),
+      ));
+    } else if (mounted) {
+      final pInfo = GamePlatform.info(platform);
+      if (pInfo != null && selectedMode != null) {
+        if (!pInfo.supportedModes.contains(selectedMode)) {
+          _selectMode(pInfo.defaultMode);
+        }
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final String mode = selectedMode ?? '';
@@ -398,6 +434,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         index: _tab,
         children: [
           _buildHomeBody(mode),
+          const KnowledgePage(),
           const DebugPage(),
         ],
       ),
@@ -432,6 +469,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             BottomNavigationBarItem(
               icon: Padding(
                 padding: EdgeInsets.only(bottom: 2),
+                child: Icon(Icons.auto_stories_outlined),
+              ),
+              activeIcon: Padding(
+                padding: EdgeInsets.only(bottom: 2),
+                child: Icon(Icons.auto_stories_rounded),
+              ),
+              label: '知识库',
+            ),
+            BottomNavigationBarItem(
+              icon: Padding(
+                padding: EdgeInsets.only(bottom: 2),
                 child: Icon(Icons.tune_outlined),
               ),
               activeIcon: Padding(
@@ -459,6 +507,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            // 游戏平台预设快速切换栏
+            _buildPlatformSelector(),
+            // 战术知识库快捷导引条
+            _buildKnowledgeBanner(),
             // 分类切换栏
             _buildCategorySelector(),
             const SizedBox(height: AppTokens.s12),
@@ -529,6 +581,186 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } finally {
       if (mounted) setState(() => _overlayBusy = false);
     }
+  }
+
+  // 游戏平台预设快速切换栏
+  Widget _buildPlatformSelector() {
+    final curPlatform = selectedPlatform ?? GamePlatform.defaultPlatform;
+    final platInfo = GamePlatform.info(curPlatform);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: AppTokens.s12),
+      padding: const EdgeInsets.all(AppTokens.s12),
+      decoration: BoxDecoration(
+        color: AppTokens.surface,
+        borderRadius: BorderRadius.circular(AppTokens.r12),
+        border: Border.all(color: AppTokens.border, width: 0.8),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x06000000),
+            blurRadius: 4,
+            offset: Offset(0, 1.5),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.devices_rounded, size: 16, color: AppTokens.brand),
+              const SizedBox(width: 6),
+              const Text(
+                '游戏平台预设',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.bold,
+                  color: AppTokens.ink,
+                ),
+              ),
+              const Spacer(),
+              if (platInfo != null)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                  decoration: BoxDecoration(
+                    color: AppTokens.brandContainer,
+                    borderRadius: BorderRadius.circular(AppTokens.r8),
+                  ),
+                  child: Text(
+                    platInfo.badge,
+                    style: const TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                      color: AppTokens.brandDark,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: GamePlatform.allPlatforms.map((p) {
+                final bool sel = p.key == curPlatform;
+                return Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: GestureDetector(
+                    onTap: () => _selectPlatform(p.key),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: sel ? AppTokens.brandContainer : AppTokens.pillBg,
+                        borderRadius: BorderRadius.circular(AppTokens.r8),
+                        border: Border.all(
+                          color: sel ? AppTokens.brand : AppTokens.border,
+                          width: sel ? 1.0 : 0.6,
+                        ),
+                      ),
+                      child: Text(
+                        p.name,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: sel ? FontWeight.bold : FontWeight.w500,
+                          color: sel ? AppTokens.brandDark : AppTokens.ink2,
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
+          if (platInfo != null) ...[
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+              decoration: BoxDecoration(
+                color: AppTokens.pillBg,
+                borderRadius: BorderRadius.circular(AppTokens.r8),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.crop_free_rounded, size: 12, color: AppTokens.muted),
+                  const SizedBox(width: 5),
+                  Expanded(
+                    child: Text(
+                      platInfo.subtitle,
+                      style: const TextStyle(
+                        fontSize: 10,
+                        color: AppTokens.muted,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  // 战术知识库导引条
+  Widget _buildKnowledgeBanner() {
+    return GestureDetector(
+      onTap: () => setState(() => _tab = 1),
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: AppTokens.s12),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            colors: [Color(0xFF0F766E), Color(0xFF0D9488)],
+          ),
+          borderRadius: BorderRadius.circular(AppTokens.r12),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x200D9488),
+              blurRadius: 6,
+              offset: Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(
+                color: Colors.white.withAlpha(40),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.auto_stories_rounded, color: Colors.white, size: 16),
+            ),
+            const SizedBox(width: 9),
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '战术知识库系统 · 国手心法研习',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  SizedBox(height: 1),
+                  Text(
+                    '金三银七 · 现物避炮 · 筋牌防线 · 10大玩法番型',
+                    style: TextStyle(
+                      color: Color(0xFFCCFBF1),
+                      fontSize: 9.5,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Icon(Icons.arrow_forward_ios_rounded, color: Colors.white70, size: 12),
+          ],
+        ),
+      ),
+    );
   }
 
   // 分类切换栏（M3 风分段器，选中胶囊平滑滑动）

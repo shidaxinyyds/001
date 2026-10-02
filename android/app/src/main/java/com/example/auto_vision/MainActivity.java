@@ -110,6 +110,22 @@ public class MainActivity extends FlutterActivity {
           result.success(readModeFile());
         };
       }
+      if (call.method.equals("setPlatform")) {
+        String platform = call.argument("platform");
+        toRun = () -> {
+          int rc = writePlatformFile(platform);
+          ImageProcessor p = processor;
+          if (p != null) {
+            p.setPlatform(platform);
+          }
+          result.success(rc);
+        };
+      }
+      if (call.method.equals("getPlatform")) {
+        toRun = () -> {
+          result.success(readPlatformFile());
+        };
+      }
       if (call.method.equals("setRoi")) {
         // 同步即时生效：悬浮窗拖动"识别框"时实时对准手牌区域。
         // 参数缺失也安全兜底，绝不抛异常（否则会冒泡到 UI 线程致闪退）。
@@ -563,6 +579,62 @@ public class MainActivity extends FlutterActivity {
       return rc;
     } catch (Throwable t) {
       TimedLog.e(TAG, "writeModeFile failed: " + t);
+      return -4;
+    }
+  }
+
+  private String readPlatformFile() {
+    try {
+      File dir = getApplicationContext().getExternalFilesDir(null);
+      if (dir == null) return "tencent";
+      File f = new File(dir, "mahjong_platform.json");
+      if (!f.exists() || f.length() == 0 || f.length() > 256) return "tencent";
+      byte[] buf = new byte[(int) f.length()];
+      try (java.io.FileInputStream in = new java.io.FileInputStream(f)) {
+        int n = in.read(buf);
+        if (n <= 0) return "tencent";
+      }
+      String s = new String(buf, 0, buf.length, "UTF-8").trim();
+      java.util.regex.Matcher mc = java.util.regex.Pattern
+          .compile("\"platform\"\\s*:\\s*\"([a-z0-9_]+)\"").matcher(s);
+      return mc.find() ? mc.group(1) : "tencent";
+    } catch (Throwable t) {
+      TimedLog.e(TAG, "readPlatformFile failed: " + t);
+      return "tencent";
+    }
+  }
+
+  private int writePlatformFile(String platform) {
+    if (platform == null || platform.trim().isEmpty()) return -1;
+    String p = platform.trim().toLowerCase();
+    if (!Pattern.matches("[a-z0-9_]+", p)) return -2;
+    int rc = -3;
+    try {
+      byte[] body = ("{\"platform\":\"" + p + "\"}").getBytes("UTF-8");
+      File extDir = getApplicationContext().getExternalFilesDir(null);
+      if (extDir != null) {
+        if (!extDir.exists()) extDir.mkdirs();
+        File f = new File(extDir, "mahjong_platform.json");
+        try (FileOutputStream out = new FileOutputStream(f, false)) {
+          out.write(body);
+          out.flush();
+        }
+        TimedLog.i(TAG, "writePlatformFile ext: " + p + " -> " + f.getAbsolutePath());
+        rc = 0;
+      }
+      File intDir = getApplicationContext().getFilesDir();
+      if (intDir != null) {
+        if (!intDir.exists()) intDir.mkdirs();
+        File f2 = new File(intDir, "mahjong_platform.json");
+        try (FileOutputStream out = new FileOutputStream(f2, false)) {
+          out.write(body);
+          out.flush();
+        }
+        rc = 0;
+      }
+      return rc;
+    } catch (Throwable t) {
+      TimedLog.e(TAG, "writePlatformFile failed: " + t);
       return -4;
     }
   }

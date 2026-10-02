@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:auto_vision/mode_store.dart';
+import 'package:auto_vision/platform_store.dart';
 import 'package:auto_vision/channel.dart';
 import 'package:auto_vision/license/license_service.dart';
 import 'package:auto_vision/license/license_status.dart';
@@ -1157,6 +1158,47 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                   ),
                 ),
               ],
+            ),
+            const SizedBox(height: 5),
+            // 游戏平台快速预设选择
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: GamePlatform.allPlatforms.map((p) {
+                  final curPlat = (result?['platform'] as String?) ?? 'tencent';
+                  final bool isPlat = curPlat == p.key;
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 4),
+                    child: GestureDetector(
+                      onTap: () {
+                        GamePlatform.set(p.key);
+                        setState(() {});
+                      },
+                      behavior: HitTestBehavior.opaque,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: isPlat ? const Color(0xFF00897B).withAlpha(160) : Colors.white.withAlpha(15),
+                          borderRadius: BorderRadius.circular(4),
+                          border: Border.all(
+                            color: isPlat ? const Color(0xFF80CBC4) : Colors.white24,
+                            width: isPlat ? 1.0 : 0.5,
+                          ),
+                        ),
+                        child: Text(
+                          p.name,
+                          style: TextStyle(
+                            color: isPlat ? const Color(0xFFE0F2F1) : Colors.white70,
+                            fontSize: 8.5,
+                            fontWeight: isPlat ? FontWeight.bold : FontWeight.normal,
+                            decoration: TextDecoration.none,
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                }).toList(),
+              ),
             ),
             const SizedBox(height: 5),
             Expanded(
@@ -2392,6 +2434,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         ],
       ),
     );
+  }
+
   /// 全场实时胡牌胜率与期望收益雷达 (Win Equity & EV Gauge)
   Widget _buildWinEquityGaugeWidget(Map<String, dynamic> evGauge, double? winEquity) {
     final int winRate = (evGauge['win_rate'] as num? ?? ((winEquity ?? 0.5) * 100)).toInt();
@@ -2579,6 +2623,71 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           fontWeight: FontWeight.bold,
           decoration: TextDecoration.none,
         ),
+      ),
+    );
+  }
+
+  /// 战术知识库局势总纲研判卡片
+  Widget _buildKnowledgeDoctrineWidget(String doctrine) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0x384A148C), Color(0x22311B92)],
+        ),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: const Color(0x66B388FF), width: 0.7),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.auto_stories_rounded, color: Color(0xFFD1C4E9), size: 12),
+          const SizedBox(width: 5),
+          Expanded(
+            child: Text(
+              doctrine,
+              style: const TextStyle(
+                color: Color(0xFFEDE7F6),
+                fontSize: 8.5,
+                fontWeight: FontWeight.w600,
+                decoration: TextDecoration.none,
+              ),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 国手心法批注徽章
+  Widget _buildTacticalTipBadge(String tip) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF57F17).withAlpha(35),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: const Color(0xFFFFD54F).withAlpha(120), width: 0.6),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.stars_rounded, color: Color(0xFFFFD54F), size: 10),
+          const SizedBox(width: 3.5),
+          Flexible(
+            child: Text(
+              tip,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Color(0xFFFFF59D),
+                fontSize: 8.5,
+                fontWeight: FontWeight.w600,
+                decoration: TextDecoration.none,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -3003,6 +3112,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         if (evGaugeWidget != null) evGaugeWidget,
         if (handRangesWidget != null) handRangesWidget,
         if (moodWidget != null) moodWidget,
+        if ((result?['knowledge_doctrine'] as String?)?.isNotEmpty == true)
+          _buildKnowledgeDoctrineWidget(result!['knowledge_doctrine'] as String),
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
           decoration: BoxDecoration(
@@ -3193,6 +3304,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                   ),
                 ),
               ],
+              if (top['tactical_tip'] is String && (top['tactical_tip'] as String).isNotEmpty) ...[
+                const SizedBox(height: 3.5),
+                _buildTacticalTipBadge(top['tactical_tip'] as String),
+              ],
               if (sorted.length > 1) ...[
                 const SizedBox(height: 5),
                 Wrap(
@@ -3251,6 +3366,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                                   ),
                                 ),
                               ),
+                            ],
+                            if (sorted[i]['tactical_tip'] is String && (sorted[i]['tactical_tip'] as String).isNotEmpty) ...[
+                              const SizedBox(width: 2.5),
+                              const Icon(Icons.stars_rounded, color: Color(0xFFFFD54F), size: 9),
                             ],
                           ],
                         ),
@@ -3384,6 +3503,24 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                                     ),
                                   ),
                                   const SizedBox(width: 4),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 3.5, vertical: 1),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFF00897B).withAlpha(160),
+                                      borderRadius: BorderRadius.circular(3),
+                                      border: Border.all(color: const Color(0xFF80CBC4), width: 0.5),
+                                    ),
+                                    child: Text(
+                                      GamePlatform.shortBadge((result?['platform'] as String?) ?? 'tencent'),
+                                      style: const TextStyle(
+                                        color: Color(0xFFE0F2F1),
+                                        fontSize: 7.5,
+                                        fontWeight: FontWeight.bold,
+                                        decoration: TextDecoration.none,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 3.5),
                                   Container(
                                     padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
                                     decoration: BoxDecoration(
