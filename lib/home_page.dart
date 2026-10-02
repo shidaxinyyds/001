@@ -495,7 +495,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Widget _buildHomeBody(String mode) {
-    final bool canStart = !isProcessing && _modeReady && mode.isNotEmpty;
+    final bool canStart = !isProcessing && _modeReady && _platformReady && mode.isNotEmpty;
     final categoryModes = GameMode.allModes
         .where((m) => m.category == _selectedCategory)
         .toList();

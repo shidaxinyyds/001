@@ -7,7 +7,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:auto_vision/mode_store.dart';
-import 'package:auto_vision/platform_store.dart';
 import 'package:auto_vision/channel.dart';
 import 'package:auto_vision/license/license_service.dart';
 import 'package:auto_vision/license/license_status.dart';

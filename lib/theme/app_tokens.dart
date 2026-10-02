@@ -44,11 +44,13 @@ class AppTokens {
   static const double r8 = 8;
   static const double r10 = 10;
   static const double r12 = 12;
+  static const double r14 = 14;
   static const double r16 = 16;
   static const double r20 = 20;
   static const double rPill = 999;
 
   static final BorderRadius radius12 = BorderRadius.circular(r12);
+  static final BorderRadius radius14 = BorderRadius.circular(r14);
   static final BorderRadius radius16 = BorderRadius.circular(r16);
   static final BorderRadius radius20 = BorderRadius.circular(r20);
 
@@ -56,6 +58,7 @@ class AppTokens {
   static const double s4 = 4;
   static const double s8 = 8;
   static const double s12 = 12;
+  static const double s14 = 14;
   static const double s16 = 16;
   static const double s20 = 20;
   static const double s24 = 24;
