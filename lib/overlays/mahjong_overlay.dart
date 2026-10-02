@@ -64,23 +64,49 @@ class TileChip extends StatelessWidget {
                 ? 's'
                 : 'z';
     final Color charColor;
-    if (suit == 'm' || suit == 'p') {
-      // 万/筒：蓝绿色（中国主流牌面配色）
-      charColor = const Color(0xFF1E6B7A);
+    if (suit == 'm') {
+      // 万：经典传统朱砂红（真实骨牌质感）
+      charColor = const Color(0xFFC62828);
     } else if (suit == 's') {
-      // 条：草绿色
+      // 条：纯正竹叶绿/翡翠绿
       charColor = const Color(0xFF2E7D32);
+    } else if (suit == 'p') {
+      // 筒：传统深宝蓝/青黛
+      charColor = const Color(0xFF1565C0);
     } else {
-      // 字牌：所有字牌统一深灰
-      charColor = const Color(0xFF202124);
+      // 字牌：中为正红，发为青翠，其余为深墨黑
+      if (tile == '7z') {
+        charColor = const Color(0xFFC62828);
+      } else if (tile == '6z') {
+        charColor = const Color(0xFF2E7D32);
+      } else {
+        charColor = const Color(0xFF263238);
+      }
     }
 
-    // 绝张的牌面底色换成中性灰，并加一道青绿描边把它从普通牌里顶出来 —— 一眼可见。
-    final Color tileBg = dead ? const Color(0xFFBDBDBD) : const Color(0xFFF7F3E8);
+    // 牌面渐变与边框：模拟真实高档象牙白/亚克力麻将牌微曲面与边缘高光
+    final Gradient tileGradient = dead
+        ? const LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0xFFD8D4CD), Color(0xFFC4C0B7)],
+          )
+        : (isDrawing
+            ? const LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [Color(0xFFFFFDF5), Color(0xFFFFF3D6)],
+              )
+            : const LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [Color(0xFFFCFAF5), Color(0xFFEDE6DA)],
+              ));
+
     final Color tileBorder = isDrawing
-        ? const Color(0xFFFFD54F)
-        : (dead ? const Color(0xFF00695C) : const Color(0xFFB7A98F));
-    final double tileBorderW = (dead || isDrawing) ? 1.2 : 0.6;
+        ? const Color(0xFFFFB300)
+        : (dead ? const Color(0xFF00796B) : const Color(0xFFC8BCA8));
+    final double tileBorderW = (dead || isDrawing) ? 1.2 : 0.7;
 
     // 角标独立透明层：badge 行放在牌面正上方（固定高、透明底），
     // 彻底告别旧版 Positioned(-4,-4) 溢出压住邻牌牌面的遮挡问题。
@@ -130,14 +156,16 @@ class TileChip extends StatelessWidget {
             width: size,
             height: size * 1.18,
             decoration: BoxDecoration(
-              color: tileBg,
-              borderRadius: BorderRadius.circular(3),
+              gradient: tileGradient,
+              borderRadius: BorderRadius.circular(3.5),
               border: Border.all(color: tileBorder, width: tileBorderW),
               boxShadow: [
                 BoxShadow(
-                  color: isDrawing ? const Color(0x66FFD54F) : Colors.black.withAlpha(40),
-                  blurRadius: isDrawing ? 3 : 1,
-                  offset: const Offset(0, 0.5),
+                  color: isDrawing
+                      ? const Color(0x66FFC107)
+                      : Colors.black.withAlpha(55),
+                  blurRadius: isDrawing ? 3.5 : 2,
+                  offset: const Offset(0, 1),
                 ),
               ],
             ),
@@ -148,9 +176,16 @@ class TileChip extends StatelessWidget {
                 cn,
                 style: TextStyle(
                   color: charColor,
-                  fontWeight: FontWeight.w800,
+                  fontWeight: FontWeight.w900,
                   fontSize: size * 0.62,
                   height: 1.0,
+                  shadows: [
+                    Shadow(
+                      color: Colors.white.withAlpha(160),
+                      offset: const Offset(0, 0.5),
+                      blurRadius: 0.5,
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -1301,14 +1336,18 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         height: _kCapsuleH,
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
         decoration: BoxDecoration(
-          color: const Color(0xEE1E232A), // 深色微透磨砂底，不突兀
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xF5181C24), Color(0xF50E1217)],
+          ),
           borderRadius: BorderRadius.circular(19),
-          border: Border.all(color: Colors.white.withAlpha(45), width: 1.0),
-          boxShadow: [
+          border: Border.all(color: const Color(0x38FFFFFF), width: 0.8),
+          boxShadow: const [
             BoxShadow(
-              color: Colors.black.withAlpha(160),
-              blurRadius: 8,
-              offset: const Offset(0, 2),
+              color: Color(0x88000000),
+              blurRadius: 10,
+              offset: Offset(0, 3),
             ),
           ],
         ),
@@ -1320,14 +1359,31 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               _ShantenBadge(shanten: shanten, size: 28)
             else
               const MahjongTileIcon(size: 17),
-            const SizedBox(width: 5),
+            Container(
+              width: 6,
+              height: 6,
+              margin: const EdgeInsets.only(left: 3, right: 4),
+              decoration: BoxDecoration(
+                color: signalLost ? Colors.white24 : const Color(0xFF00E676),
+                shape: BoxShape.circle,
+                boxShadow: signalLost
+                    ? null
+                    : const [
+                        BoxShadow(
+                          color: Color(0x9900E676),
+                          blurRadius: 4,
+                          spreadRadius: 0.5,
+                        ),
+                      ],
+              ),
+            ),
             const Text(
-              '就绪',
+              '雀神',
               style: TextStyle(
-                color: Colors.white,
+                color: Color(0xFFFFF9C4),
                 fontSize: 11,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0.2,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.3,
                 decoration: TextDecoration.none,
               ),
             ),
@@ -1459,20 +1515,20 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                   final Color borderColor;
                   if (cnt == 0) {
                     numColor = Colors.white24;
-                    cellBg = const Color(0xFF181B20);
-                    borderColor = Colors.white10;
+                    cellBg = const Color(0xFF16191E);
+                    borderColor = const Color(0x18FFFFFF);
                   } else if (cnt == 1) {
-                    numColor = const Color(0xFFFFB74D); // 明亮金橙（仅剩1张）
-                    cellBg = const Color(0xFF2D2013);   // 纯正暖深琥珀底
-                    borderColor = const Color(0xFFFF9800);
+                    numColor = const Color(0xFFFFB74D); // 温暖金琥珀（仅剩1张）
+                    cellBg = const Color(0xFF382312);   // 沉稳暖琥珀底
+                    borderColor = const Color(0xFFE65100);
                   } else if (cnt == 2) {
-                    numColor = const Color(0xFF81C784); // 翡翠绿（2张）
-                    cellBg = const Color(0xFF142416);   // 纯正墨绿底
+                    numColor = const Color(0xFF81C784); // 翡翠嫩绿（2张）
+                    cellBg = const Color(0xFF122818);   // 沉稳墨绿底
                     borderColor = const Color(0xFF2E7D32);
                   } else {
-                    numColor = const Color(0xFF00E676); // 活跃热张（3~4张存活，荧光高亮）
-                    cellBg = const Color(0xFF0D331A);
-                    borderColor = const Color(0xFF00E676);
+                    numColor = const Color(0xFF00E676); // 活跃热张（3~4张存活，清晰青绿）
+                    cellBg = const Color(0xFF0C301B);
+                    borderColor = const Color(0xFF00C853);
                   }
 
                   return Container(
@@ -1480,10 +1536,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                     height: 22,
                     decoration: BoxDecoration(
                       color: cellBg,
-                      borderRadius: BorderRadius.circular(3),
+                      borderRadius: BorderRadius.circular(3.5),
                       border: Border.all(
                         color: borderColor,
-                        width: 0.7,
+                        width: 0.6,
                       ),
                     ),
                     child: Column(
@@ -1552,20 +1608,20 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                   final Color borderColor;
                   if (cnt == 0) {
                     numColor = Colors.white24;
-                    cellBg = const Color(0xFF181B20);
-                    borderColor = Colors.white10;
+                    cellBg = const Color(0xFF16191E);
+                    borderColor = const Color(0x18FFFFFF);
                   } else if (cnt == 1) {
                     numColor = const Color(0xFFFFB74D);
-                    cellBg = const Color(0xFF2D2013);
-                    borderColor = const Color(0xFFFF9800);
+                    cellBg = const Color(0xFF382312);
+                    borderColor = const Color(0xFFE65100);
                   } else if (cnt == 2) {
                     numColor = const Color(0xFF81C784);
-                    cellBg = const Color(0xFF142416);
+                    cellBg = const Color(0xFF122818);
                     borderColor = const Color(0xFF2E7D32);
                   } else {
                     numColor = const Color(0xFF00E676);
-                    cellBg = const Color(0xFF0D331A);
-                    borderColor = const Color(0xFF00E676);
+                    cellBg = const Color(0xFF0C301B);
+                    borderColor = const Color(0xFF00C853);
                   }
 
                   return Padding(
@@ -1575,10 +1631,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                       height: 22,
                       decoration: BoxDecoration(
                         color: cellBg,
-                        borderRadius: BorderRadius.circular(3),
+                        borderRadius: BorderRadius.circular(3.5),
                         border: Border.all(
                           color: borderColor,
-                          width: 0.7,
+                          width: 0.6,
                         ),
                       ),
                       child: Column(
@@ -1616,11 +1672,19 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     }
 
     return Container(
-      margin: const EdgeInsets.only(bottom: 4),
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+      margin: const EdgeInsets.only(bottom: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 7.5, vertical: 5.5),
       decoration: BoxDecoration(
-        color: Colors.white.withAlpha(8),
-        borderRadius: BorderRadius.circular(6),
+        color: const Color(0x3D10131A),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.white.withAlpha(22), width: 0.6),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x18000000),
+            blurRadius: 4,
+            offset: Offset(0, 1.5),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1642,11 +1706,20 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                 behavior: HitTestBehavior.opaque,
                 child: Container(
                   margin: const EdgeInsets.only(right: 6),
-                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                   decoration: BoxDecoration(
-                    color: const Color(0xFFE65100).withAlpha(160),
-                    borderRadius: BorderRadius.circular(3),
-                    border: Border.all(color: const Color(0xFFFFB74D), width: 0.6),
+                    gradient: const LinearGradient(
+                      colors: [Color(0xFFE65100), Color(0xFFC62828)],
+                    ),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: const Color(0x80FFB74D), width: 0.6),
+                    boxShadow: const [
+                      BoxShadow(
+                        color: Color(0x30E65100),
+                        blurRadius: 3,
+                        offset: Offset(0, 1),
+                      ),
+                    ],
                   ),
                   child: const Row(
                     mainAxisSize: MainAxisSize.min,
@@ -1698,8 +1771,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                 ],
               ),
             ),
-            buildRow('万', const Color(0xFF1E6B7A), m),
-            buildRow('筒', const Color(0xFF1E6B7A), p),
+            buildRow('万', const Color(0xFFEF5350), m),
+            buildRow('筒', const Color(0xFF42A5F5), p),
             buildRow('条', const Color(0xFF66BB6A), s),
             if (z != null && z.isNotEmpty)
               buildZRow('字', const Color(0xFFB0BEC5), z),
@@ -1794,13 +1867,22 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final suit = swap['suit'] as String? ?? '';
     return Container(
       margin: const EdgeInsets.only(bottom: 5),
-      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       decoration: BoxDecoration(
         gradient: const LinearGradient(
-          colors: [Color(0xFF281547), Color(0xFF4A154B)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xDD281547), Color(0xDD180D2E)],
         ),
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: const Color(0xFFCE93D8), width: 0.8),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFBA68C8), width: 0.8),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x20000000),
+            blurRadius: 4,
+            offset: Offset(0, 1.5),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1820,10 +1902,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               ),
               const Spacer(),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
                 decoration: BoxDecoration(
                   color: Colors.white.withAlpha(20),
                   borderRadius: BorderRadius.circular(3),
+                  border: Border.all(color: Colors.white12, width: 0.5),
                 ),
                 child: Text(
                   '换【$suit】',
@@ -1855,7 +1938,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             style: const TextStyle(
               color: Color(0xFFE1BEE7),
               fontSize: 8.5,
-              height: 1.1,
+              height: 1.15,
               decoration: TextDecoration.none,
             ),
           ),
@@ -1872,14 +1955,27 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
     return Container(
       margin: const EdgeInsets.only(bottom: 5),
-      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       decoration: BoxDecoration(
-        color: isHuazhu ? const Color(0xFF880E4F).withAlpha(190) : const Color(0xFFBF360C).withAlpha(190),
-        borderRadius: BorderRadius.circular(6),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: isHuazhu
+              ? [const Color(0xDD6A0035), const Color(0xDD4A0025)]
+              : [const Color(0xDD8E2500), const Color(0xDD5D1500)],
+        ),
+        borderRadius: BorderRadius.circular(8),
         border: Border.all(
           color: isHuazhu ? const Color(0xFFFF4081) : const Color(0xFFFF6D00),
-          width: 1.0,
+          width: 0.8,
         ),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x20000000),
+            blurRadius: 4,
+            offset: Offset(0, 1.5),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1951,19 +2047,22 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       decoration: BoxDecoration(
         gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
           colors: hasDead
-              ? [const Color(0xFF2A1015), const Color(0xFF3B151E)]
-              : [const Color(0xFF082216), const Color(0xFF0C3824)],
+              ? [const Color(0xEE2D1117), const Color(0xEE1E0B10)]
+              : [const Color(0xEE092618), const Color(0xEE061B11)],
         ),
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(8),
         border: Border.all(
           color: hasDead ? const Color(0xFFFF5252) : const Color(0xFF00E676),
-          width: 0.9,
+          width: 0.8,
         ),
         boxShadow: [
           BoxShadow(
-            color: (hasDead ? Colors.redAccent : Colors.greenAccent).withAlpha(40),
-            blurRadius: 4,
+            color: (hasDead ? Colors.redAccent : Colors.greenAccent).withAlpha(30),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
           ),
         ],
       ),
@@ -2070,11 +2169,22 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   Widget _buildDualStrategyWidget(Map<String, dynamic> fast, Map<String, dynamic> big) {
     return Container(
       margin: const EdgeInsets.only(bottom: 5),
-      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       decoration: BoxDecoration(
-        color: const Color(0xFF151922),
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: const Color(0xFF424242), width: 0.7),
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xDD171B24), Color(0xDD101319)],
+        ),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.white.withAlpha(24), width: 0.7),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x20000000),
+            blurRadius: 4,
+            offset: Offset(0, 1.5),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2253,9 +2363,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
               decoration: BoxDecoration(
-                color: const Color(0x3300BFA5),
-                borderRadius: BorderRadius.circular(6),
-                border: Border.all(color: const Color(0xFF00BFA5), width: 0.8),
+                gradient: const LinearGradient(
+                  colors: [Color(0x3800695C), Color(0x22004D40)],
+                ),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0x6680CBC4), width: 0.8),
               ),
               child: Row(
                 children: [
@@ -2288,9 +2400,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
         decoration: BoxDecoration(
-          color: const Color(0x33FF6F00),
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: const Color(0xFFFF8F00), width: 0.8),
+          gradient: const LinearGradient(
+            colors: [Color(0x38E65100), Color(0x22BF360C)],
+          ),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: const Color(0x66FFB74D), width: 0.8),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -2351,9 +2465,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
         decoration: BoxDecoration(
-          color: const Color(0x33FFB300),
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: const Color(0xFFFFB300), width: 0.8),
+          gradient: const LinearGradient(
+            colors: [Color(0x38F57F17), Color(0x22E65100)],
+          ),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: const Color(0x66FFD54F), width: 0.8),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -2415,20 +2531,20 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         hint = '未检测到有效手牌，正在重新对齐…';
       }
       return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6.5),
         decoration: BoxDecoration(
           color: Colors.white.withAlpha(6),
-          borderRadius: BorderRadius.circular(6),
+          borderRadius: BorderRadius.circular(8),
           border: Border.all(color: Colors.white10, width: 0.5),
         ),
         child: Row(
           children: [
-            const Icon(Icons.tips_and_updates_outlined, color: Colors.white38, size: 13),
-            const SizedBox(width: 5),
+            const Icon(Icons.tips_and_updates_outlined, color: Color(0xFFFFD54F), size: 14),
+            const SizedBox(width: 6),
             Expanded(
               child: Text(
                 hint,
-                style: const TextStyle(color: Colors.white60, fontSize: 9.5),
+                style: const TextStyle(color: Colors.white70, fontSize: 9.5),
               ),
             ),
           ],
@@ -2460,11 +2576,22 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         if (tingRadarWidget != null) tingRadarWidget,
         if (dualStrategyWidget != null) dualStrategyWidget,
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
           decoration: BoxDecoration(
-            color: const Color(0x33004D40), // 墨绿微底
-            borderRadius: BorderRadius.circular(6),
+            gradient: const LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [Color(0x3D004D40), Color(0x2400261E)],
+            ),
+            borderRadius: BorderRadius.circular(8),
             border: Border.all(color: const Color(0x6680CBC4), width: 0.8),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x20000000),
+                blurRadius: 4,
+                offset: Offset(0, 1.5),
+              ),
+            ],
           ),
 
           child: Column(
@@ -2479,20 +2606,25 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                       const Text(
                         '建议打',
                         style: TextStyle(
-                          color: Colors.white70,
-                          fontSize: 11,
+                          color: Color(0xFFE0F2F1),
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.3,
                           decoration: TextDecoration.none,
                         ),
                       ),
-                      const SizedBox(width: 4),
-                      TileChip(tile: topTile, size: 21),
+                      const SizedBox(width: 5),
+                      TileChip(tile: topTile, size: 22),
                       if (isDingque) ...[
                         const SizedBox(width: 4),
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+                          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1.5),
                           decoration: BoxDecoration(
-                            color: const Color(0xFF00695C),
+                            gradient: const LinearGradient(
+                              colors: [Color(0xFF00796B), Color(0xFF004D40)],
+                            ),
                             borderRadius: BorderRadius.circular(3),
+                            border: Border.all(color: const Color(0x8080CBC4), width: 0.5),
                           ),
                           child: const Text(
                             '定缺',
@@ -2508,17 +2640,19 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                       if (defenseLevel == 'SAFE') ...[
                         const SizedBox(width: 4),
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+                          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1.5),
                           decoration: BoxDecoration(
-                            color: const Color(0xFF1B5E20),
+                            gradient: const LinearGradient(
+                              colors: [Color(0xFF2E7D32), Color(0xFF1B5E20)],
+                            ),
                             borderRadius: BorderRadius.circular(3),
-                            border: Border.all(color: const Color(0xFF81C784), width: 0.5),
+                            border: Border.all(color: const Color(0x8081C784), width: 0.5),
                           ),
                           child: const Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               Icon(Icons.shield, color: Color(0xFFC8E6C9), size: 8),
-                              SizedBox(width: 1),
+                              SizedBox(width: 1.5),
                               Text(
                                 '安全',
                                 style: TextStyle(
@@ -2534,17 +2668,19 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                       ] else if (defenseLevel == 'DANGER') ...[
                         const SizedBox(width: 4),
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+                          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1.5),
                           decoration: BoxDecoration(
-                            color: const Color(0xFFB71C1C),
+                            gradient: const LinearGradient(
+                              colors: [Color(0xFFC62828), Color(0xFF8E0000)],
+                            ),
                             borderRadius: BorderRadius.circular(3),
-                            border: Border.all(color: const Color(0xFFFF8A80), width: 0.5),
+                            border: Border.all(color: const Color(0x80FF8A80), width: 0.5),
                           ),
                           child: const Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               Icon(Icons.warning, color: Color(0xFFFFCDD2), size: 8),
-                              SizedBox(width: 1),
+                              SizedBox(width: 1.5),
                               Text(
                                 '高危',
                                 style: TextStyle(
@@ -2562,33 +2698,41 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                   ),
                   if (topUkeire > 0)
                     Flexible(
-                      child: Text(
-                        '进张 $topUkeire 张',
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Colors.lightGreenAccent,
-                          fontSize: 11,
-                          fontWeight: FontWeight.bold,
-                          decoration: TextDecoration.none,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF00E676).withAlpha(25),
+                          borderRadius: BorderRadius.circular(3.5),
+                          border: Border.all(color: const Color(0x6600E676), width: 0.5),
+                        ),
+                        child: Text(
+                          '进张 $topUkeire 张',
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Color(0xFF69F0AE),
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.bold,
+                            decoration: TextDecoration.none,
+                          ),
                         ),
                       ),
                     ),
                 ],
               ),
               if (topReason != null && topReason.isNotEmpty) ...[
-                const SizedBox(height: 3),
+                const SizedBox(height: 4),
                 Text(
                   topReason,
                   style: const TextStyle(
                     color: Color(0xFF80CBC4),
                     fontSize: 9.5,
-                    height: 1.15,
+                    height: 1.2,
                     decoration: TextDecoration.none,
                   ),
                 ),
               ],
               if (defenseReason != null && defenseReason.isNotEmpty && defenseLevel != 'SAFE') ...[
-                const SizedBox(height: 2),
+                const SizedBox(height: 3),
                 Text(
                   '防守: $defenseReason',
                   style: TextStyle(
@@ -2600,35 +2744,45 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                 ),
               ],
               if (sorted.length > 1) ...[
-                const SizedBox(height: 4),
+                const SizedBox(height: 5),
                 Wrap(
                   spacing: 6,
-                  runSpacing: 2,
+                  runSpacing: 3,
                   children: [
                     for (int i = 1; i < sorted.length && i < 3; i++)
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            '次选:',
-                            style: TextStyle(
-                              color: Colors.white.withAlpha(140),
-                              fontSize: 9,
-                              decoration: TextDecoration.none,
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withAlpha(12),
+                          borderRadius: BorderRadius.circular(4),
+                          border: Border.all(color: Colors.white12, width: 0.5),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              '次选',
+                              style: TextStyle(
+                                color: Colors.white.withAlpha(160),
+                                fontSize: 8.5,
+                                fontWeight: FontWeight.w500,
+                                decoration: TextDecoration.none,
+                              ),
                             ),
-                          ),
-                          const SizedBox(width: 2),
-                          TileChip(tile: (sorted[i]['tile'] ?? '') as String, size: 16),
-                          const SizedBox(width: 2),
-                          Text(
-                            _ukeireLabel(sorted[i]),
-                            style: TextStyle(
-                              color: Colors.white.withAlpha(160),
-                              fontSize: 9,
-                              decoration: TextDecoration.none,
+                            const SizedBox(width: 3),
+                            TileChip(tile: (sorted[i]['tile'] ?? '') as String, size: 16),
+                            const SizedBox(width: 3),
+                            Text(
+                              _ukeireLabel(sorted[i]),
+                              style: const TextStyle(
+                                color: Color(0xFF69F0AE),
+                                fontSize: 9,
+                                fontWeight: FontWeight.bold,
+                                decoration: TextDecoration.none,
+                              ),
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
                   ],
                 ),
@@ -2676,19 +2830,19 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               gradient: const LinearGradient(
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
-                colors: [Color(0xF51A1D24), Color(0xF5101216)],
+                colors: [Color(0xF8151820), Color(0xF80D0F14)],
               ),
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: Colors.white.withAlpha(28), width: 0.8),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: Colors.white.withAlpha(32), width: 0.8),
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withAlpha(120),
-                  blurRadius: 10,
-                  offset: const Offset(0, 3),
+                  color: Colors.black.withAlpha(140),
+                  blurRadius: 12,
+                  offset: const Offset(0, 4),
                 ),
               ],
             ),
-            padding: const EdgeInsets.fromLTRB(7, 6, 7, 6),
+            padding: const EdgeInsets.fromLTRB(7.5, 6.5, 7.5, 6.5),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -2703,12 +2857,12 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                       // 居中拖动手柄 Pill（醒目提示按住此处即可平滑移动悬浮窗）
                       Center(
                         child: Container(
-                          width: 52,
-                          height: 5,
-                          margin: const EdgeInsets.only(bottom: 4),
+                          width: 44,
+                          height: 4,
+                          margin: const EdgeInsets.only(bottom: 5),
                           decoration: BoxDecoration(
-                            color: Colors.white.withAlpha(90),
-                            borderRadius: BorderRadius.circular(3),
+                            color: Colors.white.withAlpha(60),
+                            borderRadius: BorderRadius.circular(2),
                           ),
                         ),
                       ),
@@ -2786,12 +2940,21 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                               onTap: _requestResetMatch,
                               behavior: HitTestBehavior.opaque,
                               child: Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2.5),
+                                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
                                 margin: const EdgeInsets.only(right: 5),
                                 decoration: BoxDecoration(
-                                  color: const Color(0xFFE65100).withAlpha(160),
+                                  gradient: const LinearGradient(
+                                    colors: [Color(0xFFE65100), Color(0xFFC62828)],
+                                  ),
                                   borderRadius: BorderRadius.circular(4),
-                                  border: Border.all(color: const Color(0xFFFFB74D), width: 0.7),
+                                  border: Border.all(color: const Color(0x99FFB74D), width: 0.6),
+                                  boxShadow: const [
+                                    BoxShadow(
+                                      color: Color(0x30E65100),
+                                      blurRadius: 3,
+                                      offset: Offset(0, 1),
+                                    ),
+                                  ],
                                 ),
                                 child: const Row(
                                   mainAxisSize: MainAxisSize.min,
@@ -2817,7 +2980,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                               child: Container(
                                 padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
                                 decoration: BoxDecoration(
-                                  color: Colors.white.withAlpha(25),
+                                  color: Colors.white.withAlpha(20),
                                   borderRadius: BorderRadius.circular(4),
                                   border: Border.all(color: Colors.white12, width: 0.6),
                                 ),
@@ -2868,11 +3031,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                         // 2. 当前手牌（仅在确认对局内或定缺阶段才显示，杜绝大厅与非对局干扰）
                         if (hand.isNotEmpty && count > 0 && (inMatch || isDingquePhase || isSwapPhase || isPickPhase)) ...[
                           Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
                             decoration: BoxDecoration(
-                              color: Colors.white.withAlpha(6),
+                              color: const Color(0x3312151B),
                               borderRadius: BorderRadius.circular(10),
-                              border: Border.all(color: Colors.white10, width: 0.5),
+                              border: Border.all(color: Colors.white.withAlpha(18), width: 0.6),
                             ),
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.stretch,

@@ -42,8 +42,15 @@ class YOLODetector(Detector):
         self.net = None
         self.last_top_score: float = 0.0
         self.last_screen: Tuple[int, int] = (0, 0)
+        self.last_drawn_tile: Optional[str] = None
         self._glyphs = None
         self._styles = None
+
+        try:
+            from .tencent_grid_detector import TencentGridDetector
+            self._phase_helper = TencentGridDetector()
+        except Exception:
+            self._phase_helper = None
 
         if os.path.isfile(model_path):
             try:
@@ -56,6 +63,26 @@ class YOLODetector(Detector):
                 self.net = None
         else:
             print(f"[YOLODetector] Model file not found at: {model_path}")
+
+    def is_dingque_phase(self, image_bgr: np.ndarray) -> bool:
+        if self._phase_helper is not None:
+            return self._phase_helper.is_dingque_phase(image_bgr)
+        return False
+
+    def is_swap_phase(self, image_bgr: np.ndarray) -> bool:
+        if self._phase_helper is not None:
+            return self._phase_helper.is_swap_phase(image_bgr)
+        return False
+
+    def is_pick_phase(self, image_bgr: np.ndarray) -> bool:
+        if self._phase_helper is not None:
+            return self._phase_helper.is_pick_phase(image_bgr)
+        return False
+
+    def detect_pick_candidates(self, image_bgr: np.ndarray) -> List[str]:
+        if self._phase_helper is not None:
+            return self._phase_helper.detect_pick_candidates(image_bgr)
+        return []
 
     @property
     def is_available(self) -> bool:
@@ -143,15 +170,13 @@ class YOLODetector(Detector):
         indices = cv2.dnn.NMSBoxes(
             nms_boxes, filtered_scores, score_threshold=self.conf_thresh, nms_threshold=self.nms_thresh
         )
-        detections = []
+        cand_dets = []
         if len(indices) > 0:
-            top_conf = 0.0
             for idx in indices.flatten():
                 x, y, bw, bh = nms_boxes[idx]
                 orig_idx = valid_indices[idx]
                 cid = cand_classes[orig_idx]
                 conf = float(cand_scores[orig_idx])
-                top_conf = max(top_conf, conf)
 
                 abs_x = max(0, offset_x + x)
                 abs_y = max(0, offset_y + y)
@@ -160,9 +185,27 @@ class YOLODetector(Detector):
 
                 if abs_w >= 12 and abs_h >= 16:
                     rect: Rect = (abs_x, abs_y, abs_w, abs_h)
-                    detections.append((rect, self.classes[cid], round(conf, 3)))
+                    cand_dets.append((rect, self.classes[cid], round(conf, 3)))
 
-            self.last_top_score = round(top_conf, 3)
+        # 4b. 1D 水平中心距 NMS：相邻手牌中心距不可过密（小于 0.55 * 平均牌宽）
+        cand_dets_sorted = sorted(cand_dets, key=lambda d: -d[2])
+        detections = []
+        for d in cand_dets_sorted:
+            x1, y1, w1, h1 = d[0]
+            cx1 = x1 + w1 * 0.5
+            suppressed = False
+            for k in detections:
+                x2, y2, w2, h2 = k[0]
+                cx2 = x2 + w2 * 0.5
+                avg_w = (w1 + w2) * 0.5
+                if abs(cx1 - cx2) < avg_w * 0.55:
+                    suppressed = True
+                    break
+            if not suppressed:
+                detections.append(d)
+
+        top_conf = max([d[2] for d in detections], default=0.0)
+        self.last_top_score = round(top_conf, 3)
 
         # 5. 主行 Y 坐标离群点剔除（剔除悬浮在手牌上方的噪点框）
         if len(detections) >= 4:
@@ -181,7 +224,6 @@ class YOLODetector(Detector):
                 tile_counts[lbl] = c + 1
                 guarded_detections.append(d)
             else:
-                # 超过 4 张物理上限，尝试替换为该花色相邻牌或跳过
                 pass
 
         detections = guarded_detections
@@ -196,12 +238,90 @@ class YOLODetector(Detector):
             return []
 
         h, w = image.shape[:2]
-        # 1. 玩家手牌行通常位于底部 y in [0.70, 1.0] * h
-        hand_y1 = int(0.70 * h)
-        hand_y2 = h
-        hand_crop = image[hand_y1:hand_y2, :]
+        self.last_drawn_tile = None
 
-        hand_tiles = self.detect_strip(hand_crop, offset_x=0, offset_y=hand_y1)
+        # 1. 动态自适应手牌条带定位 (基于 HSV 牌面掩码锁定手牌横排核心区)
+        y1 = int(0.70 * h)
+        roi = image[y1:h, :]
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        mask = ((hsv[:, :, 1] < 70) & (hsv[:, :, 2] > 130)).astype(np.uint8)
+        col_counts = mask.sum(axis=0)
+        valid_x = np.where(col_counts > (h - y1) * 0.15)[0]
+
+        if len(valid_x) > 50:
+            x_min, x_max = valid_x[0], valid_x[-1]
+            row_counts = mask[:, x_min:x_max].sum(axis=1)
+            valid_y = np.where(row_counts > (x_max - x_min) * 0.10)[0]
+            y_top = y1 + max(0, valid_y[0] - 12) if len(valid_y) > 0 else y1
+            y_bot = min(h, y1 + valid_y[-1] + 12) if len(valid_y) > 0 else h
+            x_left = max(0, x_min - 12)
+            x_right = min(w, x_max + 12)
+        else:
+            y_top, y_bot = y1, h
+            x_left, x_right = 0, w
+
+        hand_crop = image[y_top:y_bot, x_left:x_right]
+        hand_tiles = self.detect_strip(hand_crop, offset_x=x_left, offset_y=y_top)
+
+        if hand_tiles:
+            k = len(hand_tiles)
+            has_drawn = False
+            # 摸牌判定
+            if k in (2, 5, 8, 11, 14):
+                xs = [d[0][0] for d in hand_tiles]
+                ws = [d[0][2] for d in hand_tiles]
+                if len(xs) >= 2:
+                    diffs = [xs[i+1] - (xs[i] + ws[i]) for i in range(len(xs) - 1)]
+                    median_w = float(np.median(ws))
+                    if diffs[-1] > max(15.0, median_w * 0.25):
+                        has_drawn = True
+
+            # 物理节距精密对齐与分类校准
+            if self._phase_helper is not None and k >= 2:
+                standing_count = k - 1 if has_drawn else k
+                standing_tiles = hand_tiles[:standing_count]
+                x_start = standing_tiles[0][0][0]
+                x_end = standing_tiles[-1][0][0] + standing_tiles[-1][0][2]
+                bw = max(1.0, float(x_end - x_start))
+                pitch = bw / float(standing_count)
+
+                y_top_s = min([d[0][1] for d in standing_tiles])
+                y_bot_s = max([d[0][1] + d[0][3] for d in standing_tiles])
+
+                calibrated = []
+                for i in range(standing_count):
+                    x1 = int(round(x_start + i * pitch))
+                    x2 = int(round(x_start + (i + 1) * pitch))
+                    patch = image[y_top_s:y_bot_s, x1:x2]
+                    ref_lbl, ref_conf = self._phase_helper.classify_tile(patch)
+                    rect = (x1, y_top_s, x2 - x1, y_bot_s - y_top_s)
+                    yolo_lbl = standing_tiles[i][1]
+                    yolo_conf = standing_tiles[i][2]
+                    lbl = ref_lbl if (ref_lbl and ref_conf and ref_conf >= 0.40) else yolo_lbl
+                    conf = max(yolo_conf, ref_conf or 0.0)
+                    calibrated.append((rect, lbl, conf))
+
+                if has_drawn:
+                    # 摸牌独立切片
+                    d_rect, d_yolo_lbl, d_yolo_conf = hand_tiles[-1]
+                    dx, dy, dw, dh = d_rect
+                    patch_d = image[dy:dy+dh, dx:dx+dw]
+                    ref_d_lbl, ref_d_conf = self._phase_helper.classify_tile(patch_d)
+                    d_lbl = ref_d_lbl if (ref_d_lbl and ref_d_conf and ref_d_conf >= 0.40) else d_yolo_lbl
+                    calibrated.append((d_rect, d_lbl, max(d_yolo_conf, ref_d_conf or 0.0)))
+                    self.last_drawn_tile = d_lbl
+
+                hand_tiles = calibrated
+            elif self._phase_helper is not None:
+                # 兜底单张
+                calibrated = []
+                for (rect, yolo_lbl, conf) in hand_tiles:
+                    rx, ry, rw, rh = rect
+                    patch = image[ry:ry+rh, rx:rx+rw]
+                    ref_lbl, ref_conf = self._phase_helper.classify_tile(patch)
+                    lbl = ref_lbl if (ref_lbl and ref_conf and ref_conf >= 0.40) else yolo_lbl
+                    calibrated.append((rect, lbl, max(conf, ref_conf or 0.0)))
+                hand_tiles = calibrated
 
         rows = []
         if hand_tiles:

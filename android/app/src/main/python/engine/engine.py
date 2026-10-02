@@ -1822,27 +1822,27 @@ class Engine:
     def get_detector(self):
         if self._detector is not None:
             return self._detector
-        # 1. 优先使用腾讯欢乐麻将专用 100% 精度网格匹配引擎
-        try:
-            from recognition.tencent_grid_detector import TencentGridDetector
-            grid = TencentGridDetector()
-            if grid.is_available:
-                self._detector = grid
-                print("[Engine] Using TencentGridDetector as primary detection engine.")
-                return self._detector
-        except Exception as e:
-            print(f"[Engine] TencentGridDetector failed: {e}")
-
-        # 2. 次选：YOLO-Mahjong-Nano 端到端目标检测器
+        # 1. 优先使用 YOLO-Mahjong-Nano 端到端目标检测器
         try:
             from recognition.yolo_detector import YOLODetector
             yolo = YOLODetector()
             if yolo.is_available:
                 self._detector = yolo
-                print("[Engine] Using YOLODetector as fallback detection engine.")
+                print("[Engine] Using YOLODetector as primary detection engine.")
                 return self._detector
         except Exception as e:
             print(f"[Engine] YOLODetector failed to initialize: {e}")
+
+        # 2. 次选：腾讯欢乐麻将专用网格匹配引擎
+        try:
+            from recognition.tencent_grid_detector import TencentGridDetector
+            grid = TencentGridDetector()
+            if grid.is_available:
+                self._detector = grid
+                print("[Engine] Using TencentGridDetector as fallback detection engine.")
+                return self._detector
+        except Exception as e:
+            print(f"[Engine] TencentGridDetector failed: {e}")
 
         # 3. 兜底：通用结构识别器
         self._detector = StructuralDetector()
@@ -2960,8 +2960,8 @@ class Engine:
                         best_yc = yc
                         bootstrap_row_idx = ri
 
-            # 若为主力 TencentGridDetector，手牌行直接提取，不经过针对乱序单框的 _tile_voter
-            is_grid_det = (getattr(detector, "__class__", None) and detector.__class__.__name__ == "TencentGridDetector")
+            # 若为主力 YOLODetector 或 TencentGridDetector，手牌行直接提取，不经过针对乱序单框的 _tile_voter
+            is_grid_det = (getattr(detector, "__class__", None) and detector.__class__.__name__ in ("YOLODetector", "TencentGridDetector"))
 
             filtered = []
             for ri, row in enumerate(rows):

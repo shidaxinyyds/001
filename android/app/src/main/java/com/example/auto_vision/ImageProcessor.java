@@ -109,6 +109,9 @@ public class ImageProcessor {
             dingqueOverride = -1;
         }
         dingqueDirty = true;
+        if (NativeEngine.isAvailable()) {
+            NativeEngine.setDingque(dingqueOverride);
+        }
     }
 
     private static volatile boolean resetRequested = false;
@@ -117,6 +120,9 @@ public class ImageProcessor {
         resetRequested = true;
         orientOverride = -1;
         orientDirty = true;
+        if (NativeEngine.isAvailable()) {
+            NativeEngine.reset();
+        }
     }
 
     // 调试页开关：经 MainActivity 的 setConfig 通道写入，下一帧处理前推给 Python 引擎。
@@ -185,6 +191,10 @@ public class ImageProcessor {
         // 缓存 ApplicationContext 供前台检测使用（避免持有 Activity 导致泄漏）。
         if (context != null) {
             sContext = context.getApplicationContext();
+        }
+        if (NativeEngine.isAvailable()) {
+            NativeEngine.init();
+            TimedLog.i(TAG, "Mahjong NativeEngine C++ core ready");
         }
         if (!Python.isStarted()) {
             Python.start(new AndroidPlatform(context));
@@ -643,7 +653,58 @@ public class ImageProcessor {
             return;
         }
 
-        byte[] bytes = engineResult.callAttr("to_bytes").toJava(byte[].class);
+        byte[] bytes;
+        String mode = (pendingMode != null) ? pendingMode : "sc";
+        boolean isSichuan = (mode == null || mode.isEmpty() || mode.startsWith("sc"));
+        if (NativeEngine.isAvailable() && isSichuan) {
+            try {
+                PyObject resObj = engineResult.get("result");
+                String pyJsonStr = (resObj != null) ? resObj.toString() : "";
+                if (!pyJsonStr.isEmpty() && pyJsonStr.startsWith("{")) {
+                    org.json.JSONObject pyObj = new org.json.JSONObject(pyJsonStr);
+                    String handStr = pyObj.optString("hand", "");
+                    int dqSuit = pyObj.isNull("dingque_suit") ? -1 : pyObj.optInt("dingque_suit", -1);
+                    boolean isSwap = pyObj.optBoolean("swap_phase", false);
+                    boolean isDq = pyObj.optBoolean("dingque_phase", false);
+                    String pyStatus = pyObj.optString("status", "");
+                    boolean isTable = !"waiting".equals(pyStatus) || !handStr.isEmpty();
+
+                    int[] handTiles = parseMpszToTiles(handStr);
+
+                    String nativeJsonStr = NativeEngine.evaluate(handTiles, dqSuit, isSwap, isDq, isTable);
+                    if (nativeJsonStr != null && !nativeJsonStr.isEmpty() && nativeJsonStr.startsWith("{")) {
+                        org.json.JSONObject nativeObj = new org.json.JSONObject(nativeJsonStr);
+                        pyObj.put("native_active", true);
+                        pyObj.put("state", nativeObj.optString("state", "playing"));
+                        pyObj.put("status", nativeObj.optString("status", pyStatus));
+                        pyObj.put("shanten", nativeObj.optInt("shanten", 0));
+                        pyObj.put("remaining", nativeObj.optInt("remaining", 108));
+                        if (nativeObj.has("remaining_matrix")) {
+                            pyObj.put("remaining_matrix", nativeObj.optJSONObject("remaining_matrix"));
+                        }
+                        pyObj.put("inferred_discard", nativeObj.optInt("inferred_discard", -1));
+
+                        org.json.JSONArray nativeAdvice = nativeObj.optJSONArray("advice");
+                        if (nativeAdvice != null && nativeAdvice.length() > 0) {
+                            pyObj.put("advice", nativeAdvice);
+                            pyObj.put("best", nativeObj.optString("best", ""));
+                        }
+
+                        String finalPayload = pyObj.toString() + "\n";
+                        bytes = finalPayload.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                    } else {
+                        bytes = engineResult.callAttr("to_bytes").toJava(byte[].class);
+                    }
+                } else {
+                    bytes = engineResult.callAttr("to_bytes").toJava(byte[].class);
+                }
+            } catch (Throwable t) {
+                TimedLog.e(TAG, "NativeEngine integration failed, fallback to python: " + t);
+                bytes = engineResult.callAttr("to_bytes").toJava(byte[].class);
+            }
+        } else {
+            bytes = engineResult.callAttr("to_bytes").toJava(byte[].class);
+        }
 
         // 提取是否跳帧状态，动态更新巡检降频周期
         try {
@@ -705,5 +766,31 @@ public class ImageProcessor {
         } catch (Throwable t) {
             TimedLog.e(TAG, "sendStatus failed: " + t);
         }
+    }
+
+    public static int[] parseMpszToTiles(String mpsz) {
+        if (mpsz == null || mpsz.length() < 2) {
+            return new int[0];
+        }
+        java.util.List<Integer> list = new java.util.ArrayList<>();
+        for (int i = 0; i < mpsz.length() - 1; i += 2) {
+            char numChar = mpsz.charAt(i);
+            char suitChar = mpsz.charAt(i + 1);
+            if (numChar >= '1' && numChar <= '9') {
+                int num = numChar - '1';
+                int offset = -1;
+                if (suitChar == 'm') offset = 0;
+                else if (suitChar == 'p') offset = 9;
+                else if (suitChar == 's') offset = 18;
+                if (offset >= 0) {
+                    list.add(offset + num);
+                }
+            }
+        }
+        int[] arr = new int[list.size()];
+        for (int i = 0; i < list.size(); i++) {
+            arr[i] = list.get(i);
+        }
+        return arr;
     }
 }
