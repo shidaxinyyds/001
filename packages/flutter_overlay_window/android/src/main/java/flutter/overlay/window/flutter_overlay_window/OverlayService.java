@@ -71,6 +71,7 @@ public class OverlayService extends Service implements View.OnTouchListener {
     private float lastX, lastY;
     private int lastYPosition;
     private boolean dragging;
+    private boolean downInHeader;
     private static final float MAXIMUM_OPACITY_ALLOWED_FOR_S_AND_HIGHER = 0.8f;
     private Point szWindow = new Point();
     private Timer mTrayAnimationTimer;
@@ -518,7 +519,13 @@ public class OverlayService extends Service implements View.OnTouchListener {
             WindowManager.LayoutParams params = (WindowManager.LayoutParams) flutterView.getLayoutParams();
             switch (event.getAction()) {
                 case MotionEvent.ACTION_DOWN:
-                    if (params.height > dpToPx(100) && event.getY() > dpToPx(50)) {
+                    // 仅当点击在顶部标题栏区域（<= 48dp），或者悬浮窗处于收起态（小窗口 <= 100dp）时才允许拖动整窗。
+                    // 若点击在内容区（> 48dp），严格锁定 downInHeader = false，
+                    // 整个手势周期（ACTION_MOVE / ACTION_UP）彻底不接管，完全放行给 Flutter 自由上下顺畅滚动！
+                    boolean isSmall = params.height <= dpToPx(100) || params.width <= dpToPx(100);
+                    downInHeader = isSmall || (event.getY() <= dpToPx(48));
+                    if (!downInHeader) {
+                        dragging = false;
                         return false;
                     }
                     dragging = false;
@@ -526,7 +533,8 @@ public class OverlayService extends Service implements View.OnTouchListener {
                     lastY = event.getRawY();
                     break;
                 case MotionEvent.ACTION_MOVE:
-                    if (params.height > dpToPx(100) && event.getY() > dpToPx(50) && !dragging) {
+                    // 手指未在顶部标题栏按下，坚决不响应任何整窗位移，保证内容区滚动自由
+                    if (!downInHeader) {
                         return false;
                     }
                     float dx = event.getRawX() - lastX;
@@ -563,6 +571,12 @@ public class OverlayService extends Service implements View.OnTouchListener {
                     break;
                 case MotionEvent.ACTION_UP:
                 case MotionEvent.ACTION_CANCEL:
+                    boolean wasHeader = downInHeader;
+                    downInHeader = false;
+                    dragging = false;
+                    if (!wasHeader) {
+                        return false;
+                    }
                     lastYPosition = params.y;
                     if (!WindowSetup.positionGravity.equals("none")) {
                         if (windowManager == null) return false;

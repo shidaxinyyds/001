@@ -669,6 +669,7 @@ class SichuanAnalyzer:
         pool_remaining: Optional[List[int]] = None,
         dingque_suit: Optional[int] = None,
         opponent_dingque_suits: Optional[List[int]] = None,
+        opponents: Optional[List[OpponentState]] = None,
     ) -> List[Dict]:
         """核心选叫与出牌分析器入口（EV 期望价值排序模型，含防点炮风险惩罚）。
 
@@ -680,9 +681,9 @@ class SichuanAnalyzer:
         total_len = sum(counts[:27]) + num_wild + num_fixed_melds * 3
         if total_len % 3 == 1:
             return cls._analyze_discards_predraw(
-                counts, num_fixed_melds, pool_remaining, dingque_suit, opponent_dingque_suits)
+                counts, num_fixed_melds, pool_remaining, dingque_suit, opponent_dingque_suits, opponents=opponents)
         return cls._analyze_discards_3n2(
-            counts, num_fixed_melds, pool_remaining, dingque_suit, opponent_dingque_suits)
+            counts, num_fixed_melds, pool_remaining, dingque_suit, opponent_dingque_suits, opponents=opponents)
 
     @classmethod
     def _analyze_discards_3n2(
@@ -692,6 +693,7 @@ class SichuanAnalyzer:
         pool_remaining: Optional[List[int]] = None,
         dingque_suit: Optional[int] = None,
         opponent_dingque_suits: Optional[List[int]] = None,
+        opponents: Optional[List[OpponentState]] = None,
     ) -> List[Dict]:
         """14 张（3n+2）完整出牌 EV 分析：打每张后剩 13 张（3n+1），叫口/向听可算。"""
         results = []
@@ -722,13 +724,14 @@ class SichuanAnalyzer:
                 else:
                     candidate_discards.append(t)
 
-        # 构建对手模型 (根据传入的 opponent_dingque_suits 及牌池)
-        opponents = []
-        if opponent_dingque_suits:
-            for i, odq in enumerate(opponent_dingque_suits[:3]):
-                opponents.append(OpponentState(seat=i + 1, dingque_suit=odq))
+        # 构建对手模型 (根据传入的 opponents 或 opponent_dingque_suits 及牌池)
         if not opponents:
-            opponents = [OpponentState(seat=1), OpponentState(seat=2), OpponentState(seat=3)]
+            opponents = []
+            if opponent_dingque_suits:
+                for i, odq in enumerate(opponent_dingque_suits[:3]):
+                    opponents.append(OpponentState(seat=i + 1, dingque_suit=odq))
+            if not opponents:
+                opponents = [OpponentState(seat=1), OpponentState(seat=2), OpponentState(seat=3)]
 
         # 强化学习策略价值网络 (PVN) 推理 (耗时 < 0.5ms)
         pvn = PolicyValueNetwork.get_instance()
@@ -923,6 +926,7 @@ class SichuanAnalyzer:
         pool_remaining: Optional[List[int]] = None,
         dingque_suit: Optional[int] = None,
         opponent_dingque_suits: Optional[List[int]] = None,
+        opponents: Optional[List[OpponentState]] = None,
     ) -> List[Dict]:
         """13 张（3n+1）预摸牌期望分析。
 
@@ -967,7 +971,7 @@ class SichuanAnalyzer:
             try:
                 scen = cls._analyze_discards_3n2(
                     counts, num_fixed_melds, pool_remaining,
-                    dingque_suit, opponent_dingque_suits)
+                    dingque_suit, opponent_dingque_suits, opponents=opponents)
             finally:
                 counts[t] -= 1
             for r in scen:
@@ -1048,14 +1052,16 @@ class SichuanAnalyzer:
         counts: List[int],
         pool_remaining: Optional[List[int]] = None,
         opponent_dingque_suits: Optional[List[int]] = None,
+        opponents: Optional[List[OpponentState]] = None,
     ) -> List[Dict]:
         """导出当前牌局 3 个对手的贝叶斯手牌透视概率分布。"""
-        opponents = []
-        if opponent_dingque_suits:
-            for i, odq in enumerate(opponent_dingque_suits[:3]):
-                opponents.append(OpponentState(seat=i + 1, dingque_suit=odq))
         if not opponents:
-            opponents = [OpponentState(seat=1), OpponentState(seat=2), OpponentState(seat=3)]
+            opponents = []
+            if opponent_dingque_suits:
+                for i, odq in enumerate(opponent_dingque_suits[:3]):
+                    opponents.append(OpponentState(seat=i + 1, dingque_suit=odq))
+            if not opponents:
+                opponents = [OpponentState(seat=1), OpponentState(seat=2), OpponentState(seat=3)]
         pool_rem = pool_remaining if pool_remaining is not None else [max(0, 4 - (counts[i] if i < len(counts) else 0)) for i in range(27)]
         return BayesianHandRangeReader.get_hand_ranges_summary(opponents, pool_rem)
 

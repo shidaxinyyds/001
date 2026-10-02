@@ -509,8 +509,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           children: [
             // 游戏平台预设快速切换栏
             _buildPlatformSelector(),
-            // 战术知识库快捷导引条
-            _buildKnowledgeBanner(),
             // 分类切换栏
             _buildCategorySelector(),
             const SizedBox(height: AppTokens.s12),
@@ -583,23 +581,78 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  // 游戏平台预设快速切换栏
+  // 游戏平台预设快速切换栏（大尺寸卡片，舒适美观，视野开阔）
   Widget _buildPlatformSelector() {
     final curPlatform = selectedPlatform ?? GamePlatform.defaultPlatform;
     final platInfo = GamePlatform.info(curPlatform);
 
+    Widget buildPlatformItem(GamePlatformInfo p) {
+      final bool sel = p.key == curPlatform;
+      return Expanded(
+        child: GestureDetector(
+          onTap: () => _selectPlatform(p.key),
+          behavior: HitTestBehavior.opaque,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+            decoration: BoxDecoration(
+              color: sel ? AppTokens.brandContainer : AppTokens.surface,
+              borderRadius: BorderRadius.circular(AppTokens.r10),
+              border: Border.all(
+                color: sel ? AppTokens.brand : AppTokens.border,
+                width: sel ? 1.5 : 0.8,
+              ),
+              boxShadow: sel
+                  ? const [
+                      BoxShadow(
+                        color: Color(0x150F766E),
+                        blurRadius: 4,
+                        offset: Offset(0, 1.5),
+                      ),
+                    ]
+                  : null,
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                if (sel) ...[
+                  const Icon(Icons.check_circle_rounded,
+                      size: 14, color: AppTokens.brandDark),
+                  const SizedBox(width: 4),
+                ],
+                Flexible(
+                  child: Text(
+                    p.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: sel ? FontWeight.bold : FontWeight.w500,
+                      color: sel ? AppTokens.brandDark : AppTokens.ink,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    final pList = GamePlatform.allPlatforms;
+
     return Container(
       margin: const EdgeInsets.only(bottom: AppTokens.s12),
-      padding: const EdgeInsets.all(AppTokens.s12),
+      padding: const EdgeInsets.all(AppTokens.s14),
       decoration: BoxDecoration(
         color: AppTokens.surface,
-        borderRadius: BorderRadius.circular(AppTokens.r12),
-        border: Border.all(color: AppTokens.border, width: 0.8),
+        borderRadius: BorderRadius.circular(AppTokens.r14),
+        border: Border.all(color: AppTokens.border, width: 0.9),
         boxShadow: const [
           BoxShadow(
             color: Color(0x06000000),
-            blurRadius: 4,
-            offset: Offset(0, 1.5),
+            blurRadius: 5,
+            offset: Offset(0, 2),
           ),
         ],
       ),
@@ -608,12 +661,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         children: [
           Row(
             children: [
-              const Icon(Icons.devices_rounded, size: 16, color: AppTokens.brand),
-              const SizedBox(width: 6),
+              const Icon(Icons.devices_rounded, size: 17, color: AppTokens.brand),
+              const SizedBox(width: 7),
               const Text(
                 '游戏平台预设',
                 style: TextStyle(
-                  fontSize: 13,
+                  fontSize: 14,
                   fontWeight: FontWeight.bold,
                   color: AppTokens.ink,
                 ),
@@ -621,7 +674,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               const Spacer(),
               if (platInfo != null)
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
                   decoration: BoxDecoration(
                     color: AppTokens.brandContainer,
                     borderRadius: BorderRadius.circular(AppTokens.r8),
@@ -629,7 +683,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   child: Text(
                     platInfo.badge,
                     style: const TextStyle(
-                      fontSize: 10,
+                      fontSize: 10.5,
                       fontWeight: FontWeight.bold,
                       color: AppTokens.brandDark,
                     ),
@@ -637,58 +691,55 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 ),
             ],
           ),
-          const SizedBox(height: 8),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: GamePlatform.allPlatforms.map((p) {
-                final bool sel = p.key == curPlatform;
-                return Padding(
-                  padding: const EdgeInsets.only(right: 6),
-                  child: GestureDetector(
-                    onTap: () => _selectPlatform(p.key),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: sel ? AppTokens.brandContainer : AppTokens.pillBg,
-                        borderRadius: BorderRadius.circular(AppTokens.r8),
-                        border: Border.all(
-                          color: sel ? AppTokens.brand : AppTokens.border,
-                          width: sel ? 1.0 : 0.6,
-                        ),
-                      ),
-                      child: Text(
-                        p.name,
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: sel ? FontWeight.bold : FontWeight.w500,
-                          color: sel ? AppTokens.brandDark : AppTokens.ink2,
-                        ),
-                      ),
-                    ),
-                  ),
-                );
-              }).toList(),
+          const SizedBox(height: 10),
+          // 平台大卡片 2 列排布，大按键、不截断、极易点击
+          if (pList.length >= 4) ...[
+            Row(
+              children: [
+                buildPlatformItem(pList[0]),
+                const SizedBox(width: 8),
+                buildPlatformItem(pList[1]),
+              ],
             ),
-          ),
+            const SizedBox(height: 7),
+            Row(
+              children: [
+                buildPlatformItem(pList[2]),
+                const SizedBox(width: 8),
+                buildPlatformItem(pList[3]),
+              ],
+            ),
+            if (pList.length > 4) ...[
+              const SizedBox(height: 7),
+              Row(
+                children: [
+                  buildPlatformItem(pList[4]),
+                ],
+              ),
+            ],
+          ],
           if (platInfo != null) ...[
-            const SizedBox(height: 8),
+            const SizedBox(height: 10),
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
               decoration: BoxDecoration(
                 color: AppTokens.pillBg,
                 borderRadius: BorderRadius.circular(AppTokens.r8),
+                border: Border.all(
+                    color: AppTokens.border.withAlpha(80), width: 0.5),
               ),
               child: Row(
                 children: [
-                  const Icon(Icons.crop_free_rounded, size: 12, color: AppTokens.muted),
-                  const SizedBox(width: 5),
+                  const Icon(Icons.crop_free_rounded,
+                      size: 14, color: AppTokens.brand),
+                  const SizedBox(width: 6),
                   Expanded(
                     child: Text(
                       platInfo.subtitle,
                       style: const TextStyle(
-                        fontSize: 10,
-                        color: AppTokens.muted,
+                        fontSize: 11,
+                        color: AppTokens.ink2,
+                        height: 1.25,
                       ),
                     ),
                   ),
@@ -697,68 +748,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
           ],
         ],
-      ),
-    );
-  }
-
-  // 战术知识库导引条
-  Widget _buildKnowledgeBanner() {
-    return GestureDetector(
-      onTap: () => setState(() => _tab = 1),
-      behavior: HitTestBehavior.opaque,
-      child: Container(
-        margin: const EdgeInsets.only(bottom: AppTokens.s12),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-        decoration: BoxDecoration(
-          gradient: const LinearGradient(
-            colors: [Color(0xFF0F766E), Color(0xFF0D9488)],
-          ),
-          borderRadius: BorderRadius.circular(AppTokens.r12),
-          boxShadow: const [
-            BoxShadow(
-              color: Color(0x200D9488),
-              blurRadius: 6,
-              offset: Offset(0, 2),
-            ),
-          ],
-        ),
-        child: Row(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(6),
-              decoration: BoxDecoration(
-                color: Colors.white.withAlpha(40),
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(Icons.auto_stories_rounded, color: Colors.white, size: 16),
-            ),
-            const SizedBox(width: 9),
-            const Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    '战术知识库系统 · 国手心法研习',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  SizedBox(height: 1),
-                  Text(
-                    '金三银七 · 现物避炮 · 筋牌防线 · 10大玩法番型',
-                    style: TextStyle(
-                      color: Color(0xFFCCFBF1),
-                      fontSize: 9.5,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const Icon(Icons.arrow_forward_ios_rounded, color: Colors.white70, size: 12),
-          ],
-        ),
       ),
     );
   }
@@ -808,50 +797,49 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
-  // 玩法卡片（M3 Card 风 + tonal 选中态 + 按压波纹）
+  // 玩法卡片（紧凑轻盈版，大幅缩减高度，一屏容纳更多玩法）
   Widget _buildModeCard(MahjongModeInfo info, bool isSelected) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.only(bottom: 6),
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
+        duration: const Duration(milliseconds: 180),
         curve: Curves.easeOut,
         decoration: BoxDecoration(
           color: isSelected ? _kAccentBg : AppTokens.surface,
-          borderRadius: AppTokens.radius16,
+          borderRadius: BorderRadius.circular(AppTokens.r12),
           border: Border.all(
             color: isSelected ? _kAccent : _kBorder,
-            width: isSelected ? 1.5 : 1.0,
+            width: isSelected ? 1.5 : 0.8,
           ),
           boxShadow: isSelected ? null : AppTokens.soft,
         ),
         child: Material(
           color: Colors.transparent,
           child: InkWell(
-            borderRadius: AppTokens.radius16,
+            borderRadius: BorderRadius.circular(AppTokens.r12),
             onTap: () => _selectMode(info.key),
             child: Padding(
               padding: const EdgeInsets.symmetric(
-                  horizontal: AppTokens.s16, vertical: AppTokens.s16),
+                  horizontal: AppTokens.s12, vertical: AppTokens.s8),
               child: Row(
                 children: [
-                  // 左侧图标徒章：选中时填色，形成 tonal 呼应。
                   AnimatedContainer(
-                    duration: const Duration(milliseconds: 200),
-                    width: 40,
-                    height: 40,
+                    duration: const Duration(milliseconds: 180),
+                    width: 32,
+                    height: 32,
                     decoration: BoxDecoration(
                       color: isSelected
                           ? AppTokens.brandContainer
                           : AppTokens.pillBg,
-                      borderRadius: BorderRadius.circular(AppTokens.r12),
+                      borderRadius: BorderRadius.circular(AppTokens.r8),
                     ),
                     child: Icon(
                       Icons.spa_outlined,
-                      size: 22,
+                      size: 17,
                       color: isSelected ? _kAccent : AppTokens.muted,
                     ),
                   ),
-                  const SizedBox(width: AppTokens.s12),
+                  const SizedBox(width: 10),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -859,18 +847,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         Text(
                           info.name,
                           style: TextStyle(
-                            fontSize: 16,
+                            fontSize: 13.5,
                             fontWeight: FontWeight.w600,
                             color: isSelected ? _kAccent : _kTextMain,
                           ),
                         ),
-                        const SizedBox(height: 4),
+                        const SizedBox(height: 2),
                         Text(
                           info.brief,
                           style: const TextStyle(
-                            fontSize: 13,
+                            fontSize: 11,
                             color: _kTextMuted,
-                            height: 1.2,
+                            height: 1.15,
                           ),
                         ),
                       ],
@@ -881,7 +869,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         ? Icons.radio_button_checked_rounded
                         : Icons.radio_button_unchecked_rounded,
                     color: isSelected ? _kAccent : AppTokens.borderStrong,
-                    size: 22,
+                    size: 19,
                   ),
                 ],
               ),

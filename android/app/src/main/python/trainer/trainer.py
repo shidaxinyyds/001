@@ -20,6 +20,7 @@ class Trainer:
         self.meld_counts: List[int] = [0] * 34
         self.dingque_suit: Optional[int] = None
         self.opponent_dingque_suits: List[int] = []
+        self.opponents: List = []
 
         self.sichuan_results: List[Dict] = []
         self.general_results: List[Dict] = []
@@ -35,6 +36,10 @@ class Trainer:
     def set_opponent_dingque(self, suits: List[int]) -> None:
         """设置对手定缺门列表，供防点炮雷达扣减危险与安全加分。"""
         self.opponent_dingque_suits = list(suits) if suits else []
+
+    def set_opponents(self, opponents: List) -> None:
+        """设置三位对手的实时状态模型（含弃牌、副露、定缺及听牌率），用于贝叶斯透视与收益雷达。"""
+        self.opponents = list(opponents) if opponents else []
 
     def set_visible(self, disc_counts: List[int], meld_counts: List[int]) -> None:
         """引擎在每帧识别后调用：传入当前牌河 / 副露计数，供进张计算扣减绝张。"""
@@ -104,6 +109,7 @@ class Trainer:
                     pool_remaining=pool_remaining,
                     dingque_suit=self.dingque_suit,
                     opponent_dingque_suits=self.opponent_dingque_suits,
+                    opponents=self.opponents,
                 )
                 res = {}
                 for item in self.sichuan_results:

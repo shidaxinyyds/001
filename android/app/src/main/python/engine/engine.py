@@ -1282,6 +1282,8 @@ class Engine:
         self._visual_discards = Counter()
         self._inferred_discards = Counter()
         self._river_zone_counts = {"bottom": 0, "top": 0, "left": 0, "right": 0}
+        self._opponent_discards: Dict[int, List[int]] = {1: [], 2: [], 3: []}
+        self._opponent_melds: Dict[int, List[int]] = {1: [], 2: [], 3: []}
         self._match_started: bool = False
         self._last_stable_counter: Counter = Counter()
         self._last_stable_n: int = 0
@@ -1575,6 +1577,8 @@ class Engine:
         self._inferred_discards.clear()
         self._river_absent_streak.clear()
         self._river_zone_counts = {"bottom": 0, "top": 0, "left": 0, "right": 0}
+        self._opponent_discards = {1: [], 2: [], 3: []}
+        self._opponent_melds = {1: [], 2: [], 3: []}
         # 清池后牌河基准失效：重置区域门控，下一帧强制重扫一次。
         self._river_scan_sig = None
         self._river_scan_wait = RIVER_SCAN_MAX_INTERVAL
@@ -2759,11 +2763,31 @@ class Engine:
                 # 并使进张按牌河/副露真实扣减绝张。
                 pool28 = pool_remaining_from_visible(
                     c28, disc_counts, getattr(self, "_meld_counts_34", None))
+                opp_models = []
+                try:
+                    from sichuan.hand_range import OpponentState
+                    for s_idx in (1, 2, 3):
+                        odq = opponent_dingque_suits[s_idx - 1] if opponent_dingque_suits and len(opponent_dingque_suits) >= s_idx else None
+                        odiscs = getattr(self, "_opponent_discards", {}).get(s_idx, [])
+                        omelds = getattr(self, "_opponent_melds", {}).get(s_idx, [])
+                        standing = max(1, 13 - len(omelds))
+                        opp_models.append(OpponentState(
+                            seat=s_idx,
+                            name={1: "下家", 2: "对家", 3: "上家"}.get(s_idx, f"对手{s_idx}"),
+                            dingque_suit=odq,
+                            discards=odiscs,
+                            melds=omelds,
+                            standing_count=standing,
+                        ))
+                except Exception:
+                    opp_models = None
+
                 sc_res = SichuanAnalyzer.analyze_discards(
                     c28,
                     pool_remaining=pool28,
                     dingque_suit=dingque_suit,
                     opponent_dingque_suits=opponent_dingque_suits,
+                    opponents=opp_models,
                 )
                 if sc_res:
                     return [{
@@ -2775,6 +2799,10 @@ class Engine:
                         "ting_tiles": r["ting_tiles"],
                         "ting_details": r.get("ting_details", []),
                         "is_dingque": r["is_dingque"],
+                        "win_equity": r.get("win_equity"),
+                        "ev_gauge": r.get("ev_gauge"),
+                        "danger_flow": r.get("danger_flow"),
+                        "policy_prob": r.get("policy_prob"),
                     } for r in sc_res[:6]]
             except Exception:
                 pass
@@ -3370,14 +3398,24 @@ class Engine:
                     if bg_river_entries:
                         bg_zone_counts: Dict[str, int] = {"bottom": 0, "top": 0, "left": 0, "right": 0}
                         bg_discards = []
+                        zone_to_seat = {"right": 1, "top": 2, "left": 3}
+                        seat_discards: Dict[int, List[int]] = {1: [], 2: [], 3: []}
                         for cd, zn in bg_river_entries:
                             if cd and mpsz_to_tile34_index(cd) in avail:
                                 bg_discards.append(cd)
                                 if zn in bg_zone_counts:
                                     bg_zone_counts[zn] += 1
+                                seat = zone_to_seat.get(zn)
+                                if seat:
+                                    t34 = mpsz_to_tile34_index(cd)
+                                    if t34 < 27:
+                                        seat_discards[seat].append(t34)
                         self._river_zone_counts = bg_zone_counts
+                        self._opponent_discards = seat_discards
                         self._update_visual_ledger(bg_discards)
                     if bg_meld_entries:
+                        zone_to_seat = {"right": 1, "top": 2, "left": 3}
+                        seat_melds: Dict[int, List[int]] = {1: [], 2: [], 3: []}
                         frame_melds = [0] * 34
                         for _region, md, n_tiles in bg_meld_entries:
                             try:
@@ -3386,6 +3424,10 @@ class Engine:
                                 continue
                             if md and midx in avail:
                                 frame_melds[midx] += n_tiles
+                                seat = zone_to_seat.get(_region)
+                                if seat and midx < 27:
+                                    seat_melds[seat].extend([midx] * n_tiles)
+                        self._opponent_melds = seat_melds
                         for i in range(34):
                             if frame_melds[i] > self._meld_counts_34[i]:
                                 if self._pending_melds_34[i] >= frame_melds[i]:
@@ -3704,6 +3746,25 @@ class Engine:
                         self.trainer.set_dingque(dingque_suit)
                     if opponent_dingque_suits:
                         self.trainer.set_opponent_dingque(opponent_dingque_suits)
+                    try:
+                        from sichuan.hand_range import OpponentState
+                        opp_models = []
+                        for s_idx in (1, 2, 3):
+                            odq = opponent_dingque_suits[s_idx - 1] if opponent_dingque_suits and len(opponent_dingque_suits) >= s_idx else None
+                            odiscs = getattr(self, "_opponent_discards", {}).get(s_idx, [])
+                            omelds = getattr(self, "_opponent_melds", {}).get(s_idx, [])
+                            standing = max(1, 13 - len(omelds))
+                            opp_models.append(OpponentState(
+                                seat=s_idx,
+                                name={1: "下家", 2: "对家", 3: "上家"}.get(s_idx, f"对手{s_idx}"),
+                                dingque_suit=odq,
+                                discards=odiscs,
+                                melds=omelds,
+                                standing_count=standing,
+                            ))
+                        self.trainer.set_opponents(opp_models)
+                    except Exception:
+                        pass
                 shanten, advice = self.build_advice(hand, disc_counts, meld_counts=self._meld_counts_34)
                 self._perf_ms["advice"].append((time.time() - _t_advice) * 1000.0)
                 self._stable_hand_mpsz = hand_mpsz
@@ -3999,16 +4060,50 @@ class Engine:
                             if t in radar_map:
                                 adv["defense_level"] = radar_map[t]["level"]
                                 adv["defense_reason"] = radar_map[t]["reason"]
-                    # 贝叶斯对手手牌概率透视
+                    # 组装高精实时对手模型（包含对手实际弃牌、副露、定缺门与听牌推导）
+                    opp_models = []
+                    try:
+                        from sichuan.hand_range import OpponentState
+                        for s_idx in (1, 2, 3):
+                            odq = opponent_dingque_suits[s_idx - 1] if opponent_dingque_suits and len(opponent_dingque_suits) >= s_idx else None
+                            odiscs = getattr(self, "_opponent_discards", {}).get(s_idx, [])
+                            omelds = getattr(self, "_opponent_melds", {}).get(s_idx, [])
+                            standing = max(1, 13 - len(omelds))
+                            opp_models.append(OpponentState(
+                                seat=s_idx,
+                                name={1: "下家", 2: "对家", 3: "上家"}.get(s_idx, f"对手{s_idx}"),
+                                dingque_suit=odq,
+                                discards=odiscs,
+                                melds=omelds,
+                                standing_count=standing,
+                            ))
+                    except Exception:
+                        opp_models = None
+
                     bayesian_hand_ranges = SichuanAnalyzer.get_bayesian_hand_ranges(
                         hand_counts_final[:27],
                         pool_remaining=pool_rem_27,
                         opponent_dingque_suits=opponent_dingque_suits,
+                        opponents=opp_models,
                     )
                     if advice and isinstance(advice, list) and len(advice) > 0:
                         top_win_equity = advice[0].get("win_equity", 0.5)
                         top_ev_gauge = advice[0].get("ev_gauge")
                         top_danger_flow = advice[0].get("danger_flow")
+                    # 若单手牌推荐未携带 ev_gauge，根据全局向听与牌池动态补齐
+                    if top_ev_gauge is None:
+                        try:
+                            from sichuan.equity_radar import WinEquityGauge
+                            sh_cur = shanten if shanten is not None else 2
+                            opp_probs = [opp.estimate_tenpai_probability() for opp in opp_models] if opp_models else None
+                            eq = WinEquityGauge.calculate_win_equity(
+                                sh_cur, None, 0, pool_rem_27,
+                                opp_probs
+                            )
+                            top_ev_gauge = WinEquityGauge.evaluate_gauge(eq)
+                            top_win_equity = eq
+                        except Exception:
+                            pass
                 except Exception:
                     pass
             elif tile_count > 0 and status not in ("waiting", "no_tiles") and hand_mpsz:
