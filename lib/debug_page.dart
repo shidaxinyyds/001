@@ -26,6 +26,83 @@ class _DebugPageState extends State<DebugPage> {
   bool _loading = true;
   bool _applying = false;
 
+  int _fortuneIndex = 0;
+
+  static const List<Map<String, String>> _kFortunes = [
+    {
+      'title': '鸿运当头 · 紫气东来',
+      'level': '上上大吉',
+      'score': '98',
+      'direction': '东南生财 · 迎财入座',
+      'element': '条子顺风 · 连珠大吉',
+      'quote': '牌顺乘风破浪，牌逆静水流深。手牌不济莫慌乱，守住现物保金身。',
+      'comfort': '当前牌势蒸蒸日上，气场强盛！积极做大番牌，敢打敢拼，胜利在握。',
+    },
+    {
+      'title': '金汤固守 · 蓄势待发',
+      'level': '静水深流',
+      'score': '93',
+      'direction': '正南护财 · 坐镇中军',
+      'element': '万字通达 · 稳扎稳打',
+      'quote': '逆风防守守其险，顺风进攻取其胜。急躁乃败军之由，定心即立于不败之地。',
+      'comfort': '起手牌杂切莫急躁，跟打熟张不点炮；守住底分，转机与大牌往往后发制人。',
+    },
+    {
+      'title': '潜龙在渊 · 必有大成',
+      'level': '厚积薄发',
+      'score': '95',
+      'direction': '正东聚气 · 巧借东风',
+      'element': '筒子圆满 · 逢叫必和',
+      'quote': '胜负皆常理，心定牌自通。深吸一口气，保持严谨决策，牌流自会回转。',
+      'comfort': '牌局瞬息万变，AI 已为您实时锁定最高 EV 期望与绝张防守，从容应对即可。',
+    },
+    {
+      'title': '龙腾四海 · 势如破竹',
+      'level': '雀圣神威',
+      'score': '97',
+      'direction': '西南纳祥 · 顺风破浪',
+      'element': '大番聚气 · 金钩迎春',
+      'quote': '宁弃一手烂牌，不放一人点炮。稳扎稳打控全场，顺势而为定乾坤。',
+      'comfort': '对手弃牌动向已全息推导，跟打现物安全张，静待高番反戈一击！',
+    },
+    {
+      'title': '泰然自若 · 稳如磐石',
+      'level': '定心无量',
+      'score': '94',
+      'direction': '正西生金 · 心境如水',
+      'element': '全色兼备 · 气度非凡',
+      'quote': '心怀平常心，算尽盘中理。牌运有波峰波谷，真正的高手胜在心境沉着。',
+      'comfort': '戒骄戒躁，把注意力交给当下每一次进张与舍牌，长线胜率必然眷顾沉着之人。',
+    },
+  ];
+
+  void _cycleFortune() {
+    setState(() {
+      _fortuneIndex = (_fortuneIndex + 1) % _kFortunes.length;
+    });
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: const Color(0xFF0F172A),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        content: Row(
+          children: const [
+            Icon(Icons.auto_awesome, color: Color(0xFFF59E0B), size: 18),
+            SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                '气场提振成功：心态归宁，胜势气场已达巅峰！',
+                style: TextStyle(fontSize: 13, color: Colors.white, fontWeight: FontWeight.w500),
+              ),
+            ),
+          ],
+        ),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -170,6 +247,7 @@ class _DebugPageState extends State<DebugPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            _buildFortuneCard(),
             _groupCard(
               title: '识别策略',
               children: [
@@ -393,4 +471,338 @@ class _DebugPageState extends State<DebugPage> {
                       TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
         ),
       );
+
+  Widget _buildFortuneCard() {
+    final cur = _kFortunes[_fortuneIndex];
+    final score = int.tryParse(cur['score'] ?? '95') ?? 95;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [
+            Color(0xFF0F172A),
+            Color(0xFF1E293B),
+            Color(0xFF134E4A),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFF334155), width: 1),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x33000000),
+            blurRadius: 16,
+            offset: Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 顶部栏：标题 + 提振气场交互按钮
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 12, 10),
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                    color: const Color(0x26F59E0B),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: const Color(0x4DF59E0B), width: 0.8),
+                  ),
+                  child: const Icon(Icons.wb_sunny_rounded, color: Color(0xFFF59E0B), size: 16),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: const [
+                      Text(
+                        '今日雀局运势 · 军师心盘',
+                        style: TextStyle(
+                          fontSize: 14.5,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.white,
+                          letterSpacing: 0.3,
+                        ),
+                      ),
+                      SizedBox(height: 1),
+                      Text(
+                        '心理赋能 · 逆风安抚 · 胜势强化',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Color(0xFF94A3B8),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                InkWell(
+                  onTap: _cycleFortune,
+                  borderRadius: BorderRadius.circular(20),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        colors: [Color(0xFFF59E0B), Color(0xFFD97706)],
+                      ),
+                      borderRadius: BorderRadius.circular(20),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color(0x40F59E0B),
+                          blurRadius: 6,
+                          offset: Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: const [
+                        Icon(Icons.refresh_rounded, size: 13, color: Colors.white),
+                        SizedBox(width: 4),
+                        Text(
+                          '参悟心法',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const Divider(height: 1, color: Color(0xFF1E293B)),
+
+          // 核心气运评级 + 胜势指数条
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      cur['title'] ?? '',
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFFFDE68A),
+                        letterSpacing: 0.2,
+                      ),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: const Color(0x33F59E0B),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: const Color(0x66F59E0B), width: 0.7),
+                      ),
+                      child: Text(
+                        cur['level'] ?? '',
+                        style: const TextStyle(
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.bold,
+                          color: Color(0xFFFBBF24),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+
+                // 胜势指数能量条
+                Row(
+                  children: [
+                    const Text(
+                      '心理胜势指数',
+                      style: TextStyle(fontSize: 11, color: Color(0xFF94A3B8)),
+                    ),
+                    const Spacer(),
+                    Text(
+                      '$score% · 极佳',
+                      style: const TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF34D399),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 5),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: SizedBox(
+                    height: 5,
+                    child: LinearProgressIndicator(
+                      value: score / 100.0,
+                      backgroundColor: const Color(0xFF334155),
+                      valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF10B981)),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // 吉位与顺风牌
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: const Color(0x331E293B),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: const Color(0x4D334155), width: 0.8),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.explore_outlined, size: 14, color: Color(0xFF38BDF8)),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            cur['direction'] ?? '',
+                            style: const TextStyle(
+                              fontSize: 11,
+                              color: Color(0xFFE2E8F0),
+                              fontWeight: FontWeight.w500,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: const Color(0x331E293B),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: const Color(0x4D334155), width: 0.8),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.casino_outlined, size: 14, color: Color(0xFFA78BFA)),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            cur['element'] ?? '',
+                            style: const TextStyle(
+                              fontSize: 11,
+                              color: Color(0xFFE2E8F0),
+                              fontWeight: FontWeight.w500,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // 军师安抚箴言与心态指引
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+            child: Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0x660B132B),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0x4D475569), width: 0.8),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(Icons.format_quote_rounded, color: Color(0xFFF59E0B), size: 16),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: Text(
+                          cur['quote'] ?? '',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Color(0xFFFEF08A),
+                            height: 1.4,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(Icons.shield_outlined, color: Color(0xFF14B8A6), size: 14),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          cur['comfort'] ?? '',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Color(0xFFCBD5E1),
+                            height: 1.35,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          // 联动开关：智能牌势安抚模式
+          Container(
+            padding: const EdgeInsets.fromLTRB(16, 8, 12, 10),
+            decoration: const BoxDecoration(
+              color: Color(0x33000000),
+              borderRadius: BorderRadius.vertical(bottom: Radius.circular(18)),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.favorite_outline_rounded, size: 14, color: Color(0xFFF43F5E)),
+                const SizedBox(width: 6),
+                const Expanded(
+                  child: Text(
+                    '逆风智能安抚与防守保分（避免上头）',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      color: Color(0xFFE2E8F0),
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+                Switch(
+                  value: _cfg.moodGuard,
+                  activeColor: const Color(0xFF14B8A6),
+                  onChanged: (v) => _update(_cfg.copyWith(moodGuard: v)),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }

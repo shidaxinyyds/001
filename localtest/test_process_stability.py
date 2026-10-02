@@ -31,9 +31,10 @@ def check(name, cond, detail=""):
 
 def make_fake_image(h=600, w=1100, seed=0):
     rng = np.random.default_rng(seed)
-    img = rng.integers(0, 256, (h, w, 3), dtype=np.uint8)
-    # 画两组横排"牌"（仅用于给帧差签名相似的底色，避免首帧被判定为突变）；
-    # 牌河带放在画面中部（引擎位置先验：牌河中线的需 0.20–0.72×h）
+    # 模拟真实牌桌：绿呢背景 + 细微纹理
+    img = np.full((h, w, 3), (40, 115, 50), dtype=np.uint8)
+    noise = rng.integers(-5, 6, (h, w, 3), dtype=np.int16)
+    img = np.clip(img.astype(np.int16) + noise, 0, 255).astype(np.uint8)
     cv2.rectangle(img, (100, 460), (100 + 13 * 50, 540), (210, 200, 180), -1)
     cv2.rectangle(img, (100, 250), (100 + 6 * 50, 330), (160, 150, 130), -1)
     return img
@@ -236,6 +237,8 @@ class TwoStageDetector:
         self._glyphs = type("G", (), {"nums": {"a": 1}})()
         self._styles = type("S", (), {"tpls": [1]})()
         self.call_count = 0
+    def detect_hand_strip(self, image):
+        return hand_dets
     def detect_all_rows(self, image, **_kw):
         self.call_count += 1
         # 牌河：20 张 vs 4 张（5 种牌×4 张循环，单种不超物理上限）
@@ -249,6 +252,8 @@ class TwoStageDetector:
         return [hand_dets, discard_dets]
 
 eng = make_fake_engine(n_tiles_hand=13, hand_labels=hand_labels)
+eng._roi = (0.0, 1.0)
+eng._should_scan_river = lambda img: True
 eng.get_detector = lambda: TwoStageDetector()  # type: ignore
 eng._tile_voter = engine_mod._TileVoter(window=engine_mod.VOTE_WINDOW)
 eng._frame_skipper = engine_mod._FrameSkipper()
