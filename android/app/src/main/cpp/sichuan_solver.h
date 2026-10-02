@@ -47,6 +47,7 @@ struct DiscardAdvice {
     double ev_score;             // 综合期望估值 EV
     std::vector<int> waiting_tiles; // 进张牌列表
     std::string tag;             // "定缺推荐", "清一色诱导", "七对向", "最大进张", etc.
+    bool is_dingque = false;     // 是否为定缺门必打牌
 };
 
 class SichuanSolver {

@@ -210,6 +210,7 @@ std::vector<DiscardAdvice> SichuanSolver::evaluate_hand(
             adv.ukeire_theoretical = 0;
             adv.ukeire_live = 0;
             adv.tag = "定缺必打";
+            adv.is_dingque = true;
 
             // 优先级打分：
             // 孤张 1, 9 (100) > 孤张 2, 8 (90) > 孤张 3..7 (80) > 搭子/对子
