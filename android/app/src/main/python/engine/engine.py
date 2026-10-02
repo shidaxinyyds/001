@@ -2034,6 +2034,14 @@ class Engine:
                         }
                         if "max_fan" in sr:
                             entry["max_fan"] = sr["max_fan"]
+                        if "danger_flow" in sr:
+                            entry["danger_flow"] = sr["danger_flow"]
+                        if "policy_prob" in sr:
+                            entry["policy_prob"] = sr["policy_prob"]
+                        if "win_equity" in sr:
+                            entry["win_equity"] = sr["win_equity"]
+                        if "ev_gauge" in sr:
+                            entry["ev_gauge"] = sr["ev_gauge"]
                         advice.append(entry)
                         if len(advice) >= 6:
                             break
@@ -2056,6 +2064,14 @@ class Engine:
                             }
                             if "max_fan" in sr:
                                 entry["max_fan"] = sr["max_fan"]
+                            if "danger_flow" in sr:
+                                entry["danger_flow"] = sr["danger_flow"]
+                            if "policy_prob" in sr:
+                                entry["policy_prob"] = sr["policy_prob"]
+                            if "win_equity" in sr:
+                                entry["win_equity"] = sr["win_equity"]
+                            if "ev_gauge" in sr:
+                                entry["ev_gauge"] = sr["ev_gauge"]
                             advice.append(entry)
                 elif getattr(self.trainer, "general_results", None):
                     advice = []
@@ -3862,6 +3878,10 @@ class Engine:
             defense_radar = []
             hot_tiles = []
             dead_tiles = []
+            bayesian_hand_ranges = []
+            top_win_equity = 0.5
+            top_ev_gauge = None
+            top_danger_flow = None
 
             if is_sichuan_family(self.mode) and tile_count > 0 and status not in ("waiting", "no_tiles") and hand_mpsz:
                 try:
@@ -3909,6 +3929,16 @@ class Engine:
                             if t in radar_map:
                                 adv["defense_level"] = radar_map[t]["level"]
                                 adv["defense_reason"] = radar_map[t]["reason"]
+                    # 贝叶斯对手手牌概率透视
+                    bayesian_hand_ranges = SichuanAnalyzer.get_bayesian_hand_ranges(
+                        hand_counts_final[:27],
+                        pool_remaining=pool_rem_27,
+                        opponent_dingque_suits=opponent_dingque_suits,
+                    )
+                    if advice and isinstance(advice, list) and len(advice) > 0:
+                        top_win_equity = advice[0].get("win_equity", 0.5)
+                        top_ev_gauge = advice[0].get("ev_gauge")
+                        top_danger_flow = advice[0].get("danger_flow")
                 except Exception:
                     pass
             elif tile_count > 0 and status not in ("waiting", "no_tiles") and hand_mpsz:
@@ -4208,6 +4238,10 @@ class Engine:
                 "fast_advice": fast_advice,
                 "big_advice": big_advice,
                 "mood": mood,
+                "win_equity": round(top_win_equity, 3),
+                "ev_gauge": top_ev_gauge,
+                "hand_ranges": bayesian_hand_ranges,
+                "danger_flow": top_danger_flow,
                 "hot_tiles": hot_tiles,
                 "dead_tiles": dead_tiles,
                 "opponents_dingque": opponent_dingque_suits,

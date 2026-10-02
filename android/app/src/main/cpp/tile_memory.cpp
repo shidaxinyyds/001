@@ -15,6 +15,11 @@ void TileMemory::reset() {
     visual_melds_.fill(0);
     inferred_discards_.fill(0);
     last_stable_hand_size_ = 0;
+    opponent_dingques_.fill(-1);
+    for (int i = 0; i < 4; ++i) {
+        opponent_discards_[i].clear();
+        opponent_melds_[i].clear();
+    }
 }
 
 int TileMemory::update_hand(const std::array<int, NUM_TILES_TOTAL>& new_hand_counts) {
@@ -40,6 +45,7 @@ int TileMemory::update_hand(const std::array<int, NUM_TILES_TOTAL>& new_hand_cou
             if (hand_counts_[i] > new_hand_counts[i]) {
                 discarded_tile = i;
                 inferred_discards_[i] = std::min(4, inferred_discards_[i] + 1);
+                opponent_discards_[0].push_back(i); // 我方打牌
                 break; // 只计一张
             }
         }
@@ -67,6 +73,49 @@ void TileMemory::add_meld(int tile_idx, int count) {
     if (tile_idx < 0 || tile_idx >= NUM_TILES_TOTAL) return;
     std::lock_guard<std::mutex> lock(mtx_);
     visual_melds_[tile_idx] = std::min(4, visual_melds_[tile_idx] + count);
+}
+
+void TileMemory::set_opponent_dingque(int seat, int suit) {
+    if (seat < 0 || seat >= 4) return;
+    std::lock_guard<std::mutex> lock(mtx_);
+    opponent_dingques_[seat] = suit;
+}
+
+int TileMemory::get_opponent_dingque(int seat) const {
+    if (seat < 0 || seat >= 4) return -1;
+    std::lock_guard<std::mutex> lock(mtx_);
+    return opponent_dingques_[seat];
+}
+
+void TileMemory::add_opponent_discard(int seat, int tile_idx) {
+    if (seat < 0 || seat >= 4 || tile_idx < 0 || tile_idx >= NUM_TILES_TOTAL) return;
+    std::lock_guard<std::mutex> lock(mtx_);
+    opponent_discards_[seat].push_back(tile_idx);
+    visual_discards_[tile_idx] = std::min(4, visual_discards_[tile_idx] + 1);
+    if (visual_discards_[tile_idx] >= inferred_discards_[tile_idx]) {
+        inferred_discards_[tile_idx] = 0;
+    }
+}
+
+std::vector<int> TileMemory::get_opponent_discards(int seat) const {
+    if (seat < 0 || seat >= 4) return {};
+    std::lock_guard<std::mutex> lock(mtx_);
+    return opponent_discards_[seat];
+}
+
+void TileMemory::add_opponent_meld(int seat, int tile_idx, int count) {
+    if (seat < 0 || seat >= 4 || tile_idx < 0 || tile_idx >= NUM_TILES_TOTAL) return;
+    std::lock_guard<std::mutex> lock(mtx_);
+    for (int i = 0; i < count; ++i) {
+        opponent_melds_[seat].push_back(tile_idx);
+    }
+    visual_melds_[tile_idx] = std::min(4, visual_melds_[tile_idx] + count);
+}
+
+std::vector<int> TileMemory::get_opponent_melds(int seat) const {
+    if (seat < 0 || seat >= 4) return {};
+    std::lock_guard<std::mutex> lock(mtx_);
+    return opponent_melds_[seat];
 }
 
 std::array<int, NUM_TILES_TOTAL> TileMemory::get_remaining_tiles() const {
@@ -121,7 +170,7 @@ std::string TileMemory::get_remaining_matrix_json() const {
         if (i > 18) ss << ",";
         ss << rem[i];
     }
-    ss << "],\"z\":[]}";
+    ss << "]}";
     return ss.str();
 }
 

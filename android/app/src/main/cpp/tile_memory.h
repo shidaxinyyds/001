@@ -26,6 +26,18 @@ public:
     // 录入碰杠副露 (视觉或外部来源)
     void add_meld(int tile_idx, int count = 3);
 
+    // 设置对手定缺门 (seat: 1=下家, 2=对家, 3=上家; suit: 0=万, 1=筒, 2=条, -1=未定)
+    void set_opponent_dingque(int seat, int suit);
+    int get_opponent_dingque(int seat) const;
+
+    // 录入对手弃牌
+    void add_opponent_discard(int seat, int tile_idx);
+    std::vector<int> get_opponent_discards(int seat) const;
+
+    // 录入对手副露
+    void add_opponent_meld(int seat, int tile_idx, int count = 3);
+    std::vector<int> get_opponent_melds(int seat) const;
+
     // 获取当前场上真实存活剩余牌 (各牌 0..4)
     std::array<int, NUM_TILES_TOTAL> get_remaining_tiles() const;
 
@@ -48,6 +60,11 @@ private:
     std::array<int, NUM_TILES_TOTAL> visual_melds_;
     std::array<int, NUM_TILES_TOTAL> inferred_discards_;
     int last_stable_hand_size_;
+
+    // 各家 (1:下家, 2:对家, 3:上家) 的定缺与弃牌/副露跟踪
+    std::array<int, 4> opponent_dingques_;
+    std::array<std::vector<int>, 4> opponent_discards_;
+    std::array<std::vector<int>, 4> opponent_melds_;
 };
 
 } // namespace mahjong

@@ -48,6 +48,18 @@ public class NativeEngine {
         }
     }
 
+    public static void setOpponentDingque(int seat, int suit) {
+        if (isLoaded) {
+            nativeSetOpponentDingque(seat, suit);
+        }
+    }
+
+    public static void recordOpponentDiscard(int seat, int tileIdx) {
+        if (isLoaded) {
+            nativeRecordOpponentDiscard(seat, tileIdx);
+        }
+    }
+
     public static String evaluate(int[] handTiles, int visualDqSuit, boolean isSwap, boolean isDq, boolean isTable) {
         if (!isLoaded) {
             return null;
@@ -61,5 +73,7 @@ public class NativeEngine {
     private static native void nativeSetDingque(int suit);
     private static native void nativeRecordDiscard(int tileIdx, int count);
     private static native void nativeRecordMeld(int tileIdx, int count);
+    private static native void nativeSetOpponentDingque(int seat, int suit);
+    private static native void nativeRecordOpponentDiscard(int seat, int tileIdx);
     private static native String nativeEvaluate(int[] handTiles, int visualDqSuit, boolean isSwap, boolean isDq, boolean isTable);
 }

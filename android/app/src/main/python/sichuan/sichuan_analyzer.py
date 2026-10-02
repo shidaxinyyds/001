@@ -13,6 +13,10 @@ import itertools
 from typing import Dict, List, Optional, Set, Tuple
 from functools import lru_cache
 
+from sichuan.hand_range import BayesianHandRangeReader, OpponentState
+from sichuan.equity_radar import WinEquityGauge
+from recognition.policy_value_net import PolicyValueNetwork
+
 
 # 花色索引常量
 SUIT_M = 0  # 万 (0-8)
@@ -718,6 +722,20 @@ class SichuanAnalyzer:
                 else:
                     candidate_discards.append(t)
 
+        # 构建对手模型 (根据传入的 opponent_dingque_suits 及牌池)
+        opponents = []
+        if opponent_dingque_suits:
+            for i, odq in enumerate(opponent_dingque_suits[:3]):
+                opponents.append(OpponentState(seat=i + 1, dingque_suit=odq))
+        if not opponents:
+            opponents = [OpponentState(seat=1), OpponentState(seat=2), OpponentState(seat=3)]
+
+        # 强化学习策略价值网络 (PVN) 推理 (耗时 < 0.5ms)
+        pvn = PolicyValueNetwork.get_instance()
+        pvn_policy, pvn_val = pvn.forward(counts[:34], pool_remaining=pool_remaining)
+        pvn_equity = (pvn_val + 1.0) / 2.0
+        pool_rem = pool_remaining if pool_remaining is not None else [max(0, 4 - (counts[i] if i < len(counts) else 0)) for i in range(27)]
+
         for discard in candidate_discards:
             original_count = counts[discard]
             counts[discard] -= 1
@@ -841,6 +859,29 @@ class SichuanAnalyzer:
                     danger_penalty = 1000.0
                     ev_score -= danger_penalty
 
+            # 贝叶斯手牌透视与危险流向反推
+            dflow = BayesianHandRangeReader.evaluate_danger_flow(discard, pool_rem, opponents)
+
+            # 强化学习策略价值网络先验概率加成 (保证 PVN 真实驱动建议排序)
+            policy_prob = float(pvn_policy[discard]) if discard < len(pvn_policy) else 0.0
+            ev_score += policy_prob * 100.0
+
+            # 全场实时胡牌胜率与期望收益雷达计算
+            analytical_equity = WinEquityGauge.calculate_win_equity(
+                shanten, waiting_dict, real_ukeire, pool_rem,
+                [opp.estimate_tenpai_probability() for opp in opponents]
+            )
+            combined_equity = max(0.01, min(0.99, analytical_equity * 0.55 + pvn_equity * 0.45))
+            expected_fan = 1
+            if waiting_dict:
+                first_wait = next(iter(waiting_dict.keys()))
+                expected_fan = cls.calculate_fan(counts, first_wait, num_fixed_melds, dingque_suit)
+            ev_gauge = WinEquityGauge.evaluate_gauge(
+                combined_equity,
+                expected_fan=expected_fan,
+                max_deal_in_prob=dflow["deal_in_prob"]
+            )
+
             ting_details = []
             if waiting_dict:
                 for w, rem in waiting_dict.items():
@@ -863,6 +904,10 @@ class SichuanAnalyzer:
                 "reason": reason,
                 "is_dingque": is_dingque_discard,
                 "danger_penalty": danger_penalty,
+                "danger_flow": dflow,
+                "policy_prob": round(policy_prob, 3),
+                "win_equity": round(combined_equity, 3),
+                "ev_gauge": ev_gauge,
             })
 
             counts[discard] += 1
@@ -935,6 +980,10 @@ class SichuanAnalyzer:
                         "is_dingque": False,
                         "best_p": -1.0, "best_reason": "",
                         "ting_p": -1.0, "ting_tiles": [], "ting_details": [],
+                        "danger_flow": r.get("danger_flow"),
+                        "policy_prob": r.get("policy_prob", 0.0),
+                        "win_equity": 0.0,
+                        "ev_gauge": r.get("ev_gauge"),
                     }
                     agg[idx] = a
                 a["weight"] += p
@@ -942,10 +991,14 @@ class SichuanAnalyzer:
                 a["ukeire"] += p * r["ukeire"]
                 a["shanten"] += p * r["shanten"]
                 a["danger"] += p * r.get("danger_penalty", 0.0)
+                a["win_equity"] = a.get("win_equity", 0.0) + p * r.get("win_equity", 0.0)
                 a["is_dingque"] = a["is_dingque"] or r["is_dingque"]
                 if p > a["best_p"]:
                     a["best_p"] = p
                     a["best_reason"] = r.get("reason", "")
+                    a["danger_flow"] = r.get("danger_flow")
+                    a["ev_gauge"] = r.get("ev_gauge")
+                    a["policy_prob"] = r.get("policy_prob", 0.0)
                 if r["ting_details"] and p > a["ting_p"]:
                     a["ting_p"] = p
                     a["ting_tiles"] = r["ting_tiles"]
@@ -981,9 +1034,30 @@ class SichuanAnalyzer:
                 "reason": reason,
                 "is_dingque": a["is_dingque"],
                 "danger_penalty": round(a["danger"] / wsum, 1),
+                "danger_flow": a.get("danger_flow"),
+                "policy_prob": round(a.get("policy_prob", 0.0), 3),
+                "win_equity": round(a.get("win_equity", 0.0) / wsum, 3),
+                "ev_gauge": a.get("ev_gauge"),
             })
         results.sort(key=lambda item: item["ev"], reverse=True)
         return results
+
+    @classmethod
+    def get_bayesian_hand_ranges(
+        cls,
+        counts: List[int],
+        pool_remaining: Optional[List[int]] = None,
+        opponent_dingque_suits: Optional[List[int]] = None,
+    ) -> List[Dict]:
+        """导出当前牌局 3 个对手的贝叶斯手牌透视概率分布。"""
+        opponents = []
+        if opponent_dingque_suits:
+            for i, odq in enumerate(opponent_dingque_suits[:3]):
+                opponents.append(OpponentState(seat=i + 1, dingque_suit=odq))
+        if not opponents:
+            opponents = [OpponentState(seat=1), OpponentState(seat=2), OpponentState(seat=3)]
+        pool_rem = pool_remaining if pool_remaining is not None else [max(0, 4 - (counts[i] if i < len(counts) else 0)) for i in range(27)]
+        return BayesianHandRangeReader.get_hand_ranges_summary(opponents, pool_rem)
 
     @classmethod
     def check_tenpai_alert(

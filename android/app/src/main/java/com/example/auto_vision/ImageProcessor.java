@@ -671,6 +671,16 @@ public class ImageProcessor {
 
                     int[] handTiles = parseMpszToTiles(handStr);
 
+                    org.json.JSONArray opDqArr = pyObj.optJSONArray("opponents_dingque");
+                    if (opDqArr != null) {
+                        for (int i = 0; i < opDqArr.length(); ++i) {
+                            int s = opDqArr.optInt(i, -1);
+                            if (s >= 0 && s <= 2) {
+                                NativeEngine.setOpponentDingque(i + 1, s);
+                            }
+                        }
+                    }
+
                     String nativeJsonStr = NativeEngine.evaluate(handTiles, dqSuit, isSwap, isDq, isTable);
                     if (nativeJsonStr != null && !nativeJsonStr.isEmpty() && nativeJsonStr.startsWith("{")) {
                         org.json.JSONObject nativeObj = new org.json.JSONObject(nativeJsonStr);
@@ -684,6 +694,18 @@ public class ImageProcessor {
                         }
                         if (nativeObj.has("mood")) {
                             pyObj.put("mood", nativeObj.optJSONObject("mood"));
+                        }
+                        if (nativeObj.has("win_equity")) {
+                            pyObj.put("win_equity", nativeObj.optDouble("win_equity", 0.5));
+                        }
+                        if (nativeObj.has("ev_gauge")) {
+                            pyObj.put("ev_gauge", nativeObj.optJSONObject("ev_gauge"));
+                        }
+                        if (nativeObj.has("hand_ranges")) {
+                            pyObj.put("hand_ranges", nativeObj.optJSONArray("hand_ranges"));
+                        }
+                        if (nativeObj.has("danger_flow")) {
+                            pyObj.put("danger_flow", nativeObj.optJSONObject("danger_flow"));
                         }
                         pyObj.put("inferred_discard", nativeObj.optInt("inferred_discard", -1));
 

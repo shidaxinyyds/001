@@ -2392,6 +2392,268 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         ],
       ),
     );
+  /// 全场实时胡牌胜率与期望收益雷达 (Win Equity & EV Gauge)
+  Widget _buildWinEquityGaugeWidget(Map<String, dynamic> evGauge, double? winEquity) {
+    final int winRate = (evGauge['win_rate'] as num? ?? ((winEquity ?? 0.5) * 100)).toInt();
+    final double netEv = (evGauge['net_ev'] as num? ?? 0.0).toDouble();
+    final String level = (evGauge['level'] as String?) ?? 'neutral';
+    final String badge = (evGauge['badge'] as String?) ?? '';
+    final String insight = (evGauge['insight'] as String?) ?? '';
+
+    Color primaryColor;
+    Color gradientStart;
+    Color gradientEnd;
+    if (level == 'extreme') {
+      primaryColor = const Color(0xFFFF5252);
+      gradientStart = const Color(0x385C0A0A);
+      gradientEnd = const Color(0x22360505);
+    } else if (level == 'high') {
+      primaryColor = const Color(0xFF00E676);
+      gradientStart = const Color(0x38004D40);
+      gradientEnd = const Color(0x22002E26);
+    } else if (level == 'risk') {
+      primaryColor = const Color(0xFFFFB74D);
+      gradientStart = const Color(0x384E342E);
+      gradientEnd = const Color(0x22372722);
+    } else {
+      primaryColor = const Color(0xFF64B5F6);
+      gradientStart = const Color(0x381A237E);
+      gradientEnd = const Color(0x2210164D);
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5.5),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [gradientStart, gradientEnd],
+        ),
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: primaryColor.withAlpha(70), width: 0.7),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x18000000),
+            blurRadius: 3,
+            offset: Offset(0, 1),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.radar_rounded, color: primaryColor, size: 12.5),
+                  const SizedBox(width: 4.5),
+                  Text(
+                    badge.isNotEmpty ? badge : '全场胜率收益雷达',
+                    style: TextStyle(
+                      color: primaryColor,
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 0.2,
+                      decoration: TextDecoration.none,
+                    ),
+                  ),
+                ],
+              ),
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: primaryColor.withAlpha(35),
+                      borderRadius: BorderRadius.circular(3),
+                      border: Border.all(color: primaryColor.withAlpha(80), width: 0.5),
+                    ),
+                    child: Text(
+                      '胜率 $winRate%',
+                      style: TextStyle(
+                        color: primaryColor,
+                        fontSize: 9,
+                        fontWeight: FontWeight.bold,
+                        decoration: TextDecoration.none,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withAlpha(15),
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                    child: Text(
+                      netEv >= 0 ? '+${netEv.toStringAsFixed(1)}番' : '${netEv.toStringAsFixed(1)}番',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 9,
+                        fontWeight: FontWeight.bold,
+                        decoration: TextDecoration.none,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(2),
+            child: LinearProgressIndicator(
+              value: (winRate / 100.0).clamp(0.0, 1.0),
+              minHeight: 3,
+              backgroundColor: Colors.white12,
+              valueColor: AlwaysStoppedAnimation<Color>(primaryColor),
+            ),
+          ),
+          if (insight.isNotEmpty) ...[
+            const SizedBox(height: 3),
+            Text(
+              insight,
+              style: const TextStyle(
+                color: Colors.white70,
+                fontSize: 9,
+                height: 1.25,
+                decoration: TextDecoration.none,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// 对手手牌贝叶斯概率透视 (Bayesian Hand Range Reading)
+  Widget _buildBayesianHandRangesWidget(List<dynamic> handRanges) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4.5),
+      decoration: BoxDecoration(
+        color: const Color(0x281A237E),
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: const Color(0x4D3F51B5), width: 0.7),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: const [
+              Icon(Icons.remove_red_eye_outlined, color: Color(0xFF90CAF9), size: 11),
+              SizedBox(width: 4),
+              Text(
+                '对手手牌贝叶斯透视',
+                style: TextStyle(
+                  color: Color(0xFF90CAF9),
+                  fontSize: 9.5,
+                  fontWeight: FontWeight.bold,
+                  decoration: TextDecoration.none,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 3.5),
+          Row(
+            children: handRanges.map((opp) {
+              final String name = (opp['name'] as String?) ?? '对手';
+              final String dqName = (opp['dingque_name'] as String?) ?? '未定';
+              final int standing = (opp['standing'] as num? ?? 13).toInt();
+              final double tenpaiProb = (opp['tenpai_prob'] as num? ?? 0.2).toDouble();
+              final int tenpaiRate = (tenpaiProb * 100).toInt();
+              final List<dynamic> topHeld = (opp['top_held'] as List<dynamic>?) ?? [];
+
+              return Expanded(
+                child: Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 2),
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withAlpha(8),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: Colors.white12, width: 0.5),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            name,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 8.5,
+                              fontWeight: FontWeight.bold,
+                              decoration: TextDecoration.none,
+                            ),
+                          ),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 2.5, vertical: 0.5),
+                            decoration: BoxDecoration(
+                              color: dqName != '未定' ? const Color(0x4D00E676) : Colors.white10,
+                              borderRadius: BorderRadius.circular(2),
+                            ),
+                            child: Text(
+                              dqName != '未定' ? '缺$dqName' : '$standing张',
+                              style: TextStyle(
+                                color: dqName != '未定' ? const Color(0xFFB9F6CA) : Colors.white60,
+                                fontSize: 7.5,
+                                fontWeight: FontWeight.bold,
+                                decoration: TextDecoration.none,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 1.5),
+                      Text(
+                        '叫听率 $tenpaiRate%',
+                        style: TextStyle(
+                          color: tenpaiRate >= 50 ? const Color(0xFFFF8A80) : Colors.white60,
+                          fontSize: 7.5,
+                          decoration: TextDecoration.none,
+                        ),
+                      ),
+                      if (topHeld.isNotEmpty) ...[
+                        const SizedBox(height: 2),
+                        Wrap(
+                          spacing: 2,
+                          runSpacing: 1,
+                          children: topHeld.take(2).map((h) {
+                            final String tileStr = (h['tile'] as String?) ?? '';
+                            final int p = ((h['prob'] as num? ?? 0.0) * 100).toInt();
+                            return Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 2.5, vertical: 0.5),
+                              decoration: BoxDecoration(
+                                color: const Color(0x33FFD54F),
+                                borderRadius: BorderRadius.circular(2),
+                              ),
+                              child: Text(
+                                '$tileStr $p%',
+                                style: const TextStyle(
+                                  color: Color(0xFFFFECB3),
+                                  fontSize: 7,
+                                  fontWeight: FontWeight.bold,
+                                  decoration: TextDecoration.none,
+                                ),
+                              ),
+                            );
+                          }).toList(),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ],
+      ),
+    );
   }
 
   /// 次选进张标签：引擎算出真实进张时恒 >0；
@@ -2437,6 +2699,17 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final moodData = result?['mood'] as Map<String, dynamic>?;
     final Widget? moodWidget = (moodData != null && moodData['badge'] != null)
         ? _buildMoodWidget(moodData)
+        : null;
+
+    final evGaugeData = result?['ev_gauge'] as Map<String, dynamic>?;
+    final winEquity = (result?['win_equity'] as num?)?.toDouble();
+    final Widget? evGaugeWidget = (evGaugeData != null && evGaugeData['badge'] != null)
+        ? _buildWinEquityGaugeWidget(evGaugeData, winEquity)
+        : null;
+
+    final handRangesData = result?['hand_ranges'] as List<dynamic>?;
+    final Widget? handRangesWidget = (handRangesData != null && handRangesData.isNotEmpty)
+        ? _buildBayesianHandRangesWidget(handRangesData)
         : null;
 
     // ===== 1. 换牌阶段专用 UI =====
@@ -2623,6 +2896,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           if (alertWidget != null) alertWidget,
+          if (evGaugeWidget != null) evGaugeWidget,
+          if (handRangesWidget != null) handRangesWidget,
           if (moodWidget != null) moodWidget,
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6.5),
@@ -2671,6 +2946,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         if (alertWidget != null) alertWidget,
         if (tingRadarWidget != null) tingRadarWidget,
         if (dualStrategyWidget != null) dualStrategyWidget,
+        if (evGaugeWidget != null) evGaugeWidget,
+        if (handRangesWidget != null) handRangesWidget,
         if (moodWidget != null) moodWidget,
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -2791,6 +3068,60 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                           ),
                         ),
                       ],
+                      if (top['danger_flow'] is Map) ...[
+                        () {
+                          final Map<String, dynamic> df = Map<String, dynamic>.from(top['danger_flow'] as Map);
+                          final String dLevel = (df['danger_level'] as String?) ?? 'safe';
+                          final double dealInP = (df['deal_in_prob'] as num? ?? 0.0).toDouble();
+                          final int dealInPercent = (dealInP * 100).toInt();
+                          Color dColor = const Color(0xFF81C784);
+                          if (dLevel == 'critical') {
+                            dColor = const Color(0xFFFF5252);
+                          } else if (dLevel == 'high') {
+                            dColor = const Color(0xFFFF7043);
+                          } else if (dLevel == 'medium') {
+                            dColor = const Color(0xFFFFB74D);
+                          }
+                          return Container(
+                            margin: const EdgeInsets.only(left: 4),
+                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1.5),
+                            decoration: BoxDecoration(
+                              color: dColor.withAlpha(35),
+                              borderRadius: BorderRadius.circular(3),
+                              border: Border.all(color: dColor.withAlpha(90), width: 0.5),
+                            ),
+                            child: Text(
+                              dLevel == 'safe' ? '安目' : '点炮 $dealInPercent%',
+                              style: TextStyle(
+                                color: dColor,
+                                fontSize: 8,
+                                fontWeight: FontWeight.bold,
+                                decoration: TextDecoration.none,
+                              ),
+                            ),
+                          );
+                        }(),
+                      ],
+                      if (top['policy_prob'] is num && (top['policy_prob'] as num) > 0.05) ...[
+                        Container(
+                          margin: const EdgeInsets.only(left: 4),
+                          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1.5),
+                          decoration: BoxDecoration(
+                            color: const Color(0x337C4DFF),
+                            borderRadius: BorderRadius.circular(3),
+                            border: Border.all(color: const Color(0x66B388FF), width: 0.5),
+                          ),
+                          child: Text(
+                            'AI ${((top['policy_prob'] as num) * 100).toInt()}%',
+                            style: const TextStyle(
+                              color: Color(0xFFD1C4E9),
+                              fontSize: 8,
+                              fontWeight: FontWeight.bold,
+                              decoration: TextDecoration.none,
+                            ),
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                   if (topUkeire > 0)
@@ -2878,6 +3209,49 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                                 decoration: TextDecoration.none,
                               ),
                             ),
+                            if (sorted[i]['danger_flow'] is Map) ...[
+                              () {
+                                final Map<String, dynamic> altDf = Map<String, dynamic>.from(sorted[i]['danger_flow'] as Map);
+                                final String altLevel = (altDf['danger_level'] as String?) ?? 'safe';
+                                final double altP = (altDf['deal_in_prob'] as num? ?? 0.0).toDouble();
+                                return Container(
+                                  margin: const EdgeInsets.only(left: 3),
+                                  padding: const EdgeInsets.symmetric(horizontal: 2.5, vertical: 0.5),
+                                  decoration: BoxDecoration(
+                                    color: altLevel == 'safe' ? const Color(0x3381C784) : const Color(0x33FFB74D),
+                                    borderRadius: BorderRadius.circular(2),
+                                  ),
+                                  child: Text(
+                                    altLevel == 'safe' ? '安' : '${(altP * 100).toInt()}%危',
+                                    style: TextStyle(
+                                      color: altLevel == 'safe' ? const Color(0xFFC8E6C9) : const Color(0xFFFFCC80),
+                                      fontSize: 7.5,
+                                      fontWeight: FontWeight.bold,
+                                      decoration: TextDecoration.none,
+                                    ),
+                                  ),
+                                );
+                              }(),
+                            ],
+                            if (sorted[i]['policy_prob'] is num && (sorted[i]['policy_prob'] as num) > 0.05) ...[
+                              Container(
+                                margin: const EdgeInsets.only(left: 3),
+                                padding: const EdgeInsets.symmetric(horizontal: 2.5, vertical: 0.5),
+                                decoration: BoxDecoration(
+                                  color: const Color(0x337C4DFF),
+                                  borderRadius: BorderRadius.circular(2),
+                                ),
+                                child: Text(
+                                  'AI ${((sorted[i]['policy_prob'] as num) * 100).toInt()}%',
+                                  style: const TextStyle(
+                                    color: Color(0xFFD1C4E9),
+                                    fontSize: 7.5,
+                                    fontWeight: FontWeight.bold,
+                                    decoration: TextDecoration.none,
+                                  ),
+                                ),
+                              ),
+                            ],
                           ],
                         ),
                       ),
