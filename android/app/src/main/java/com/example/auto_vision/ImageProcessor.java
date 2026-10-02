@@ -688,9 +688,13 @@ public class ImageProcessor {
                         pyObj.put("inferred_discard", nativeObj.optInt("inferred_discard", -1));
 
                         org.json.JSONArray nativeAdvice = nativeObj.optJSONArray("advice");
-                        if (nativeAdvice != null && nativeAdvice.length() > 0) {
+                        if (nativeAdvice != null) {
                             pyObj.put("advice", nativeAdvice);
                             pyObj.put("best", nativeObj.optString("best", ""));
+                        }
+                        if (nativeObj.has("hand")) {
+                            pyObj.put("hand", nativeObj.optString("hand", ""));
+                            pyObj.put("count", nativeObj.optInt("count", 0));
                         }
 
                         String finalPayload = pyObj.toString() + "\n";

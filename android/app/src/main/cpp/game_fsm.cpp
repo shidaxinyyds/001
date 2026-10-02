@@ -34,8 +34,8 @@ GameState GameFSM::update(
 ) {
     if (!is_table_detected) {
         non_table_frames_++;
-        // 连续 20 帧非牌桌画面判定离开对局
-        if (non_table_frames_ >= 20 && current_state_ != STATE_IDLE) {
+        // 连续 3 帧非牌桌画面判定离开对局（返回大厅/切换应用）
+        if (non_table_frames_ >= 3 && current_state_ != STATE_IDLE) {
             current_state_ = STATE_IDLE;
             need_memory_reset_ = true;
         }
@@ -91,8 +91,8 @@ GameState GameFSM::update(
             // 【锁步铁律】对局中绝对不回退换三张或定缺阶段！彻底消除粘连。
             if (raw_hand_count == 0) {
                 empty_hand_frames_++;
-                // 连续 25 帧无牌确认为胡牌结算或新局重置
-                if (empty_hand_frames_ >= 25) {
+                // 连续 3 帧无牌确认为胡牌结算或离开，立即进入结算/重置状态
+                if (empty_hand_frames_ >= 3) {
                     current_state_ = STATE_SETTLED;
                     need_memory_reset_ = true;
                     empty_hand_frames_ = 0;

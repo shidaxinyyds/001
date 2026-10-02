@@ -1580,9 +1580,12 @@ class Engine:
         self._last_hand_y = None
         self._orient = 0
         self._orient_zerocount = 0
-        self._non_table_frames = 0
         self._advice_key = None
         self._advice = []
+        self._stable_best = ""
+        self._stable_shanten = None
+        self._transient_drop_streak = 0
+        self._empty_hand_streak = 0
         self.trainer = None
         self._river_future = None
 
@@ -2879,8 +2882,8 @@ class Engine:
             # ===== 牌桌场景校验（过滤大厅/菜单/结算，加入防抖）=====
             if not self._is_mahjong_table(image):
                 self._non_table_frames += 1
-                # 若尚未开局，连续 2 帧非牌桌画面立即重置并返回等待；若在局中，连续 20 帧（持续 ~1.5秒）非牌桌才判定离开对局（结算/大厅），杜绝局中大字报、碰杠特效导致游戏状态突然重置
-                need_reset = (self._non_table_frames >= 2) if not getattr(self, "_match_started", False) else (self._non_table_frames >= 20)
+                # 离开牌桌（回到大厅/聊天/结算退回）：连续 >=3 帧立即硬重置，绝不拖泥带水残留旧局手牌
+                need_reset = (self._non_table_frames >= 2) if not getattr(self, "_match_started", False) else (self._non_table_frames >= 3)
                 if need_reset:
                     self._reset_game_state()
                     return EngineResult(
@@ -2913,8 +2916,8 @@ class Engine:
                         }, ensure_ascii=False),
                         stage=None,
                     )
-                # 连续非桌布帧数不足 4 帧（局中半透明遮罩/出牌动画/弹窗）：若有缓存或稳定手牌则继续平滑输出，绝不中断
-                if self._frame_skipper.cached is not None:
+                # 仅在非牌桌首帧（瞬态遮挡）短平滑过渡，若连续 >=2 帧非桌布一律不再吐出旧对局缓存
+                if self._non_table_frames <= 1 and self._frame_skipper.cached is not None:
                     return self._build_skip_result(image, self._frame_skipper.cached)
             else:
                 self._non_table_frames = 0
@@ -3143,20 +3146,16 @@ class Engine:
             else:
                 diag_dup_reject = False
 
-            # ===== 新局指纹（旧 river_locked 死锁的对侧保险）=====
-            # 上一帧还确信在手牌区可见 ≥4 张牌，本帧骤减为 0（定缺徽章消失由下方
-            # 阶段检测无门控+两帧确认负责）：连续 ≥12 帧（约 300~500ms）确认已彻底离开对局
-            # （结算/换局/回大厅）→ 清池与副露账本，绝不跨局残留。
-            # 防误杀：瞬态丢帧（如出牌飞行阴影、摸打遮挡等 1~5 帧）绝不误重置牌局与建议。
-            if (self._match_started and self._prev_raw_n >= 4 and curr_raw_n == 0):
-                self._prev_raw_n_before_clear += 1
-                if (self._prev_raw_n_before_clear >= 20
-                        and sum(self._monotonic_discards.values()) > 0):
+            # ===== 对局结束 / 结算弹窗即时清空 (Instant Settlement Flush) =====
+            # 对局中若手牌区连续 >= 3 帧完全无牌（结算弹窗覆盖、胡牌动画结束、返回大厅），
+            # 立即触发硬重置清空旧手牌、牌河与旧建议，彻底根治“明明不在对局却仍显示手牌”的顽疾！
+            if curr_raw_n == 0:
+                self._empty_hand_streak = getattr(self, "_empty_hand_streak", 0) + 1
+                if getattr(self, "_match_started", False) and self._empty_hand_streak >= 3:
                     self._reset_game_state()
-                    self._prev_raw_n_before_clear = 0
-                    self._prev_raw_n = -1  # 哨兵：复位比较基线，防新局首帧误判 0->n 跳变
+                    self._empty_hand_streak = 0
             else:
-                self._prev_raw_n_before_clear = 0
+                self._empty_hand_streak = 0
 
             # 手牌行的逐张标签与稳定手牌对齐（避免"显示的牌"和"建议打的牌"对不上）
             if hand_idx is not None and hand_mpsz:
@@ -3609,6 +3608,7 @@ class Engine:
                 except Exception:
                     pass
             elif hand is not None and not is_swap_phase and not is_pick_phase:
+                self._transient_drop_streak = 0
                 tile_count = len(hand)
                 status = "ok"
                 _t_advice = time.time()
@@ -3622,43 +3622,52 @@ class Engine:
                 self._perf_ms["advice"].append((time.time() - _t_advice) * 1000.0)
                 self._stable_hand_mpsz = hand_mpsz
                 self._stable_hand_count = tile_count
+                if advice and isinstance(advice, list) and len(advice) > 0:
+                    self._stable_best = advice[0].get("tile", "")
+                self._stable_shanten = shanten
                 self._partial_mpsz = ""
                 self._partial_ttl = 0
             else:
-                # 尚未建立起完整合法手牌（冷启动/空手牌/非对局/过渡帧）
-                if not getattr(self, "_match_started", False) or len(raw_labels) < PARTIAL_MIN_TILES:
-                    # 未在对局中或手牌张数过少，绝不产生任何虚假建议与残余手牌
-                    self._advice = []
-                    self._advice_key = None
-                    self._partial_mpsz = ""
-                    self._partial_ttl = 0
-                    advice = []
-                    best = ""
-                    shanten = None
-                    if not getattr(self, "_match_started", False):
-                        status = "waiting"
-                        message = "等待牌局开始"
+                # 尚未形成新的完整合法手牌（摸打瞬间、手指遮挡、动画突变或真离场）
+                in_active_match = getattr(self, "_match_started", False) and bool(self._stable_hand_mpsz)
+                if in_active_match and curr_raw_n > 0:
+                    # 对局中瞬态阻尼保护：摸打出牌瞬间、手指短暂遮挡或动画跳变时，
+                    # 连续 1~3 帧维持上一帧稳定决策与手牌，绝不突发闪烁到 "等待开始" 或 "未检测到手牌"！
+                    self._transient_drop_streak = getattr(self, "_transient_drop_streak", 0) + 1
+                    if self._transient_drop_streak <= 3:
+                        status = "ok"
+                        hand_mpsz = self._stable_hand_mpsz
+                        tile_count = self._stable_hand_count
+                        advice = list(self._advice)
+                        best = getattr(self, "_stable_best", "") or (advice[0]["tile"] if advice else "")
+                        shanten = getattr(self, "_stable_shanten", None)
+                        message = "手牌已就绪"
                     else:
-                        status = "no_tiles"
-                else:
-                    # 局中部分识别兜底（手牌数 >= 6 张）：抵抗出牌瞬间少1张掉空
+                        # 超过 3 帧仍未恢复完整手牌，平滑降级为 partial
+                        try:
+                            partial_now = self._labels_to_mpsz(raw_labels, avail)
+                        except Exception:
+                            partial_now = ""
+                        if partial_now:
+                            status = "partial"
+                            tile_count = len(partial_now) // 2
+                            hand_mpsz = partial_now
+                        else:
+                            status = "no_tiles"
+                            message = ""
+                            advice = []
+                            best = ""
+                            shanten = None
+                elif getattr(self, "_match_started", False) and curr_raw_n >= PARTIAL_MIN_TILES:
+                    # 局中冷启动或连续残缺识别（手牌数 >= 6 张）：提取 partial 兜底展示
                     try:
                         partial_now = self._labels_to_mpsz(raw_labels, avail)
                     except Exception:
                         partial_now = ""
-                    partial_n = len(partial_now) // 2
-                    if partial_n >= PARTIAL_MIN_TILES:
-                        self._partial_mpsz = partial_now
-                        self._partial_ttl = PARTIAL_TTL_FRAMES
-                    elif self._partial_ttl > 0:
-                        self._partial_ttl -= 1
-                    else:
-                        self._partial_mpsz = ""
-
-                    if self._partial_mpsz:
+                    if partial_now:
                         status = "partial"
-                        tile_count = len(self._partial_mpsz) // 2
-                        hand_mpsz = self._partial_mpsz
+                        tile_count = len(partial_now) // 2
+                        hand_mpsz = partial_now
                         if not advice and tile_count >= PARTIAL_MIN_TILES:
                             try:
                                 tentative_hand = TileCollection.from_mpsz(hand_mpsz)
@@ -3669,6 +3678,31 @@ class Engine:
                                         shanten = t_shanten
                             except Exception:
                                 pass
+                    else:
+                        status = "no_tiles"
+                        message = ""
+                        advice = []
+                        best = ""
+                        shanten = None
+                elif not getattr(self, "_match_started", False):
+                    # 确未开局：干净处于 waiting 状态
+                    self._advice = []
+                    self._advice_key = None
+                    self._partial_mpsz = ""
+                    self._partial_ttl = 0
+                    advice = []
+                    best = ""
+                    shanten = None
+                    status = "waiting"
+                    message = "等待牌局开始"
+                else:
+                    # 局中且 curr_raw_n == 0：交由上方 empty_hand_streak 判定（达到3帧时硬重置），
+                    # 1~2 帧空时先不刷屏
+                    status = "no_tiles"
+                    message = ""
+                    advice = []
+                    best = ""
+                    shanten = None
 
             # 最终兜底：仅在对局中且手牌合法时推演（换牌/选牌阶段有专用建议，不触发此兜底）
             if (getattr(self, "_match_started", False) and not advice and hand_mpsz and tile_count >= 4

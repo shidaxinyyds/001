@@ -1812,9 +1812,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       return const SizedBox.shrink();
     }
     // 合法麻将立牌张数：1/2 (碰4次), 4/5 (碰3次), 7/8 (碰2次), 10/11 (碰1次), 13/14 (门清)
-    // 仅在非标准张数（如 3, 6, 9, 12 张）时才提示可能被遮挡
+    // 仅在引擎确认为 partial 异常残缺（如 3, 6, 9, 12 张且持续未恢复）时才提示遮挡，杜绝摸打瞬态闪烁误报
     final bool isLegalStanding = const {1, 2, 4, 5, 7, 8, 10, 11, 13, 14}.contains(count);
-    final bool partial = count > 0 && !isLegalStanding;
+    final bool partial = (status == 'partial') && count > 0 && !isLegalStanding;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
       child: Column(
