@@ -116,10 +116,10 @@ class _DebugPageState extends State<DebugPage> {
                     borderRadius: BorderRadius.circular(8),
                     border: Border.all(color: AppTokens.brand.withAlpha(60), width: 0.8),
                   ),
-                  child: const Row(
+                  child: Row(
                     children: [
-                      Icon(Icons.shield_outlined, color: AppTokens.brand, size: 16),
-                      SizedBox(width: 8),
+                      const Icon(Icons.shield_outlined, color: AppTokens.brand, size: 16),
+                      const SizedBox(width: 8),
                       Expanded(
                         child: Text(
                           '智能保底机制已激活：若残局活牌不足所设门槛，系统自动保底推送当前最优打法，绝不空白。',

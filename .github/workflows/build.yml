@@ -47,7 +47,19 @@ jobs:
       # （例如误用 Flutter 3.27+ 才有的 Color.withValues）。
       # 否则要等 2 分多钟把 Chaquopy 依赖全部下完，才在 kernel_snapshot 阶段报错。
       - name: Dart 静态检查（快速失败）
-        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+        run: |
+          if ! flutter analyze --no-fatal-infos --no-fatal-warnings > analyze_report.log 2>&1; then
+            cat analyze_report.log
+            echo "### ❌ Flutter Analyze Failed" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat analyze_report.log >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            while IFS= read -r line; do
+              [ -n "$line" ] && echo "::error::$line"
+            done < analyze_report.log
+            exit 1
+          fi
+          echo "### ✅ Flutter Analyze Passed" >> $GITHUB_STEP_SUMMARY
 
       - name: 构建 APK（release，使用 debug 签名，可直接安装）
         env:

@@ -2529,6 +2529,60 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     );
   }
 
+  /// 点炮危险度指示勋章（主推与次选通用）
+  Widget _buildDangerBadge(dynamic dangerFlow, {bool mini = false}) {
+    if (dangerFlow is! Map) return const SizedBox.shrink();
+    final Map<dynamic, dynamic> df = dangerFlow;
+    final String dLevel = (df['danger_level'] as String?) ?? 'safe';
+    final double dealInP = (df['deal_in_prob'] as num? ?? 0.0).toDouble();
+    final int dealInPercent = (dealInP * 100).toInt();
+    Color dColor = const Color(0xFF81C784);
+    if (dLevel == 'critical') {
+      dColor = const Color(0xFFFF5252);
+    } else if (dLevel == 'high') {
+      dColor = const Color(0xFFFF7043);
+    } else if (dLevel == 'medium') {
+      dColor = const Color(0xFFFFB74D);
+    }
+    if (mini) {
+      return Container(
+        margin: const EdgeInsets.only(left: 3),
+        padding: const EdgeInsets.symmetric(horizontal: 2.5, vertical: 0.5),
+        decoration: BoxDecoration(
+          color: dLevel == 'safe' ? const Color(0x3381C784) : const Color(0x33FFB74D),
+          borderRadius: BorderRadius.circular(2),
+        ),
+        child: Text(
+          dLevel == 'safe' ? '安' : '$dealInPercent%危',
+          style: TextStyle(
+            color: dLevel == 'safe' ? const Color(0xFFC8E6C9) : const Color(0xFFFFCC80),
+            fontSize: 7.5,
+            fontWeight: FontWeight.bold,
+            decoration: TextDecoration.none,
+          ),
+        ),
+      );
+    }
+    return Container(
+      margin: const EdgeInsets.only(left: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1.5),
+      decoration: BoxDecoration(
+        color: dColor.withAlpha(35),
+        borderRadius: BorderRadius.circular(3),
+        border: Border.all(color: dColor.withAlpha(90), width: 0.5),
+      ),
+      child: Text(
+        dLevel == 'safe' ? '安目' : '点炮 $dealInPercent%',
+        style: TextStyle(
+          color: dColor,
+          fontSize: 8,
+          fontWeight: FontWeight.bold,
+          decoration: TextDecoration.none,
+        ),
+      ),
+    );
+  }
+
   /// 对手手牌贝叶斯概率透视 (Bayesian Hand Range Reading)
   Widget _buildBayesianHandRangesWidget(List<dynamic> handRanges) {
     return Container(
@@ -3068,40 +3122,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                           ),
                         ),
                       ],
-                      if (top['danger_flow'] is Map) ...[
-                        () {
-                          final Map<String, dynamic> df = Map<String, dynamic>.from(top['danger_flow'] as Map);
-                          final String dLevel = (df['danger_level'] as String?) ?? 'safe';
-                          final double dealInP = (df['deal_in_prob'] as num? ?? 0.0).toDouble();
-                          final int dealInPercent = (dealInP * 100).toInt();
-                          Color dColor = const Color(0xFF81C784);
-                          if (dLevel == 'critical') {
-                            dColor = const Color(0xFFFF5252);
-                          } else if (dLevel == 'high') {
-                            dColor = const Color(0xFFFF7043);
-                          } else if (dLevel == 'medium') {
-                            dColor = const Color(0xFFFFB74D);
-                          }
-                          return Container(
-                            margin: const EdgeInsets.only(left: 4),
-                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1.5),
-                            decoration: BoxDecoration(
-                              color: dColor.withAlpha(35),
-                              borderRadius: BorderRadius.circular(3),
-                              border: Border.all(color: dColor.withAlpha(90), width: 0.5),
-                            ),
-                            child: Text(
-                              dLevel == 'safe' ? '安目' : '点炮 $dealInPercent%',
-                              style: TextStyle(
-                                color: dColor,
-                                fontSize: 8,
-                                fontWeight: FontWeight.bold,
-                                decoration: TextDecoration.none,
-                              ),
-                            ),
-                          );
-                        }(),
-                      ],
+                      if (top['danger_flow'] is Map)
+                        _buildDangerBadge(top['danger_flow']),
                       if (top['policy_prob'] is num && (top['policy_prob'] as num) > 0.05) ...[
                         Container(
                           margin: const EdgeInsets.only(left: 4),
@@ -3209,30 +3231,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                                 decoration: TextDecoration.none,
                               ),
                             ),
-                            if (sorted[i]['danger_flow'] is Map) ...[
-                              () {
-                                final Map<String, dynamic> altDf = Map<String, dynamic>.from(sorted[i]['danger_flow'] as Map);
-                                final String altLevel = (altDf['danger_level'] as String?) ?? 'safe';
-                                final double altP = (altDf['deal_in_prob'] as num? ?? 0.0).toDouble();
-                                return Container(
-                                  margin: const EdgeInsets.only(left: 3),
-                                  padding: const EdgeInsets.symmetric(horizontal: 2.5, vertical: 0.5),
-                                  decoration: BoxDecoration(
-                                    color: altLevel == 'safe' ? const Color(0x3381C784) : const Color(0x33FFB74D),
-                                    borderRadius: BorderRadius.circular(2),
-                                  ),
-                                  child: Text(
-                                    altLevel == 'safe' ? '安' : '${(altP * 100).toInt()}%危',
-                                    style: TextStyle(
-                                      color: altLevel == 'safe' ? const Color(0xFFC8E6C9) : const Color(0xFFFFCC80),
-                                      fontSize: 7.5,
-                                      fontWeight: FontWeight.bold,
-                                      decoration: TextDecoration.none,
-                                    ),
-                                  ),
-                                );
-                              }(),
-                            ],
+                            if (sorted[i]['danger_flow'] is Map)
+                              _buildDangerBadge(sorted[i]['danger_flow'], mini: true),
                             if (sorted[i]['policy_prob'] is num && (sorted[i]['policy_prob'] as num) > 0.05) ...[
                               Container(
                                 margin: const EdgeInsets.only(left: 3),
