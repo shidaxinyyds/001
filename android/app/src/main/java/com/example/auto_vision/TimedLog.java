@@ -9,6 +9,11 @@ public class TimedLog {
         Log.i(tag, message);
     }
 
+    public static void w(String tag, String message) {
+        message = String.format("%s: %s", Instant.now().toString(), message);
+        Log.w(tag, message);
+    }
+
     public static void e(String tag, String message) {
         message = String.format("%s: %s", Instant.now().toString(), message);
         Log.e(tag, message);
