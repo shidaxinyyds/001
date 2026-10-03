@@ -3,6 +3,7 @@ package com.example.auto_vision;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.res.Configuration;
 import android.media.projection.MediaProjectionConfig;
 import android.media.projection.MediaProjectionManager;
@@ -80,6 +81,12 @@ public class MainActivity extends FlutterActivity {
 
       Runnable toRun = null;
       if (call.method.equals("startProcessing")) {
+        // 原生层安全防线：未激活卡密或授权到期时拒绝启动录屏与前台服务
+        if (!verifyLicenseNative()) {
+          TimedLog.w(TAG, "startProcessing rejected: invalid or expired license token");
+          result.error("UNAUTHORIZED", "未检测到有效卡密授权，无法开启识别", null);
+          return;
+        }
         // prepareStream 内部调用 startActivityForResult/startForegroundService，
         // 必须在主线程执行；旧实现经 CompletableFuture.runAsync 丢到后台线程，
         // 属线程违规（部分 ROM 上静默失败/抛异常，表现为"点了开始没反应"）。
@@ -519,6 +526,42 @@ public class MainActivity extends FlutterActivity {
       } catch (Throwable t2) {
         return "";
       }
+    }
+  }
+
+  // 原生层安全防线：在启动录屏服务与推流前核验本地卡密凭证。
+  // 杜绝脱离 Flutter UI 绕过授权闸门直接通过 MethodChannel 调用 startProcessing 盗用算力。
+  private boolean verifyLicenseNative() {
+    try {
+      SharedPreferences sp =
+          getApplicationContext().getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE);
+      String token = sp.getString("flutter.lic_token", "");
+      if (token == null || token.trim().isEmpty()) {
+        TimedLog.w(TAG, "verifyLicenseNative: missing lic_token in FlutterSharedPreferences");
+        return false;
+      }
+      String currentDeviceId = computeDeviceId();
+      String[] parts = token.split("\\|");
+      if (parts.length < 5) {
+        TimedLog.w(TAG, "verifyLicenseNative: invalid token structure, parts=" + parts.length);
+        return false;
+      }
+      String tokenDevice = parts[0];
+      if (currentDeviceId != null && !currentDeviceId.isEmpty() && !currentDeviceId.equals(tokenDevice)) {
+        TimedLog.w(TAG, "verifyLicenseNative: deviceId mismatch: tokenDevice=" + tokenDevice + ", current=" + currentDeviceId);
+        return false;
+      }
+      long expiresAt = Long.parseLong(parts[2]);
+      long nowSec = System.currentTimeMillis() / 1000L;
+      // 允许 300 秒时间容差；若已超过到期时间，直接判定无效
+      if (expiresAt <= 0 || nowSec > (expiresAt + 300)) {
+        TimedLog.w(TAG, "verifyLicenseNative: token expired: expiresAt=" + expiresAt + ", now=" + nowSec);
+        return false;
+      }
+      return true;
+    } catch (Throwable t) {
+      TimedLog.e(TAG, "verifyLicenseNative exception: " + t.getMessage());
+      return false;
     }
   }
 

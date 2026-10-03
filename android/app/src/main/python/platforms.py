@@ -80,6 +80,54 @@ PLATFORMS: Dict[str, Dict] = {
         ],
         "default_mode": "std_tdh",
     },
+    "gd_queshen": {
+        "key": "gd_queshen",
+        "name": "广东雀神",
+        "subtitle": "广东雀神专属画幅 · 鸡平胡/红中 · 智能裁切",
+        "hand_roi": (0.70, 0.99, 0.00, 1.00),
+        "river_zones": (
+            ("bottom", 0.32, 0.52, 0.68, 0.72),
+            ("top", 0.32, 0.16, 0.68, 0.36),
+            ("left", 0.22, 0.30, 0.44, 0.64),
+            ("right", 0.56, 0.30, 0.78, 0.64),
+        ),
+        "supported_modes": [
+            "gd_hz", "std_tdh", "hz_bd"
+        ],
+        "default_mode": "gd_hz",
+    },
+    "zj_sichuan": {
+        "key": "zj_sichuan",
+        "name": "指尖四川",
+        "subtitle": "指尖经典画幅 · 血流红中连胡 · 底端精密对齐",
+        "hand_roi": (0.69, 0.99, 0.01, 0.99),
+        "river_zones": (
+            ("bottom", 0.31, 0.51, 0.69, 0.71),
+            ("top", 0.31, 0.16, 0.69, 0.36),
+            ("left", 0.21, 0.29, 0.43, 0.63),
+            ("right", 0.57, 0.29, 0.79, 0.63),
+        ),
+        "supported_modes": [
+            "sc_hz", "sc_xz", "sc_xl"
+        ],
+        "default_mode": "sc_hz",
+    },
+    "shushan": {
+        "key": "shushan",
+        "name": "蜀山四川麻将",
+        "subtitle": "蜀山宽屏画幅 · 红中血流八换三 · 专属模板库匹配",
+        "hand_roi": (0.68, 0.99, 0.01, 0.99),
+        "river_zones": (
+            ("bottom", 0.30, 0.50, 0.70, 0.70),
+            ("top", 0.30, 0.15, 0.70, 0.35),
+            ("left", 0.20, 0.28, 0.42, 0.62),
+            ("right", 0.58, 0.28, 0.80, 0.62),
+        ),
+        "supported_modes": [
+            "sc_hz", "sc_xz", "sc_xl"
+        ],
+        "default_mode": "sc_hz",
+    },
     "generic": {
         "key": "generic",
         "name": "通用平台自适应",

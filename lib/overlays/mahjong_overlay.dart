@@ -527,7 +527,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   bool _hitLimitFeedback = false;
 
   // ── 授权自守护（悬浮窗子引擎用 device_id 直连服务器心跳，到期即自锁）──
-  bool _licenseAllows = true; // 乐观默认，首次异步核验后纠正
+  bool _licenseAllows = false; // 悲观默认，必须经过权威验签通过后方可放行
   int _licenseDays = 0;
   // 锁定胶囊文案：只在真到期/被拒时显示对应原因，绝不把一切失权都写成"到期"。
   String _licenseDenyText = '授权校验未通过';
@@ -660,24 +660,23 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
   Future<void> _refreshLicense() async {
     try {
-      // 子引擎用 device_id 直连服务器心跳（不依赖 shared_preferences）。服务器明确
-      // 到期/拉黑/换设备 → 硬锁；网络失败且本引擎读不到本地券 → 保持 fail-open，
-      // 避免断网误伤正常用户（真到期由服务器回包 valid:false 或主闸门收窗兜底）。
+      // 权威卡密核验：通过 LicenseService.instance.heartbeat() 获取服务器与本地双重校验状态
+      // 必须满足 valid 或 needsRenew(宽限内) 才允许使用，其余（notActivated/refused/licenseExpired）一律硬锁
       final st = await LicenseService.instance.heartbeat();
-      final bool isExpired = st.status == LicenseStatus.licenseExpired &&
-          st.expiresAt != null &&
-          DateTime.now().isAfter(st.expiresAt!) &&
-          DateTime.fromMillisecondsSinceEpoch(
-                  LicenseService.instance.serverNowSec * 1000)
-              .isAfter(st.expiresAt!);
-      final bool denied = st.isRevoked || isExpired;
-      final allows = !denied;
+      final bool allows = st.allowsUsage;
       final days = st.remainingDays;
-      final denyText = isExpired
-          ? '卡密授权已到期，请重新激活'
-          : ((st.message?.isNotEmpty ?? false)
-              ? st.message!
-              : '授权已被停用，请重新激活');
+      final String denyText;
+      if (st.status == LicenseStatus.licenseExpired) {
+        denyText = '卡密授权已到期，请重新激活';
+      } else if (st.status == LicenseStatus.notActivated) {
+        denyText = '未激活有效卡密，请先激活';
+      } else if (st.isRevoked) {
+        denyText = '授权已被停用，请联系客服';
+      } else if (st.message?.isNotEmpty ?? false) {
+        denyText = st.message!;
+      } else {
+        denyText = '授权未生效，请重新激活';
+      }
       if (allows != _licenseAllows ||
           days != _licenseDays ||
           denyText != _licenseDenyText) {

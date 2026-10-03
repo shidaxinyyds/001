@@ -66,6 +66,33 @@ class GamePlatform {
       defaultMode: 'std_tdh',
     ),
     GamePlatformInfo(
+      key: 'gd_queshen',
+      name: '广东雀神',
+      subtitle: '广东雀神专属画幅 · 鸡平胡/红中 · 智能裁切',
+      badge: '地方顶流',
+      handRoi: [0.70, 0.99, 0.00, 1.00],
+      supportedModes: ['gd_hz', 'std_tdh', 'hz_bd'],
+      defaultMode: 'gd_hz',
+    ),
+    GamePlatformInfo(
+      key: 'zj_sichuan',
+      name: '指尖四川',
+      subtitle: '指尖经典画幅 · 血流红中连胡 · 底端精密对齐',
+      badge: '高人气',
+      handRoi: [0.69, 0.99, 0.01, 0.99],
+      supportedModes: ['sc_hz', 'sc_xz', 'sc_xl'],
+      defaultMode: 'sc_hz',
+    ),
+    GamePlatformInfo(
+      key: 'shushan',
+      name: '蜀山四川麻将',
+      subtitle: '蜀山宽屏画幅 · 红中血流八换三 · 专属模板库匹配',
+      badge: '经典川麻',
+      handRoi: [0.68, 0.99, 0.01, 0.99],
+      supportedModes: ['sc_hz', 'sc_xz', 'sc_xl'],
+      defaultMode: 'sc_hz',
+    ),
+    GamePlatformInfo(
       key: 'generic',
       name: '通用平台自适应',
       subtitle: 'HSV 掩码全局动态寻界 · 兼容所有平台与变体',
@@ -84,6 +111,9 @@ class GamePlatform {
     'tuyou',
     'weile',
     'jj',
+    'gd_queshen',
+    'zj_sichuan',
+    'shushan',
     'generic',
   ];
 

@@ -84,11 +84,11 @@ class _DebugPageState extends State<DebugPage> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         behavior: SnackBarBehavior.floating,
-        backgroundColor: const Color(0xFF0F172A),
+        backgroundColor: AppTokens.ink,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
         content: Row(
           children: const [
-            Icon(Icons.auto_awesome, color: Color(0xFFF59E0B), size: 18),
+            Icon(Icons.auto_awesome, color: Color(0xFFFBBF24), size: 17),
             SizedBox(width: 8),
             Expanded(
               child: Text(
@@ -479,41 +479,33 @@ class _DebugPageState extends State<DebugPage> {
     return Container(
       margin: const EdgeInsets.only(bottom: 16),
       decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          colors: [
-            Color(0xFF0F172A),
-            Color(0xFF1E293B),
-            Color(0xFF134E4A),
-          ],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: const Color(0xFF334155), width: 1),
+        color: AppTokens.surface,
+        borderRadius: BorderRadius.circular(AppTokens.r16),
+        border: Border.all(color: AppTokens.border, width: 0.9),
         boxShadow: const [
           BoxShadow(
-            color: Color(0x33000000),
-            blurRadius: 16,
-            offset: Offset(0, 6),
+            color: Color(0x08000000),
+            blurRadius: 8,
+            offset: Offset(0, 2),
           ),
         ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // 顶部栏：标题 + 提振气场交互按钮
+          // 顶部栏：标题 + 简约参悟心法按钮
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 12, 10),
+            padding: const EdgeInsets.fromLTRB(16, 14, 14, 10),
             child: Row(
               children: [
                 Container(
                   padding: const EdgeInsets.all(6),
                   decoration: BoxDecoration(
-                    color: const Color(0x26F59E0B),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: const Color(0x4DF59E0B), width: 0.8),
+                    color: const Color(0xFFFEF3C7),
+                    borderRadius: BorderRadius.circular(AppTokens.r8),
+                    border: Border.all(color: const Color(0xFFFDE68A), width: 0.8),
                   ),
-                  child: const Icon(Icons.wb_sunny_rounded, color: Color(0xFFF59E0B), size: 16),
+                  child: const Icon(Icons.wb_sunny_rounded, color: Color(0xFFD97706), size: 16),
                 ),
                 const SizedBox(width: 10),
                 Expanded(
@@ -523,18 +515,18 @@ class _DebugPageState extends State<DebugPage> {
                       Text(
                         '今日雀局运势 · 军师心盘',
                         style: TextStyle(
-                          fontSize: 14.5,
-                          fontWeight: FontWeight.w700,
-                          color: Colors.white,
-                          letterSpacing: 0.3,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: AppTokens.ink,
+                          letterSpacing: 0.2,
                         ),
                       ),
                       SizedBox(height: 1),
                       Text(
-                        '心理赋能 · 逆风安抚 · 胜势强化',
+                        '心理调谐 · 逆风安抚 · 胜势强化',
                         style: TextStyle(
                           fontSize: 11,
-                          color: Color(0xFF94A3B8),
+                          color: AppTokens.muted,
                         ),
                       ),
                     ],
@@ -542,33 +534,25 @@ class _DebugPageState extends State<DebugPage> {
                 ),
                 InkWell(
                   onTap: _cycleFortune,
-                  borderRadius: BorderRadius.circular(20),
+                  borderRadius: BorderRadius.circular(AppTokens.rPill),
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                     decoration: BoxDecoration(
-                      gradient: const LinearGradient(
-                        colors: [Color(0xFFF59E0B), Color(0xFFD97706)],
-                      ),
-                      borderRadius: BorderRadius.circular(20),
-                      boxShadow: const [
-                        BoxShadow(
-                          color: Color(0x40F59E0B),
-                          blurRadius: 6,
-                          offset: Offset(0, 2),
-                        ),
-                      ],
+                      color: const Color(0xFFFFFBEB),
+                      borderRadius: BorderRadius.circular(AppTokens.rPill),
+                      border: Border.all(color: const Color(0xFFFDE68A), width: 0.8),
                     ),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: const [
-                        Icon(Icons.refresh_rounded, size: 13, color: Colors.white),
+                        Icon(Icons.refresh_rounded, size: 13, color: Color(0xFFD97706)),
                         SizedBox(width: 4),
                         Text(
                           '参悟心法',
                           style: TextStyle(
-                            color: Colors.white,
+                            color: Color(0xFFB45309),
                             fontSize: 11.5,
-                            fontWeight: FontWeight.bold,
+                            fontWeight: FontWeight.w600,
                           ),
                         ),
                       ],
@@ -578,7 +562,7 @@ class _DebugPageState extends State<DebugPage> {
               ],
             ),
           ),
-          const Divider(height: 1, color: Color(0xFF1E293B)),
+          const Divider(height: 1, color: AppTokens.border),
 
           // 核心气运评级 + 胜势指数条
           Padding(
@@ -592,25 +576,25 @@ class _DebugPageState extends State<DebugPage> {
                     Text(
                       cur['title'] ?? '',
                       style: const TextStyle(
-                        fontSize: 16,
+                        fontSize: 15,
                         fontWeight: FontWeight.w700,
-                        color: Color(0xFFFDE68A),
+                        color: AppTokens.ink,
                         letterSpacing: 0.2,
                       ),
                     ),
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
                       decoration: BoxDecoration(
-                        color: const Color(0x33F59E0B),
-                        borderRadius: BorderRadius.circular(6),
-                        border: Border.all(color: const Color(0x66F59E0B), width: 0.7),
+                        color: AppTokens.brandContainer,
+                        borderRadius: BorderRadius.circular(AppTokens.r8),
+                        border: Border.all(color: const Color(0xFF99F6E4), width: 0.6),
                       ),
                       child: Text(
                         cur['level'] ?? '',
                         style: const TextStyle(
                           fontSize: 10.5,
                           fontWeight: FontWeight.bold,
-                          color: Color(0xFFFBBF24),
+                          color: AppTokens.brandDark,
                         ),
                       ),
                     ),
@@ -623,7 +607,7 @@ class _DebugPageState extends State<DebugPage> {
                   children: [
                     const Text(
                       '心理胜势指数',
-                      style: TextStyle(fontSize: 11, color: Color(0xFF94A3B8)),
+                      style: TextStyle(fontSize: 11, color: AppTokens.muted),
                     ),
                     const Spacer(),
                     Text(
@@ -631,7 +615,7 @@ class _DebugPageState extends State<DebugPage> {
                       style: const TextStyle(
                         fontSize: 11.5,
                         fontWeight: FontWeight.bold,
-                        color: Color(0xFF34D399),
+                        color: AppTokens.brandDark,
                       ),
                     ),
                   ],
@@ -640,11 +624,11 @@ class _DebugPageState extends State<DebugPage> {
                 ClipRRect(
                   borderRadius: BorderRadius.circular(4),
                   child: SizedBox(
-                    height: 5,
+                    height: 4.5,
                     child: LinearProgressIndicator(
                       value: score / 100.0,
-                      backgroundColor: const Color(0xFF334155),
-                      valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF10B981)),
+                      backgroundColor: const Color(0xFFE2E8F0),
+                      valueColor: const AlwaysStoppedAnimation<Color>(AppTokens.brand),
                     ),
                   ),
                 ),
@@ -661,20 +645,20 @@ class _DebugPageState extends State<DebugPage> {
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                     decoration: BoxDecoration(
-                      color: const Color(0x331E293B),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: const Color(0x4D334155), width: 0.8),
+                      color: AppTokens.pillBg,
+                      borderRadius: BorderRadius.circular(AppTokens.r8),
+                      border: Border.all(color: AppTokens.border, width: 0.7),
                     ),
                     child: Row(
                       children: [
-                        const Icon(Icons.explore_outlined, size: 14, color: Color(0xFF38BDF8)),
+                        const Icon(Icons.explore_outlined, size: 14, color: Color(0xFF0284C7)),
                         const SizedBox(width: 6),
                         Expanded(
                           child: Text(
                             cur['direction'] ?? '',
                             style: const TextStyle(
                               fontSize: 11,
-                              color: Color(0xFFE2E8F0),
+                              color: AppTokens.ink2,
                               fontWeight: FontWeight.w500,
                             ),
                             maxLines: 1,
@@ -690,20 +674,20 @@ class _DebugPageState extends State<DebugPage> {
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                     decoration: BoxDecoration(
-                      color: const Color(0x331E293B),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: const Color(0x4D334155), width: 0.8),
+                      color: AppTokens.pillBg,
+                      borderRadius: BorderRadius.circular(AppTokens.r8),
+                      border: Border.all(color: AppTokens.border, width: 0.7),
                     ),
                     child: Row(
                       children: [
-                        const Icon(Icons.casino_outlined, size: 14, color: Color(0xFFA78BFA)),
+                        const Icon(Icons.casino_outlined, size: 14, color: Color(0xFF7C3AED)),
                         const SizedBox(width: 6),
                         Expanded(
                           child: Text(
                             cur['element'] ?? '',
                             style: const TextStyle(
                               fontSize: 11,
-                              color: Color(0xFFE2E8F0),
+                              color: AppTokens.ink2,
                               fontWeight: FontWeight.w500,
                             ),
                             maxLines: 1,
@@ -718,15 +702,20 @@ class _DebugPageState extends State<DebugPage> {
             ),
           ),
 
-          // 军师安抚箴言与心态指引
+          // 军师安抚箴言与心态指引（简约清爽卡片）
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
             child: Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: const Color(0x660B132B),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: const Color(0x4D475569), width: 0.8),
+                color: const Color(0xFFF8FAFC),
+                borderRadius: BorderRadius.circular(AppTokens.r10),
+                border: const Border(
+                  left: BorderSide(color: AppTokens.brand, width: 3.5),
+                  top: BorderSide(color: AppTokens.border, width: 0.8),
+                  right: BorderSide(color: AppTokens.border, width: 0.8),
+                  bottom: BorderSide(color: AppTokens.border, width: 0.8),
+                ),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -734,14 +723,14 @@ class _DebugPageState extends State<DebugPage> {
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Icon(Icons.format_quote_rounded, color: Color(0xFFF59E0B), size: 16),
+                      const Icon(Icons.format_quote_rounded, color: Color(0xFFD97706), size: 15),
                       const SizedBox(width: 4),
                       Expanded(
                         child: Text(
                           cur['quote'] ?? '',
                           style: const TextStyle(
                             fontSize: 12,
-                            color: Color(0xFFFEF08A),
+                            color: AppTokens.ink,
                             height: 1.4,
                             fontWeight: FontWeight.w500,
                           ),
@@ -753,14 +742,14 @@ class _DebugPageState extends State<DebugPage> {
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Icon(Icons.shield_outlined, color: Color(0xFF14B8A6), size: 14),
+                      const Icon(Icons.shield_outlined, color: AppTokens.brand, size: 14),
                       const SizedBox(width: 6),
                       Expanded(
                         child: Text(
                           cur['comfort'] ?? '',
                           style: const TextStyle(
                             fontSize: 11,
-                            color: Color(0xFFCBD5E1),
+                            color: AppTokens.muted,
                             height: 1.35,
                           ),
                         ),
@@ -774,28 +763,27 @@ class _DebugPageState extends State<DebugPage> {
 
           // 联动开关：智能牌势安抚模式
           Container(
-            padding: const EdgeInsets.fromLTRB(16, 8, 12, 10),
+            padding: const EdgeInsets.fromLTRB(16, 6, 12, 8),
             decoration: const BoxDecoration(
-              color: Color(0x33000000),
-              borderRadius: BorderRadius.vertical(bottom: Radius.circular(18)),
+              border: Border(top: BorderSide(color: AppTokens.border, width: 0.6)),
             ),
             child: Row(
               children: [
-                const Icon(Icons.favorite_outline_rounded, size: 14, color: Color(0xFFF43F5E)),
+                const Icon(Icons.favorite_rounded, size: 14, color: Color(0xFFF43F5E)),
                 const SizedBox(width: 6),
                 const Expanded(
                   child: Text(
                     '逆风智能安抚与防守保分（避免上头）',
                     style: TextStyle(
-                      fontSize: 11.5,
-                      color: Color(0xFFE2E8F0),
+                      fontSize: 12,
+                      color: AppTokens.ink,
                       fontWeight: FontWeight.w500,
                     ),
                   ),
                 ),
                 Switch(
                   value: _cfg.moodGuard,
-                  activeColor: const Color(0xFF14B8A6),
+                  activeColor: AppTokens.brand,
                   onChanged: (v) => _update(_cfg.copyWith(moodGuard: v)),
                 ),
               ],

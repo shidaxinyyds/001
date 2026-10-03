@@ -10,6 +10,8 @@ import 'package:auto_vision/device_info_card.dart';
 import 'package:auto_vision/mode_store.dart';
 import 'package:auto_vision/platform_store.dart';
 import 'package:auto_vision/knowledge_page.dart';
+import 'package:auto_vision/license/license_service.dart';
+import 'package:auto_vision/license/license_status.dart';
 import 'package:auto_vision/theme/app_tokens.dart';
 
 /// 配色统一读设计 token（明亮现代商务）。
@@ -139,6 +141,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }).catchError((_) {
         if (mounted) setState(() {});
       });
+
+      // 防破解/防绕过：切回前台立即核验授权有效性，失权立即终止识别并关窗
+      if (isProcessing) {
+        LicenseService.instance.ensureUsable().then((lic) {
+          if (!lic.allowsUsage && mounted) {
+            setProcessingState(false);
+            hideOverlay();
+            setState(() => isProcessing = false);
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text(lic.status == LicenseStatus.licenseExpired
+                  ? '卡密已到期，已停止识别服务'
+                  : '卡密授权校验未通过，已停止识别服务'),
+              backgroundColor: AppTokens.danger,
+            ));
+          }
+        }).catchError((_) {});
+      }
     }
   }
 
@@ -154,12 +173,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // 与第一轮位置校正循环互相踩踏，是“开窗过程抽风”的常见诱因）。
   bool _overlayBusy = false;
 
-  // 底部导航栏当前页（0=主页, 1=调试）
+  // 底部导航栏当前页（0=主页, 1=知识库, 2=调试）
   int _tab = 0;
 
   Future<void> setProcessingState(bool start) async {
     try {
       if (start) {
+        final licState = await LicenseService.instance.ensureUsable();
+        if (!licState.allowsUsage) {
+          print('[LicCheck] License check failed before starting processing');
+          return;
+        }
         await channel.invokeMethod<int>('startProcessing');
       } else {
         await channel.invokeMethod<int>('stopProcessing');
@@ -568,6 +592,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         hideOverlay();
         setState(() => isProcessing = false);
       } else {
+        // 卡密严密防线：启动识别前核验可用性，未激活/已到期直接拦截
+        final licState = await LicenseService.instance.ensureUsable();
+        if (!licState.allowsUsage) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text(licState.status == LicenseStatus.licenseExpired
+                  ? '卡密授权已到期，请重新激活后使用'
+                  : (licState.message ?? '未检测到有效卡密授权，无法开启识别')),
+              backgroundColor: AppTokens.danger,
+              duration: const Duration(seconds: 4),
+            ));
+          }
+          return;
+        }
+
         final opened = await showOverlay();
         // 开悬浮窗流程可长达数秒（权限/位置校正），期间若被授权闸门卸页面，
         // 绝不拿着已销毁的 context 再 setState。
@@ -693,30 +732,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ),
           const SizedBox(height: 10),
           // 平台大卡片 2 列排布，大按键、不截断、极易点击
-          if (pList.length >= 4) ...[
+          for (int i = 0; i < pList.length; i += 2) ...[
+            if (i > 0) const SizedBox(height: 7),
             Row(
               children: [
-                buildPlatformItem(pList[0]),
-                const SizedBox(width: 8),
-                buildPlatformItem(pList[1]),
-              ],
-            ),
-            const SizedBox(height: 7),
-            Row(
-              children: [
-                buildPlatformItem(pList[2]),
-                const SizedBox(width: 8),
-                buildPlatformItem(pList[3]),
-              ],
-            ),
-            if (pList.length > 4) ...[
-              const SizedBox(height: 7),
-              Row(
-                children: [
-                  buildPlatformItem(pList[4]),
+                buildPlatformItem(pList[i]),
+                if (i + 1 < pList.length) ...[
+                  const SizedBox(width: 8),
+                  buildPlatformItem(pList[i + 1]),
+                ] else ...[
+                  const SizedBox(width: 8),
+                  const Spacer(),
                 ],
-              ),
-            ],
+              ],
+            ),
           ],
           if (platInfo != null) ...[
             const SizedBox(height: 10),
