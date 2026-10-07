@@ -2385,10 +2385,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               ),
               const SizedBox(width: 4),
               Text(
-                '【🎯 听牌·胡牌绝张雷达】',
+                '🎯 听牌推算',
                 style: TextStyle(
                   color: hasDead ? const Color(0xFFFF8A80) : const Color(0xFF69F0AE),
-                  fontSize: 10.5,
+                  fontSize: 10,
                   fontWeight: FontWeight.bold,
                   decoration: TextDecoration.none,
                 ),
@@ -2472,18 +2472,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                   }),
             ],
           ),
-          if (chanceText.isNotEmpty) ...[
-            const SizedBox(height: 4),
-            Text(
-              '🧾 $chanceText',
-              style: const TextStyle(
-                color: Color(0xFFB2DFDB),
-                fontSize: 8.5,
-                height: 1.25,
-                decoration: TextDecoration.none,
-              ),
-            ),
-          ],
+
         ],
       ),
     );
@@ -2648,8 +2637,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     // 未标定又无模型：本块没有任何可测量的东西，只能当文本说明，不能当仪表。
     final bool degrade = pureAnalytical && !calibrated;
     final String degradeLabel = pureAnalytical
-        ? '纯解析式评估（未标定）· 牌势 $tier'
-        : '牌势评估（未标定）· $tier';
+        ? '纯解析式评估 · 牌势 $tier'
+        : '牌势评估 · $tier';
 
     Color primaryColor;
     Color gradientStart;
@@ -2673,32 +2662,33 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     }
 
     return Container(
-      margin: const EdgeInsets.only(bottom: 4),
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3.5),
+      margin: const EdgeInsets.only(bottom: 3.5),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
       decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
           colors: [gradientStart, gradientEnd],
         ),
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: primaryColor.withAlpha(70), width: 0.6),
+        borderRadius: BorderRadius.circular(5),
+        border: Border.all(color: primaryColor.withAlpha(65), width: 0.5),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
         children: [
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Row(
                 children: [
-                  Icon(Icons.radar_rounded, color: primaryColor, size: 11),
-                  const SizedBox(width: 4),
+                  Icon(Icons.insights_rounded, color: primaryColor, size: 10),
+                  const SizedBox(width: 3.5),
                   Text(
                     title,
                     style: TextStyle(
                       color: primaryColor,
-                      fontSize: 9.5,
+                      fontSize: 9,
                       fontWeight: FontWeight.bold,
                       letterSpacing: 0.2,
                       decoration: TextDecoration.none,
@@ -2712,38 +2702,34 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                     padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0.5),
                     decoration: BoxDecoration(
                       color: primaryColor.withAlpha(35),
-                      borderRadius: BorderRadius.circular(3),
+                      borderRadius: BorderRadius.circular(2.5),
                       border: Border.all(color: primaryColor.withAlpha(80), width: 0.5),
                     ),
                     child: Text(
                       equityChip,
                       style: TextStyle(
                         color: primaryColor,
-                        fontSize: 8.5,
+                        fontSize: 8,
                         fontWeight: FontWeight.bold,
                         decoration: TextDecoration.none,
                       ),
                     ),
                   ),
-                  // B-P4 空白 B：未标定又无模型时不报分值。`net_ev` 是向听/进张
-                  // 折算的合成评分（同帧候选实测差 1000/20/9），没有量纲可解释，
-                  // 写成「+50.5 分」就会被当成能换算成番数的收益（B-P3 刚拆过同类错标）。
                   if (!degrade) ...[
-                    const SizedBox(width: 4),
+                    const SizedBox(width: 3),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0.5),
+                      padding: const EdgeInsets.symmetric(horizontal: 3.5, vertical: 0.5),
                       decoration: BoxDecoration(
                         color: Colors.white.withAlpha(15),
-                        borderRadius: BorderRadius.circular(3),
+                        borderRadius: BorderRadius.circular(2.5),
                       ),
                       child: Text(
-                        // 单位随 payload：这是模型内部评分（分），不是番数。
                         netEv >= 0
                             ? '+${netEv.toStringAsFixed(1)}$evUnit'
                             : '${netEv.toStringAsFixed(1)}$evUnit',
                         style: const TextStyle(
                           color: Colors.white,
-                          fontSize: 8.5,
+                          fontSize: 8,
                           fontWeight: FontWeight.bold,
                           decoration: TextDecoration.none,
                         ),
@@ -2754,16 +2740,14 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               ),
             ],
           ),
-          const SizedBox(height: 3),
-          // 进度条的形状本身就在说「这是一次测量」，所以纯解析式态下整块换成
-          // 一行文本标签：保留颜色（牌势好坏仍需一眼区分），去掉刻度与数值。
+          const SizedBox(height: 2),
           if (degrade)
             Text(
               degradeLabel,
               style: TextStyle(
-                color: primaryColor,
-                fontSize: 8,
-                fontWeight: FontWeight.w600,
+                color: primaryColor.withAlpha(210),
+                fontSize: 7.5,
+                fontWeight: FontWeight.w500,
                 decoration: TextDecoration.none,
               ),
             )
@@ -2772,23 +2756,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               borderRadius: BorderRadius.circular(1.5),
               child: LinearProgressIndicator(
                 value: barValue,
-                minHeight: 2.5,
+                minHeight: 2,
                 backgroundColor: Colors.white12,
                 valueColor: AlwaysStoppedAnimation<Color>(primaryColor),
               ),
             ),
-          // 口径脚注：未标定时必须把「这是模型推算、只能当相对参考」写在数字旁边。
-          if (!calibrated && note.isNotEmpty) ...[
-            const SizedBox(height: 2),
-            Text(
-              note,
-              style: TextStyle(
-                color: Colors.white.withAlpha(110),
-                fontSize: 6.8,
-                decoration: TextDecoration.none,
-              ),
-            ),
-          ],
         ],
       ),
     );
@@ -2839,7 +2811,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         border: Border.all(color: dColor.withAlpha(90), width: 0.5),
       ),
       child: Text(
-        dLevel == 'safe' ? '安目' : '点炮 $dBand',
+        dLevel == 'safe' ? '安全' : '点炮 $dBand',
         style: TextStyle(
           color: dColor,
           fontSize: 8,
@@ -2853,12 +2825,12 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   /// 对手手牌贝叶斯概率透视 (Bayesian Hand Range Reading) - 极致微型
   Widget _buildBayesianHandRangesWidget(List<dynamic> handRanges) {
     return Container(
-      margin: const EdgeInsets.only(bottom: 4),
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3.5),
+      margin: const EdgeInsets.only(bottom: 3.5),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
       decoration: BoxDecoration(
         color: const Color(0x281A237E),
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: const Color(0x4D3F51B5), width: 0.6),
+        borderRadius: BorderRadius.circular(5),
+        border: Border.all(color: const Color(0x4D3F51B5), width: 0.5),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -2955,14 +2927,15 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                             // 后验分数当频率概率，因此面板只显档位。
                             final String heldBand =
                                 (h['band'] as String?) ?? _heldBandWord(p);
+                            final String cn = tileToChinese(tileStr);
                             return Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 0.5),
+                              padding: const EdgeInsets.symmetric(horizontal: 2.5, vertical: 0.5),
                               decoration: BoxDecoration(
                                 color: const Color(0x33FFD54F),
                                 borderRadius: BorderRadius.circular(2),
                               ),
                               child: Text(
-                                '$tileStr $heldBand',
+                                '$cn $heldBand',
                                 style: const TextStyle(
                                   color: Color(0xFFFFECB3),
                                   fontSize: 6.8,
@@ -3299,12 +3272,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (alertWidget != null) alertWidget,
-        if (tingRadarWidget != null) tingRadarWidget,
         if (evGaugeWidget != null) evGaugeWidget,
         if (handRangesWidget != null) handRangesWidget,
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5.5),
+          padding: const EdgeInsets.symmetric(horizontal: 7.5, vertical: 5),
           decoration: BoxDecoration(
             gradient: const LinearGradient(
               begin: Alignment.topLeft,
@@ -3325,33 +3296,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // 空白 D：摸牌预演——预摸只取前几种高概率摸牌，说清「哪些摸牌会改主意」。
-              // 没有模拟数据时这两行根本不存在，面板也就不会凭空说一句「若摸到…」。[P4D]
-              if (predrawLine != null && predrawLine.isNotEmpty) ...[
-                Text(
-                  '摸牌预演 · $predrawLine',
-                  style: TextStyle(
-                    color: Colors.white.withAlpha(150),
-                    fontSize: 7.8,
-                    height: 1.15,
-                    decoration: TextDecoration.none,
-                  ),
-                ),
-                const SizedBox(height: 2),
-              ],
-              if (predrawFlipLine != null && predrawFlipLine.isNotEmpty) ...[
-                Text(
-                  predrawFlipLine,
-                  style: const TextStyle(
-                    color: Color(0xFFFFD54F),
-                    fontSize: 8,
-                    fontWeight: FontWeight.w600,
-                    height: 1.15,
-                    decoration: TextDecoration.none,
-                  ),
-                ),
-                const SizedBox(height: 3),
-              ],
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
@@ -3392,7 +3336,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                           ),
                         ),
                       ],
-                      if (defenseLevel == 'SAFE') ...[
+                      if (defenseLevel == 'SAFE' && (top['danger_flow'] is! Map)) ...[
                         const SizedBox(width: 4),
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1.5),
@@ -3478,12 +3422,12 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                 ],
               ),
               if (topReason != null && topReason.isNotEmpty) ...[
-                const SizedBox(height: 3.5),
+                const SizedBox(height: 3),
                 Text(
                   topReason,
                   style: const TextStyle(
                     color: Color(0xFF80CBC4),
-                    fontSize: 9,
+                    fontSize: 8.5,
                     height: 1.2,
                     decoration: TextDecoration.none,
                   ),
@@ -3492,7 +3436,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               // 空白 A：把「为什么是这一张」说成一句可核对的话（措辞走
               // `discards_tiebreak.advantage_note` 的决胜链层，不是 ev 减法）。[P4A]
               if (advantageReason != null && advantageReason.isNotEmpty) ...[
-                const SizedBox(height: 3),
+                const SizedBox(height: 2.5),
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -3534,7 +3478,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               // 空白 C：每一档危险度都跟一句可执行的话。旧面板只在 high 以上显红，
               // 看完只知道「有点危」而不知道该不该改牌；中间档从此不再沉默。[P4C]
               if (dangerHint != null && dangerHint.isNotEmpty) ...[
-                const SizedBox(height: 2.5),
+                const SizedBox(height: 2),
                 Text(
                   dangerHint,
                   style: TextStyle(
@@ -3546,7 +3490,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                 ),
               ],
               if (defenseReason != null && defenseReason.isNotEmpty && defenseLevel != 'SAFE') ...[
-                const SizedBox(height: 2.5),
+                const SizedBox(height: 2),
                 Text(
                   '防守: $defenseReason',
                   style: TextStyle(
@@ -3558,17 +3502,17 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                 ),
               ],
               if (sorted.length > 1) ...[
-                const SizedBox(height: 4),
+                const SizedBox(height: 3),
                 Wrap(
-                  spacing: 5,
-                  runSpacing: 3,
+                  spacing: 4,
+                  runSpacing: 2.5,
                   children: [
                     for (int i = 1; i < sorted.length && i < 3; i++)
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 4.5, vertical: 1.5),
+                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1.5),
                         decoration: BoxDecoration(
                           color: Colors.white.withAlpha(12),
-                          borderRadius: BorderRadius.circular(3.5),
+                          borderRadius: BorderRadius.circular(3),
                           border: Border.all(color: Colors.white12, width: 0.5),
                         ),
                         child: Row(
@@ -3587,7 +3531,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                                   : '次选',
                               style: TextStyle(
                                 color: Colors.white.withAlpha(160),
-                                fontSize: 8,
+                                fontSize: 7.5,
                                 fontWeight: FontWeight.w500,
                                 decoration: TextDecoration.none,
                               ),
@@ -3599,7 +3543,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                               _ukeireLabel(sorted[i]),
                               style: const TextStyle(
                                 color: Color(0xFF69F0AE),
-                                fontSize: 8.5,
+                                fontSize: 8,
                                 fontWeight: FontWeight.bold,
                                 decoration: TextDecoration.none,
                               ),
@@ -3615,7 +3559,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               // 空白 C 替代方案：只在主推已到中危及以上、且候选里确实有安全/微危牌时
               // 出现（判定在 engine.annotate_advice_decisions）。列牌不列“更安全”的承诺。[P4C]
               if (saferAlts.isNotEmpty) ...[
-                const SizedBox(height: 3),
+                const SizedBox(height: 2.5),
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
@@ -3630,7 +3574,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                     const SizedBox(width: 3),
                     Expanded(
                       child: Wrap(
-                        spacing: 4,
+                        spacing: 3.5,
                         runSpacing: 2,
                         crossAxisAlignment: WrapCrossAlignment.center,
                         children: [
@@ -3654,6 +3598,33 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                       ),
                     ),
                   ],
+                ),
+              ],
+              // 空白 D：摸牌预演——预摸只取前几种高概率摸牌，说清「哪些摸牌会改主意」。
+              // 没有模拟数据时这两行根本不存在，面板也就不会凭空说一句「若摸到…」。[P4D]
+              if (predrawLine != null && predrawLine.isNotEmpty) ...[
+                const SizedBox(height: 2.5),
+                Text(
+                  '摸牌预演 · $predrawLine',
+                  style: TextStyle(
+                    color: Colors.white.withAlpha(150),
+                    fontSize: 7.5,
+                    height: 1.15,
+                    decoration: TextDecoration.none,
+                  ),
+                ),
+              ],
+              if (predrawFlipLine != null && predrawFlipLine.isNotEmpty) ...[
+                const SizedBox(height: 1.5),
+                Text(
+                  predrawFlipLine,
+                  style: const TextStyle(
+                    color: Color(0xFFFFD54F),
+                    fontSize: 7.8,
+                    fontWeight: FontWeight.w600,
+                    height: 1.15,
+                    decoration: TextDecoration.none,
+                  ),
                 ),
               ],
             ],
