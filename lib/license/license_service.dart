@@ -76,10 +76,23 @@ class LicenseService {
     // 绝不让授权检查本身把 App 首屏带崩。
     try {
       _prefs = await SharedPreferences.getInstance();
+      try {
+        await _prefs?.reload();
+      } catch (_) {}
       if (_deviceId == null || _deviceId!.isEmpty) {
         final cached = _prefs?.getString(_kDeviceId);
         if (cached != null && cached.isNotEmpty) {
           _deviceId = cached;
+        } else {
+          // 自愈兜底：若 _kDeviceId 尚未单独存盘，从已保存的签名凭证提取设备指纹
+          final storedToken = _prefs?.getString(_kToken);
+          if (storedToken != null && storedToken.isNotEmpty) {
+            final parts = storedToken.split('|');
+            if (parts.isNotEmpty && parts[0].isNotEmpty) {
+              _deviceId = parts[0];
+              _prefs?.setString(_kDeviceId, parts[0]);
+            }
+          }
         }
       }
     } catch (_) {
@@ -136,8 +149,17 @@ class LicenseService {
     if (p.getBool(_kTamperLocked) == true) return null;
     final stored = p.getString(_kToken) ?? '';
     if (stored.isEmpty) return null;
+    var dev = deviceId;
+    if (dev.isEmpty) {
+      final parts = stored.split('|');
+      if (parts.isNotEmpty && parts[0].isNotEmpty) {
+        dev = parts[0];
+        _deviceId = parts[0];
+        p.setString(_kDeviceId, parts[0]);
+      }
+    }
     return LicenseToken.parseAndVerify(
-        stored, LicenseConfig.licenseTokenSecretHex, deviceId);
+        stored, LicenseConfig.licenseTokenSecretHex, dev);
   }
 
   /// 【必须落盘才算成功 v3】旧实现 fire-and-forget：激活成功后紧接着进程崩溃
@@ -155,13 +177,10 @@ class LicenseService {
     await _prefs?.remove(_kToken);
   }
 
-  /// 本地有存券但验签失败时的定性：空指纹下验签必然失败，不能据此判
-  /// “与本机不匹配/被篡改”（那是误踢正常用户的路径），降级为瞬态未就绪。
+  /// 本地有存券但验签失败时的定性：有存券说明用户已激活，绝不草率降级为 notActivated；
+  /// 仅在确实没有任何券时才为 notActivated。
   LicenseState _denyOrPending(String? message) {
     final had = (_prefs?.getString(_kToken) ?? '').isNotEmpty;
-    if (had && deviceId.isEmpty) {
-      return const LicenseState(LicenseStatus.notActivated);
-    }
     return LicenseState(
       had ? LicenseStatus.refused : LicenseStatus.notActivated,
       message: had ? message : null,
@@ -384,6 +403,16 @@ class LicenseService {
   /// 不会自动退回激活页；若重新接出此调试入口，需由调用方显式驱动闸门强制复位。
   Future<void> logout() async {
     await _clearToken();
+  }
+
+  /// 快速本地离线评估（不发任何网络请求、不等待异步通道）。
+  /// 悬浮窗启动时可微秒级确定是否具备有效券，杜绝冷启动界面闪锁。
+  LicenseState ensureLocalFast() {
+    if (isTamperLocked) {
+      return const LicenseState(LicenseStatus.refused,
+          message: '检测到运行环境异常或篡改攻击，设备已被安全熔断', isRevoked: true);
+    }
+    return _localEval();
   }
 
   /// 本地离线判定（不联网）：本地验签券 + 服务器时间锚点 + 72h 宽限。

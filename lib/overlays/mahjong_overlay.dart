@@ -530,7 +530,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   bool _hitLimitFeedback = false;
 
   // ── 授权自守护（悬浮窗子引擎用 device_id 直连服务器心跳，到期即自锁）──
-  bool _licenseAllows = false; // 悲观默认，必须经过权威验签通过后方可放行
+  // 默认放行：悬浮窗只由已放行激活的主界面拉起，经权威校验发现确实到期/停用后再硬锁
+  bool _licenseAllows = true;
   // 是否已拿到过一次权威结论。用来区分「校验失败（终态）」与「还没校验完（瞬态）」：
   // 不区分的话，冷启动一次网络抖动就会被当成失权硬锁，而用户完全无法手动解锁。
   bool _licenseVerified = false;
@@ -671,8 +672,21 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
   Future<void> _refreshLicense() async {
     try {
-      // 权威卡密核验：通过 LicenseService.instance.heartbeat() 获取服务器与本地双重校验状态
-      // 必须满足 valid 或 needsRenew(宽限内) 才允许使用，其余（notActivated/refused/licenseExpired）一律硬锁
+      await LicenseService.instance.init();
+      // 1. 本地极速验券（毫秒级）：已激活且未过期立即保持放行，杜绝网络心跳期间将已激活用户误锁
+      final localSt = LicenseService.instance.ensureLocalFast();
+      if (localSt.allowsUsage && mounted) {
+        if (!_licenseAllows || !_licenseVerified) {
+          setState(() {
+            _licenseAllows = true;
+            _licenseVerified = true;
+            _licenseDays = localSt.remainingDays;
+            _lockSized = false;
+          });
+        }
+      }
+
+      // 2. 权威云端核验：获取服务器与本地双重校验状态
       final st = await LicenseService.instance.heartbeat();
       final bool allows = st.allowsUsage;
       _licenseVerified = true; // 拿到权威结论，从此才允许下终态文案
@@ -714,6 +728,19 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       }
       _scheduleLicenseExpiryCheck(st, allows);
     } catch (_) {
+      // 网络或子系统抖动时：如果本地已证明可用，坚决保持放行，绝不误锁！
+      final localSt = LicenseService.instance.ensureLocalFast();
+      if (localSt.allowsUsage) {
+        if (mounted && (!_licenseAllows || !_licenseVerified)) {
+          setState(() {
+            _licenseAllows = true;
+            _licenseVerified = true;
+            _licenseDays = localSt.remainingDays;
+            _lockSized = false;
+          });
+        }
+        return;
+      }
       // 核验异常绝不让悬浮窗引擎崩溃。但“保持当前状态”不等于“什么都不做”：
       // 从未拿到权威结论时一路保持 false，用户就会对着一个点不动的锁等满 60s，
       // 所以文案给「校验中」并 4s 后重试一次。已放行过的不因单次抖动回锁。

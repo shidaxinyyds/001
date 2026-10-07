@@ -28,48 +28,42 @@ class _DebugPageState extends State<DebugPage> {
 
   int _fortuneIndex = 0;
 
-  /// 心态签文（原自带一个 `score` 装饰分值，已删：它会被面板渲染成「胜势指数 98%」
-  /// 这种看着像测量结果的伪指标，而牌局里没有任何算式能导出它）。
+  /// 实战运势与攻防心法（去伪存真：杜绝无计算依据的伪百分比指标，专注实战牌势与心理心流调节）。
+  /// 参悟心法：结合牌势推演与心理建设，助牌手保持最高期望决策。
+  static const String _kHeartMethodNote = '参悟心法 · 实战牌势';
+
   static const List<Map<String, String>> _kFortunes = [
     {
-      'title': '鸿运当头 · 紫气东来',
-      'level': '上上大吉',
-      'direction': '东南生财 · 迎财入座',
-      'element': '条子顺风 · 连珠大吉',
-      'quote': '牌顺乘风破浪，牌逆静水流深。手牌不济莫慌乱，守住现物保金身。',
-      'comfort': '当前牌势蒸蒸日上，气场强盛！积极做大番牌，敢打敢拼，胜利在握。',
-    },
-    {
       'title': '金汤固守 · 蓄势待发',
-      'level': '静水深流',
-      'direction': '正南护财 · 坐镇中军',
-      'element': '万字通达 · 稳扎稳打',
+      'level': '攻守兼备',
+      'direction': '中盘控场 · 现物控盘',
+      'element': '万字通达 · 结构稳固',
       'quote': '逆风防守守其险，顺风进攻取其胜。急躁乃败军之由，定心即立于不败之地。',
       'comfort': '起手牌杂切莫急躁，跟打熟张不点炮；守住底分，转机与大牌往往后发制人。',
     },
     {
-      'title': '潜龙在渊 · 必有大成',
-      'level': '厚积薄发',
-      'direction': '正东聚气 · 巧借东风',
-      'element': '筒子圆满 · 逢叫必和',
-      'quote': '胜负皆常理，心定牌自通。深吸一口气，保持严谨决策，牌流自会回转。',
-      'comfort': '牌局瞬息万变，AI 已为您实时锁定最高 EV 期望与绝张防守，从容应对即可。',
+      'title': '顺风推进 · 争抢先手',
+      'level': '速攻争先',
+      'direction': '起手顺风 · 提速抢叫',
+      'element': '筒子连络 · 优先成搭',
+      'quote': '宁弃一手烂牌，不放一人点炮。牌顺则乘胜追击，算准进张步步为营。',
+      'comfort': '牌局进张顺畅时敢打敢拼，紧盯上家舍牌节奏，保持最高听牌速度与和牌期望。',
     },
     {
-      'title': '龙腾四海 · 势如破竹',
-      'level': '雀圣神威',
-      'direction': '西南纳祥 · 顺风破浪',
-      'element': '大番聚气 · 金钩迎春',
-      'quote': '宁弃一手烂牌，不放一人点炮。稳扎稳打控全场，顺势而为定乾坤。',
-      'comfort': '对手弃牌动向已全息推导，跟打现物安全张，静待高番反戈一击！',
+      'title': '严防死守 · 避点大炮',
+      'level': '铜墙铁壁',
+      'direction': '尾盘戒备 · 紧盯生张',
+      'element': '字张沉底 · 留备退路',
+      'quote': '胜负皆常理，心定牌自通。尾盘防生张，长线期望唯在沉着防守。',
+      'comfort': '面对对手明显叫听大牌，坚决弃和扣死生张，跟打安全张，保住积分方能笑到最后。',
     },
     {
-      'title': '泰然自若 · 稳如磐石',
-      'level': '定心无量',
-      'direction': '正西生金 · 心境如水',
-      'element': '全色兼备 · 气度非凡',
-      'quote': '心怀平常心，算尽盘中理。牌运有波峰波谷，真正的高手胜在心境沉着。',
-      'comfort': '戒骄戒躁，把注意力交给当下每一次进张与舍牌，长线胜率必然眷顾沉着之人。',
+      'title': '厚积薄发 · 逆转翻盘',
+      'level': '定心致远',
+      'direction': '沉着应对 · 算尽盘理',
+      'element': '条子聚气 · 逢叫必和',
+      'quote': '心怀平常心，算尽盘中理。牌流起伏有周期，真正的高手胜在情绪稳定。',
+      'comfort': '牌流暂时受挫时切忌上头盲冲，AI 实时辅助牌河分析，从容应对定能长线盈利。',
     },
   ];
 
@@ -85,11 +79,11 @@ class _DebugPageState extends State<DebugPage> {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
         content: Row(
           children: const [
-            Icon(Icons.auto_awesome, color: Color(0xFFFBBF24), size: 17),
+            Icon(Icons.refresh_rounded, color: Color(0xFF34D399), size: 17),
             SizedBox(width: 8),
             Expanded(
               child: Text(
-                '气场提振成功：心态归宁，胜势气场已达巅峰！',
+                '已刷新当前牌势运势：实战攻防重心已更新！',
                 style: TextStyle(fontSize: 13, color: Colors.white, fontWeight: FontWeight.w500),
               ),
             ),
@@ -519,7 +513,7 @@ class _DebugPageState extends State<DebugPage> {
                       ),
                       SizedBox(height: 1),
                       Text(
-                        '心理调谐 · 逆风安抚 · 胜势强化',
+                        '实战心法 · 牌势走向与心态签文调节',
                         style: TextStyle(
                           fontSize: 11,
                           color: AppTokens.muted,
@@ -544,7 +538,7 @@ class _DebugPageState extends State<DebugPage> {
                         Icon(Icons.refresh_rounded, size: 13, color: Color(0xFFD97706)),
                         SizedBox(width: 4),
                         Text(
-                          '参悟心法',
+                          '当前运势',
                           style: TextStyle(
                             color: Color(0xFFB45309),
                             fontSize: 11.5,

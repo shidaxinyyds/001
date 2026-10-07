@@ -57,8 +57,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // 「程序同步输入框」与「用户键入」共用一个 controller：不按住这个标志，
   // 回填当前平台名会再触发一次 onChanged，形成自我回声。
   bool _syncingField = false;
-  // 两个按钮的展开态：null = 都没展开
-  String? _oddsTab;
+  // 两个取数卡片的开关状态：运势概率 / 好牌概率
+  bool _showMoodOdds = false;
+  bool _showTileOdds = true; // 默认开启好牌概率
 
   // 悬浮窗→主 App 的回传订阅。必须持有并在 dispose 取消：旧实现只 listen
   // 不 cancel，页面每次被重建都叠加一个监听/或撞单订阅流报错，状态回传
@@ -991,21 +992,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ],
           const SizedBox(height: 10),
           _buildFieldRow(label: '游戏ID', field: _buildGameIdField()),
-          if (_gameIdNotice.isNotEmpty) ...[
-            const SizedBox(height: 5),
-            _buildNotice(_gameIdNotice),
-          ],
           const SizedBox(height: 12),
           Row(
             children: [
-              Expanded(child: _buildOddsButton('mood')),
+              Expanded(child: _buildOddsToggleCard('mood')),
               const SizedBox(width: 8),
-              Expanded(child: _buildOddsButton('tile')),
+              Expanded(child: _buildOddsToggleCard('tile')),
             ],
           ),
-          if (_oddsTab != null) ...[
+          if (_showMoodOdds) ...[
             const SizedBox(height: 10),
-            _OddsResultView(tab: _oddsTab!),
+            const _OddsResultView(tab: 'mood'),
+          ],
+          if (_showTileOdds) ...[
+            const SizedBox(height: 10),
+            const _OddsResultView(tab: 'tile'),
           ],
         ],
       ),
@@ -1092,40 +1093,94 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
-  Widget _buildOddsButton(String tab) {
-    final bool sel = _oddsTab == tab;
-    final bool mood = tab == 'mood';
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: () => setState(() => _oddsTab = sel ? null : tab),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 160),
-        padding: const EdgeInsets.symmetric(vertical: 9),
-        decoration: BoxDecoration(
-          color: sel ? AppTokens.brandContainer : AppTokens.surface,
-          borderRadius: BorderRadius.circular(AppTokens.r10),
-          border: Border.all(
-            color: sel ? AppTokens.brand : AppTokens.border,
-            width: sel ? 1.4 : 0.9,
+  Widget _buildMiniSwitch(bool active) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 180),
+      width: 32,
+      height: 18,
+      padding: const EdgeInsets.all(2),
+      decoration: BoxDecoration(
+        color: active ? AppTokens.brand : const Color(0xFFD1D5DB),
+        borderRadius: BorderRadius.circular(9),
+      ),
+      child: AnimatedAlign(
+        duration: const Duration(milliseconds: 180),
+        alignment: active ? Alignment.centerRight : Alignment.centerLeft,
+        child: Container(
+          width: 14,
+          height: 14,
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: Color(0x33000000),
+                blurRadius: 2,
+                offset: Offset(0, 1),
+              ),
+            ],
           ),
         ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              mood ? Icons.auto_awesome_rounded : Icons.percent_rounded,
-              size: 15,
-              color: sel ? AppTokens.brandDark : AppTokens.muted,
-            ),
-            const SizedBox(width: 5),
-            Text(
-              mood ? '运势概率' : '好牌概率',
-              style: TextStyle(
-                fontSize: 12.5,
-                fontWeight: sel ? FontWeight.bold : FontWeight.w500,
-                color: sel ? AppTokens.brandDark : AppTokens.ink,
+      ),
+    );
+  }
+
+  Widget _buildOddsToggleCard(String tab) {
+    final bool mood = tab == 'mood';
+    final bool active = mood ? _showMoodOdds : _showTileOdds;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () {
+        setState(() {
+          if (mood) {
+            _showMoodOdds = !_showMoodOdds;
+          } else {
+            _showTileOdds = !_showTileOdds;
+          }
+        });
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: active ? AppTokens.brandContainer : AppTokens.surface,
+          borderRadius: BorderRadius.circular(AppTokens.r10),
+          border: Border.all(
+            color: active ? AppTokens.brand : AppTokens.border,
+            width: active ? 1.2 : 0.8,
+          ),
+          boxShadow: [
+            if (active)
+              const BoxShadow(
+                color: Color(0x0A000000),
+                blurRadius: 4,
+                offset: Offset(0, 1),
               ),
+          ],
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  mood ? Icons.auto_awesome_rounded : Icons.percent_rounded,
+                  size: 15,
+                  color: active ? AppTokens.brandDark : AppTokens.muted,
+                ),
+                const SizedBox(width: 5),
+                Text(
+                  mood ? '运势概率' : '好牌概率',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: active ? FontWeight.bold : FontWeight.w500,
+                    color: active ? AppTokens.brandDark : AppTokens.ink,
+                  ),
+                ),
+              ],
             ),
+            _buildMiniSwitch(active),
           ],
         ),
       ),
