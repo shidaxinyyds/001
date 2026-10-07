@@ -3605,7 +3605,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                       child: Wrap(
                         spacing: 4,
                         runSpacing: 2,
-                        crossAxisAlignment: CrossAxisAlignment.center,
+                        crossAxisAlignment: WrapCrossAlignment.center,
                         children: [
                           for (final a in saferAlts)
                             Row(
