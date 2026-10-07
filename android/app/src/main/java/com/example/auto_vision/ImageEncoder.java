@@ -18,11 +18,11 @@ public class ImageEncoder {
   }
 
   public static byte[] encodeImageToByteArray(Image image) {
-    return encodeImageToByteArray(image, 0f, 1f, 95);
+    return encodeImageToByteArray(image, 0f, 1f, 80);
   }
 
   public static byte[] encodeImageToByteArray(Image image, float roiTop, float roiBottom) {
-    return encodeImageToByteArray(image, roiTop, roiBottom, 95);
+    return encodeImageToByteArray(image, roiTop, roiBottom, 80);
   }
 
   public static byte[] encodeImageToByteArray(Image image, float roiTop, float roiBottom, int quality) {

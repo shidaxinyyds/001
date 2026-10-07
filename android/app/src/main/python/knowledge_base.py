@@ -15,6 +15,10 @@ from typing import Dict, List, Optional, Tuple
 # (定缺/EV/进张) 键，同分时就与 analyzer 层的次序分叉，表现为「知识库重排后主推牌
 # 与 reason 里的描述不相对应」。排序口径只允许有一个源头。
 from discards_tiebreak import order_key as _tie_order_key
+try:
+    from modes import get_laizi_set
+except ImportError:
+    get_laizi_set = lambda m: set()
 
 
 class KnowledgeBase:
@@ -140,8 +144,13 @@ class KnowledgeBase:
             is_gold_37 = rank in (3, 7)
             is_wind_honor = t_id >= 27
 
+            is_laizi = t_id in get_laizi_set(mode)
+
             # 根据攻防阶段融合知识库心法
-            if is_defensive:
+            if is_laizi:
+                tip = "【万能百搭】核心神牌延展一切，严厉保护绝不出牌"
+                boost -= 200.0
+            elif is_defensive:
                 if is_genbutsu:
                     tip = "【现物防守】场上已出同门现物，绝对安全避炮"
                     boost += 25.0

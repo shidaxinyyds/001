@@ -184,6 +184,21 @@ class BayesianHandRangeReader:
             if num in (3, 9) and (base_idx + 5) in opp.discards:  # 打过 6
                 likelihood *= 0.65
 
+            # 2.5 四张壁牌（Kabe）与断张结构性阻断：
+            # 场上某牌见 4 张（无剩余），则包含该牌的顺子完全绝迹，相连邻张持牌概率折减
+            if num in (1, 9):
+                # 边张壁牌阻断：如 2 见 4，则 1 无法成 1-2-3 顺子
+                adj_idx = base_idx + (1 if num == 1 else 7)
+                if adj_idx < len(pool_remaining) and pool_remaining[adj_idx] <= 0:
+                    likelihood *= 0.70
+            elif num in (4, 5, 6):
+                # 中心生张两翼壁牌阻断
+                left_adj = base_idx + (num - 2)
+                right_adj = base_idx + num
+                if (left_adj < len(pool_remaining) and pool_remaining[left_adj] <= 0) and \
+                   (right_adj < len(pool_remaining) and pool_remaining[right_adj] <= 0):
+                    likelihood *= 0.60
+
             distribution[t] = max(0.0, min(1.0, p_prior * likelihood))
 
         return distribution
@@ -221,6 +236,13 @@ class BayesianHandRangeReader:
         cand_suit = tile_to_suit(candidate_tile)
         cand_num = tile_number(candidate_tile)
         rem_count = pool_remaining[candidate_tile] if candidate_tile < len(pool_remaining) else 0
+
+        # 巡目动态攻守折现模型 (Turn-based Hazard Discounting)
+        turn_hazard_factor = 1.0
+        if total_turn >= 8:
+            turn_hazard_factor = min(1.25, 1.0 + 0.03 * float(total_turn - 8))
+        elif total_turn <= 4:
+            turn_hazard_factor = 0.85
 
         for opp in opponents:
             p_tenpai = opp.estimate_tenpai_probability(total_turn)
@@ -271,6 +293,9 @@ class BayesianHandRangeReader:
                 # 4.2 若对手鸣牌较多，点炮概率进一步膨胀
                 if len(opp.melds) >= 6:
                     p_wait_given_tenpai *= 1.4
+
+                # 注入巡目动态攻守折现
+                p_wait_given_tenpai *= turn_hazard_factor
 
                 p_deal_in = min(0.90, p_tenpai * p_wait_given_tenpai)
 
