@@ -830,10 +830,7 @@ def _build_tactical_perception(
         return phase_label, tactical_badge, tactical_intent
 
     if status in ("waiting", "no_tiles") or (count == 0 and not hand_mpsz):
-        phase_label = "局势感知中"
-        tactical_badge = "等待开局"
-        tactical_intent = "等待牌桌发牌开局，AI 将在发牌后毫秒级感知牌局"
-        return phase_label, tactical_badge, tactical_intent
+        return "", "", ""
 
     # 对局进行中
     advice_list = advice if isinstance(advice, list) else []
@@ -866,23 +863,8 @@ def _build_tactical_perception(
                 tactical_intent = f"建议切【{best_cn}】，拆解孤张全力冲刺听牌"
             else:
                 tactical_intent = "全力冲刺听牌，保留核心好搭"
-        elif shanten is not None and shanten >= 2:
-            phase_label = "摸牌决断 · 搭子优化"
-            tactical_badge = "搭子优化"
-            reason = top_adv.get("reason", "")
-            if best_cn and reason:
-                tactical_intent = f"建议切【{best_cn}】，{reason}"
-            elif best_cn:
-                tactical_intent = f"建议切【{best_cn}】，拆解弱搭推进向听速度"
-            else:
-                tactical_intent = "整理手牌面子，优先保留核心顺子与刻子搭"
         else:
-            phase_label = "摸牌决断 · 实时分析"
-            tactical_badge = "摸牌决策"
-            if best_cn:
-                tactical_intent = f"建议切【{best_cn}】，优化手牌综合向听"
-            else:
-                tactical_intent = "分析手牌面子中，等待最优解输出"
+            return "", "", ""
     else:
         # 候牌轮 / 手牌 13 张等摸或等碰
         if shanten == 0:
@@ -901,14 +883,8 @@ def _build_tactical_perception(
             phase_label = "一向听待命 · 候牌中"
             tactical_badge = "一向听"
             tactical_intent = "等待下轮摸牌，一摸关键张即刻下叫冲刺"
-        elif shanten is not None and shanten >= 2:
-            phase_label = "对局进行中 · 巡视观望"
-            tactical_badge = "巡视中"
-            tactical_intent = "观察各家牌河走势与危险信号，等待进张重组面子"
         else:
-            phase_label = "对局进行中 · 实时推演"
-            tactical_badge = "行牌中"
-            tactical_intent = "局势实时推演中，等待行牌或摸牌轮"
+            return "", "", ""
 
     return phase_label, tactical_badge, tactical_intent
 
@@ -3650,9 +3626,9 @@ class Engine:
                             "platform": self.platform,
                             "platform_name": get_platform(self.platform).get("name", self.platform),
                             "knowledge_doctrine": "【待机推演】等待牌局开始…",
-                            "phase_label": "局势感知中",
-                            "tactical_badge": "等待开局",
-                            "tactical_intent": "等待牌桌发牌开局，AI 将在发牌后毫秒级感知牌局",
+                            "phase_label": "",
+                            "tactical_badge": "",
+                            "tactical_intent": "",
                             "dingque": None,
                             "dingque_suit": None,
                             "hand": "",
