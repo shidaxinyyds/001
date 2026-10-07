@@ -759,6 +759,9 @@ def _error_result(status: str, message: str) -> "EngineResult":
         "hand": "",
         "count": 0,
         "status": status,
+        "phase_label": "画面识别中",
+        "tactical_badge": "识别中",
+        "tactical_intent": "正在对齐画面与牌局状态…",
         "shanten": None,
         "advice": [],
         "commentary": None,
@@ -775,6 +778,140 @@ def _error_result(status: str, message: str) -> "EngineResult":
         result=json.dumps(result),
         stage=None,
     )
+
+
+def _build_tactical_perception(
+    status: str,
+    hand_mpsz: str,
+    count: int,
+    is_drawing: bool,
+    drawing_tile: Optional[str] = None,
+    shanten: Optional[int] = None,
+    is_swap_phase: bool = False,
+    is_dq_phase: bool = False,
+    is_pick_phase: bool = False,
+    swap_advice: Optional[dict] = None,
+    rec_suit_name: Optional[str] = None,
+    advice: Optional[list] = None,
+    best: str = "",
+    ting_details: Optional[list] = None,
+    mood: Optional[dict] = None,
+    danger_flow: Optional[dict] = None,
+) -> Tuple[str, str, str]:
+    """构建高精度局势感知与下一步战术意图。
+    返回: (phase_label, tactical_badge, tactical_intent)
+    - phase_label: 当前牌局所处状态（“现在在干什么”）
+    - tactical_badge: 紧凑徽标标签（用于 UI 状态微章）
+    - tactical_intent: 下一步推荐战术意图（“准备要干什么”）
+    """
+    if is_swap_phase or status == "swap":
+        phase_label = "换三张优化"
+        tactical_badge = "换三张"
+        if isinstance(swap_advice, dict) and swap_advice.get("tiles"):
+            tiles_cn = [tile_to_chinese(t) for t in swap_advice.get("tiles", [])]
+            tactical_intent = f"准备换出【{'、'.join(tiles_cn)}】，优化起手门子结构"
+        else:
+            tactical_intent = "正在评估起手牌型，准备选出三张劣势同门牌换出"
+        return phase_label, tactical_badge, tactical_intent
+
+    if is_dq_phase or status == "dingque":
+        phase_label = "定缺选门"
+        tactical_badge = "定缺抉择"
+        if rec_suit_name:
+            tactical_intent = f"建议定缺【{rec_suit_name}】门（弱门清整，全力做大优势门）"
+        else:
+            tactical_intent = "正在评估各门手牌厚度，准备打缺牌张最少的一门"
+        return phase_label, tactical_badge, tactical_intent
+
+    if is_pick_phase or status == "pick":
+        phase_label = "选牌操作中"
+        tactical_badge = "选牌决断"
+        tactical_intent = "正在识别候选牌张，请在界面弹窗中确认选牌"
+        return phase_label, tactical_badge, tactical_intent
+
+    if status in ("waiting", "no_tiles") or (count == 0 and not hand_mpsz):
+        phase_label = "局势感知中"
+        tactical_badge = "等待开局"
+        tactical_intent = "等待牌桌发牌开局，AI 将在发牌后毫秒级感知牌局"
+        return phase_label, tactical_badge, tactical_intent
+
+    # 对局进行中
+    advice_list = advice if isinstance(advice, list) else []
+    top_adv = advice_list[0] if (advice_list and isinstance(advice_list[0], dict)) else {}
+    best_tile = best or top_adv.get("tile", "")
+    best_cn = tile_to_chinese(best_tile) if best_tile else ""
+    is_turn = bool(is_drawing or (count % 3 == 2))
+
+    if is_turn:
+        # 我方摸牌轮 / 待打决断
+        if shanten == 0:
+            phase_label = "摸牌决断 · 听牌决胜"
+            tactical_badge = "听牌决胜"
+            ting_tiles = top_adv.get("ting_tiles", [])
+            ukeire = top_adv.get("ukeire", 0)
+            if ting_tiles and best_cn:
+                ting_cn = "/".join(tile_to_chinese(t) for t in ting_tiles[:4])
+                tactical_intent = f"建议切【{best_cn}】，锁定【{ting_cn}】胡牌叫口 (待牌{ukeire}张)"
+            elif best_cn:
+                tactical_intent = f"建议切【{best_cn}】，锁定听牌胜势，静候胡牌"
+            else:
+                tactical_intent = "当前已听牌，选择最优叫口锁定胜势"
+        elif shanten == 1:
+            phase_label = "摸牌决断 · 进听冲刺"
+            tactical_badge = "进听冲刺"
+            ukeire = top_adv.get("ukeire", 0)
+            if best_cn and ukeire > 0:
+                tactical_intent = f"建议切【{best_cn}】，锁定最大有效进张 (进张{ukeire}张直接下叫)"
+            elif best_cn:
+                tactical_intent = f"建议切【{best_cn}】，拆解孤张全力冲刺听牌"
+            else:
+                tactical_intent = "全力冲刺听牌，保留核心好搭"
+        elif shanten is not None and shanten >= 2:
+            phase_label = "摸牌决断 · 搭子优化"
+            tactical_badge = "搭子优化"
+            reason = top_adv.get("reason", "")
+            if best_cn and reason:
+                tactical_intent = f"建议切【{best_cn}】，{reason}"
+            elif best_cn:
+                tactical_intent = f"建议切【{best_cn}】，拆解弱搭推进向听速度"
+            else:
+                tactical_intent = "整理手牌面子，优先保留核心顺子与刻子搭"
+        else:
+            phase_label = "摸牌决断 · 实时分析"
+            tactical_badge = "摸牌决策"
+            if best_cn:
+                tactical_intent = f"建议切【{best_cn}】，优化手牌综合向听"
+            else:
+                tactical_intent = "分析手牌面子中，等待最优解输出"
+    else:
+        # 候牌轮 / 手牌 13 张等摸或等碰
+        if shanten == 0:
+            phase_label = "听牌守株 · 待胡中"
+            tactical_badge = "已下叫"
+            t_list = []
+            if ting_details and isinstance(ting_details, list):
+                t_list = [tile_to_chinese(td.get("tile", "")) for td in ting_details[:4] if td.get("tile")]
+            elif top_adv.get("ting_tiles"):
+                t_list = [tile_to_chinese(t) for t in top_adv["ting_tiles"][:4]]
+            if t_list:
+                tactical_intent = f"当前已下叫！候胡【{'/'.join(t_list)}】，静候自摸或点炮"
+            else:
+                tactical_intent = "当前已下叫听牌！阵型稳固，静候胡牌张"
+        elif shanten == 1:
+            phase_label = "一向听待命 · 候牌中"
+            tactical_badge = "一向听"
+            tactical_intent = "等待下轮摸牌，一摸关键张即刻下叫冲刺"
+        elif shanten is not None and shanten >= 2:
+            phase_label = "对局进行中 · 巡视观望"
+            tactical_badge = "巡视中"
+            tactical_intent = "观察各家牌河走势与危险信号，等待进张重组面子"
+        else:
+            phase_label = "对局进行中 · 实时推演"
+            tactical_badge = "行牌中"
+            tactical_intent = "局势实时推演中，等待行牌或摸牌轮"
+
+    return phase_label, tactical_badge, tactical_intent
+
 
 
 # annotate_advice_decisions 会写、也必须每次重写的派生字段。
@@ -3513,6 +3650,9 @@ class Engine:
                             "platform": self.platform,
                             "platform_name": get_platform(self.platform).get("name", self.platform),
                             "knowledge_doctrine": "【待机推演】等待牌局开始…",
+                            "phase_label": "局势感知中",
+                            "tactical_badge": "等待开局",
+                            "tactical_intent": "等待牌桌发牌开局，AI 将在发牌后毫秒级感知牌局",
                             "dingque": None,
                             "dingque_suit": None,
                             "hand": "",
@@ -5099,6 +5239,26 @@ class Engine:
                      else f"主推「{_bn}」排名更前：")
                     + str(_n.get("note") or ""))
 
+            # 构建高精度局势感知与下一步战术意图（现在在干什么，准备要干什么）
+            phase_label, tactical_badge, tactical_intent = _build_tactical_perception(
+                status=status,
+                hand_mpsz=hand_mpsz,
+                count=tile_count,
+                is_drawing=is_drawing,
+                drawing_tile=drawing_tile,
+                shanten=shanten,
+                is_swap_phase=is_swap_phase,
+                is_dq_phase=is_dq_phase,
+                is_pick_phase=is_pick_phase,
+                swap_advice=swap_advice,
+                rec_suit_name=rec_suit_name,
+                advice=advice,
+                best=best,
+                ting_details=ting_details,
+                mood=mood,
+                danger_flow=top_danger_flow,
+            )
+
             result = {
                 "mode": self.mode,
                 "mode_name": MODES.get(self.mode, {}).get("name", self.mode),
@@ -5108,6 +5268,9 @@ class Engine:
                 "platform": self.platform,
                 "platform_name": get_platform(self.platform).get("name", self.platform),
                 "knowledge_doctrine": getattr(self, "_last_doctrine", ""),
+                "phase_label": phase_label,
+                "tactical_badge": tactical_badge,
+                "tactical_intent": tactical_intent,
                 "dingque": dingque_name,
                 "dingque_suit": dingque_suit,
                 "dingque_phase": is_dq_phase,

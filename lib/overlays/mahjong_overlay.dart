@@ -767,13 +767,27 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     _licenseExpiryTimer = Timer(d, _refreshLicense);
   }
 
-  // ===== 渲染节流：前沿立即 + 尾部合并（降低 UI 重建频率，不增加反馈延迟）=====
-  // 引擎每 25~80ms 推一帧，逐帧 setState 会让整棵大型 widget 树以 40Hz 重建，
-  // UI 线程被重建本身占满，反而拖慢"最新结果"的上屏。策略：
-  // 新数据到达时**第一帧立即应用**（零额外感知延迟），120ms 窗口内的后续帧
-  // 合并为一次，窗口收尾时应用最新一帧（保证尾部数据不丢）。
+  // ===== 渲染节流与响应加速：动作立即穿透 + 静态合并（0ms 感知延迟，超低功耗）=====
+  // 1. 实质对局动作变动（摸牌、打牌、换向听、切出牌建议、战术意向变化）：打破等待立即上屏（0ms 感知）；
+  // 2. 连续静态帧：合并为 24ms 节流窗口（~40Hz），兼顾极致流畅与低 CPU 消耗。
   Map<String, dynamic>? _pendingJson;
   bool _renderScheduled = false;
+
+  bool _hasActionableChange(Map<String, dynamic> next, Map<String, dynamic>? prev) {
+    if (prev == null) return true;
+    if (next['hand'] != prev['hand']) return true;
+    if (next['count'] != prev['count']) return true;
+    if (next['best'] != prev['best']) return true;
+    if (next['shanten'] != prev['shanten']) return true;
+    if (next['is_drawing'] != prev['is_drawing']) return true;
+    if (next['drawing_tile'] != prev['drawing_tile']) return true;
+    if (next['swap_phase'] != prev['swap_phase']) return true;
+    if (next['dingque_phase'] != prev['dingque_phase']) return true;
+    if (next['pick_phase'] != prev['pick_phase']) return true;
+    if (next['status'] != prev['status']) return true;
+    if (next['tactical_intent'] != prev['tactical_intent']) return true;
+    return false;
+  }
 
   void _ingestEngineResult(Map<String, dynamic> json) {
     final status = json['status'];
@@ -800,10 +814,19 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       _lastFrameAt = DateTime.now();
       if (_signalLost && mounted) setState(() => _signalLost = false);
       _pendingJson = json;
+
+      // 动作穿透：若有关键牌局变动（如摸牌、出牌、进张变动），立即上屏！
+      final bool isActionable = _hasActionableChange(json, result);
+      if (isActionable) {
+        _applyPendingResult();
+      }
+
       if (_renderScheduled) return;
-      _applyPendingResult(); // 前沿：立即上屏
+      if (!isActionable) {
+        _applyPendingResult(); // 前沿：立即上屏
+      }
       _renderScheduled = true;
-      Future<void>.delayed(const Duration(milliseconds: 50), () {
+      Future<void>.delayed(const Duration(milliseconds: 24), () {
         _renderScheduled = false;
         if (!mounted) return;
         if (_pendingJson != null) _applyPendingResult(); // 尾部：应用窗口内最新一帧
@@ -2973,6 +2996,240 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     return ledgerBacked ? '$u张' : '≤$u张';
   }
 
+  String _resolvePhaseLabel(Map<String, dynamic>? res) {
+    if (res == null) return '局势感知中';
+    final p = res['phase_label'] as String?;
+    if (p != null && p.isNotEmpty) return p;
+    final status = res['status'] as String? ?? '';
+    final count = (res['count'] as num?)?.toInt() ?? 0;
+    final isDrawing = res['is_drawing'] == true;
+    final shanten = res['shanten'] as int?;
+    if (res['swap_phase'] == true || status == 'swap') return '换三张优化';
+    if (res['dingque_phase'] == true || status == 'dingque') return '定缺选门';
+    if (res['pick_phase'] == true || status == 'pick') return '选牌操作中';
+    if (status == 'waiting' || status == 'no_tiles' || count == 0) return '局势感知中';
+    if (isDrawing || count % 3 == 2) {
+      if (shanten == 0) return '摸牌决断 · 听牌决胜';
+      if (shanten == 1) return '摸牌决断 · 进听冲刺';
+      if (shanten != null && shanten >= 2) return '摸牌决断 · 搭子优化';
+      return '摸牌决断 · 实时分析';
+    } else {
+      if (shanten == 0) return '听牌守株 · 待胡中';
+      if (shanten == 1) return '一向听待命 · 候牌中';
+      if (shanten != null && shanten >= 2) return '对局进行中 · 巡视观望';
+      return '对局进行中 · 实时推演';
+    }
+  }
+
+  String _resolveTacticalBadge(Map<String, dynamic>? res) {
+    if (res == null) return '等待开局';
+    final b = res['tactical_badge'] as String?;
+    if (b != null && b.isNotEmpty) return b;
+    final status = res['status'] as String? ?? '';
+    final count = (res['count'] as num?)?.toInt() ?? 0;
+    final isDrawing = res['is_drawing'] == true;
+    final shanten = res['shanten'] as int?;
+    if (res['swap_phase'] == true || status == 'swap') return '换三张';
+    if (res['dingque_phase'] == true || status == 'dingque') return '定缺抉择';
+    if (res['pick_phase'] == true || status == 'pick') return '选牌决断';
+    if (status == 'waiting' || status == 'no_tiles' || count == 0) return '等待开局';
+    if (isDrawing || count % 3 == 2) {
+      if (shanten == 0) return '听牌决胜';
+      if (shanten == 1) return '进听冲刺';
+      if (shanten != null && shanten >= 2) return '搭子优化';
+      return '摸牌决策';
+    } else {
+      if (shanten == 0) return '已下叫';
+      if (shanten == 1) return '一向听';
+      return '行牌中';
+    }
+  }
+
+  String _resolveTacticalIntent(Map<String, dynamic>? res, String best) {
+    if (res == null) return '等待牌桌发牌开局，AI 将在发牌后毫秒级感知牌局';
+    final t = res['tactical_intent'] as String?;
+    if (t != null && t.isNotEmpty) return t;
+    final status = res['status'] as String? ?? '';
+    final count = (res['count'] as num?)?.toInt() ?? 0;
+    final isDrawing = res['is_drawing'] == true;
+    final shanten = res['shanten'] as int?;
+    final bestCn = best.isNotEmpty ? tileToChinese(best) : '';
+    if (res['swap_phase'] == true || status == 'swap') return '准备评估手牌换出三张同门牌，优化起手结构';
+    if (res['dingque_phase'] == true || status == 'dingque') return '正在评估各门手牌厚度，准备打缺牌张最少的一门';
+    if (res['pick_phase'] == true || status == 'pick') return '正在识别候选牌张，请在界面弹窗中确认选牌';
+    if (status == 'waiting' || status == 'no_tiles' || count == 0) return '等待牌桌发牌开局，AI 将在发牌后毫秒级感知牌局';
+    if (isDrawing || count % 3 == 2) {
+      if (shanten == 0) {
+        return bestCn.isNotEmpty ? '建议切【$bestCn】，锁定听牌胜势，静候胡牌' : '当前已听牌，选择最优叫口锁定胜势';
+      }
+      if (shanten == 1) {
+        return bestCn.isNotEmpty ? '建议切【$bestCn】，拆解孤牌全力冲刺听牌' : '全力冲刺听牌，保留核心好搭';
+      }
+      return bestCn.isNotEmpty ? '建议切【$bestCn】，优化向听速度' : '分析手牌面子中，等待最优解输出';
+    } else {
+      if (shanten == 0) return '当前已下叫听牌！阵型稳固，静候胡牌张';
+      if (shanten == 1) return '等待下轮摸牌，一摸关键张即刻下叫冲刺';
+      return '观察各家牌河走势与危险信号，等待进张重组面子';
+    }
+  }
+
+  Widget _buildTacticalPerceptionWidget({
+    required String phaseLabel,
+    required String tacticalBadge,
+    required String tacticalIntent,
+    required bool isDrawing,
+    int? shanten,
+    Map<String, dynamic>? mood,
+  }) {
+    if (phaseLabel.isEmpty && tacticalIntent.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    final String moodText = (mood?['status'] as String?) ??
+        (mood?['trend'] as String?) ?? '';
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Color(0xF0122220),
+            Color(0xE80D1A18),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0x664DB6AC), width: 0.8),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x26000000),
+            blurRadius: 4,
+            offset: Offset(0, 1.5),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFF00897B), Color(0xFF00695C)],
+                  ),
+                  borderRadius: BorderRadius.circular(3.5),
+                  border: Border.all(color: const Color(0x8080CBC4), width: 0.5),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.radar, color: Color(0xFFE0F2F1), size: 10),
+                    const SizedBox(width: 3),
+                    Text(
+                      tacticalBadge.isNotEmpty ? tacticalBadge : '牌局感知',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 8.5,
+                        fontWeight: FontWeight.w700,
+                        decoration: TextDecoration.none,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 5),
+              Expanded(
+                child: Text(
+                  phaseLabel.isNotEmpty ? phaseLabel : '局势实时感知中',
+                  style: const TextStyle(
+                    color: Color(0xFFE0F2F1),
+                    fontSize: 9.5,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.2,
+                    decoration: TextDecoration.none,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              if (isDrawing) ...[
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFE65100).withAlpha(190),
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                  child: const Text(
+                    '摸牌待打',
+                    style: TextStyle(
+                      color: Color(0xFFFFE0B2),
+                      fontSize: 8,
+                      fontWeight: FontWeight.bold,
+                      decoration: TextDecoration.none,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 4),
+              ],
+              if (moodText.isNotEmpty)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withAlpha(16),
+                    borderRadius: BorderRadius.circular(3),
+                    border: Border.all(color: Colors.white12, width: 0.4),
+                  ),
+                  child: Text(
+                    moodText,
+                    style: const TextStyle(
+                      color: Color(0xFFB2DFDB),
+                      fontSize: 8,
+                      decoration: TextDecoration.none,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          if (tacticalIntent.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.black.withAlpha(65),
+                borderRadius: BorderRadius.circular(4.5),
+                border: Border.all(color: const Color(0x334DB6AC), width: 0.5),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.only(top: 1),
+                    child: Icon(Icons.arrow_circle_right_outlined, color: Color(0xFF64FFDA), size: 11),
+                  ),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      tacticalIntent,
+                      style: const TextStyle(
+                        color: Color(0xFFF1F8E9),
+                        fontSize: 9.5,
+                        fontWeight: FontWeight.w500,
+                        height: 1.25,
+                        decoration: TextDecoration.none,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   Widget _adviceSection(List<dynamic> advice, String best, int count) {
     final status = result?['status'] as String? ?? '';
     final String discards = (result?['discards'] as String?) ?? '';
@@ -2986,6 +3243,21 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final tingDetails = (result?['ting_details'] as List<dynamic>?) ?? [];
     final shanten = result?['shanten'] as int?;
     final pickCandidates = (result?['pick_candidates'] as List<dynamic>?) ?? [];
+
+    final String phaseLabel = _resolvePhaseLabel(result);
+    final String tacticalBadge = _resolveTacticalBadge(result);
+    final String tacticalIntent = _resolveTacticalIntent(result, best);
+    final bool isDrawing = result?['is_drawing'] == true;
+    final moodData = result?['mood'] as Map<String, dynamic>?;
+
+    final Widget tacticalWidget = _buildTacticalPerceptionWidget(
+      phaseLabel: phaseLabel,
+      tacticalBadge: tacticalBadge,
+      tacticalIntent: tacticalIntent,
+      isDrawing: isDrawing,
+      shanten: shanten,
+      mood: moodData,
+    );
 
     // swapWidget 仅在真正的换牌阶段有效，严禁泄露至定缺、选牌或摸打对局
     final Widget? swapWidget = (isSwapPhase && swapData != null && swapData['viable'] == true)
@@ -3025,6 +3297,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          tacticalWidget,
           if (swapWidget != null)
             swapWidget
           else
@@ -3065,63 +3338,69 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       final topPick = activeAdvice.isNotEmpty ? activeAdvice[0] as Map<dynamic, dynamic>? : null;
       final pickTile = (topPick != null && topPick['tile'] != null) ? topPick['tile'] as String : '';
       final pickReason = (topPick != null && topPick['reason'] != null) ? topPick['reason'] as String : '';
-      return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
-        decoration: BoxDecoration(
-          gradient: const LinearGradient(
-            colors: [Color(0x38E65100), Color(0x22BF360C)],
-          ),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: const Color(0x66FFB74D), width: 0.8),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          tacticalWidget,
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0x38E65100), Color(0x22BF360C)],
+              ),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: const Color(0x66FFB74D), width: 0.8),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Icon(Icons.casino, color: Color(0xFFFFCC80), size: 16),
-                const SizedBox(width: 6),
-                const Expanded(
-                  child: Text(
-                    '【任选一张牌】推荐选择',
-                    style: TextStyle(
-                      color: Color(0xFFFFE0B2),
-                      fontSize: 10.5,
-                      fontWeight: FontWeight.bold,
-                      decoration: TextDecoration.none,
+                Row(
+                  children: [
+                    const Icon(Icons.casino, color: Color(0xFFFFCC80), size: 16),
+                    const SizedBox(width: 6),
+                    const Expanded(
+                      child: Text(
+                        '【任选一张牌】推荐选择',
+                        style: TextStyle(
+                          color: Color(0xFFFFE0B2),
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.bold,
+                          decoration: TextDecoration.none,
+                        ),
+                      ),
                     ),
-                  ),
+                  ],
                 ),
+                if (pickTile.isNotEmpty) ...[
+                  const SizedBox(height: 5),
+                  Row(
+                    children: [
+                      const Text('首选用牌: ', style: TextStyle(color: Colors.white70, fontSize: 10, decoration: TextDecoration.none)),
+                      TileChip(tile: pickTile, size: 22),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          pickReason,
+                          style: const TextStyle(color: Color(0xFFFFD54F), fontSize: 9.5, fontWeight: FontWeight.bold, decoration: TextDecoration.none),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                ] else if (pickCandidates.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    '候选: ${pickCandidates.join(' ')}',
+                    style: const TextStyle(color: Colors.white60, fontSize: 9.5, decoration: TextDecoration.none),
+                  ),
+                ] else ...[
+                  const SizedBox(height: 4),
+                  Text(msg, style: const TextStyle(color: Colors.white54, fontSize: 9.5, decoration: TextDecoration.none)),
+                ],
               ],
             ),
-            if (pickTile.isNotEmpty) ...[
-              const SizedBox(height: 5),
-              Row(
-                children: [
-                  const Text('首选用牌: ', style: TextStyle(color: Colors.white70, fontSize: 10, decoration: TextDecoration.none)),
-                  TileChip(tile: pickTile, size: 22),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      pickReason,
-                      style: const TextStyle(color: Color(0xFFFFD54F), fontSize: 9.5, fontWeight: FontWeight.bold, decoration: TextDecoration.none),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ],
-              ),
-            ] else if (pickCandidates.isNotEmpty) ...[
-              const SizedBox(height: 4),
-              Text(
-                '候选: ${pickCandidates.join(' ')}',
-                style: const TextStyle(color: Colors.white60, fontSize: 9.5, decoration: TextDecoration.none),
-              ),
-            ] else ...[
-              const SizedBox(height: 4),
-              Text(msg, style: const TextStyle(color: Colors.white54, fontSize: 9.5, decoration: TextDecoration.none)),
-            ],
-          ],
-        ),
+          ),
+        ],
       );
     }
 
@@ -3130,46 +3409,52 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       final msg = (result?['message'] as String?) ?? '正在推演最佳断门…';
       final topDq = activeAdvice.isNotEmpty ? activeAdvice[0] as Map<dynamic, dynamic>? : null;
       final dqTile = (topDq != null && topDq['tile'] != null) ? topDq['tile'] as String : '';
-      return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
-        decoration: BoxDecoration(
-          gradient: const LinearGradient(
-            colors: [Color(0x38F57F17), Color(0x22E65100)],
-          ),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: const Color(0x66FFD54F), width: 0.8),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          tacticalWidget,
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0x38F57F17), Color(0x22E65100)],
+              ),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: const Color(0x66FFD54F), width: 0.8),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Icon(Icons.lightbulb, color: Color(0xFFFFD54F), size: 16),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    '【定缺阶段】$msg',
-                    style: const TextStyle(
-                      color: Color(0xFFFFF9C4),
-                      fontSize: 10.5,
-                      fontWeight: FontWeight.bold,
-                      decoration: TextDecoration.none,
+                Row(
+                  children: [
+                    const Icon(Icons.lightbulb, color: Color(0xFFFFD54F), size: 16),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        '【定缺阶段】$msg',
+                        style: const TextStyle(
+                          color: Color(0xFFFFF9C4),
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.bold,
+                          decoration: TextDecoration.none,
+                        ),
+                      ),
                     ),
-                  ),
+                  ],
                 ),
+                if (dqTile.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      const Text('建议打缺: ', style: TextStyle(color: Colors.white70, fontSize: 10, decoration: TextDecoration.none)),
+                      TileChip(tile: dqTile, size: 20),
+                    ],
+                  ),
+                ],
               ],
             ),
-            if (dqTile.isNotEmpty) ...[
-              const SizedBox(height: 4),
-              Row(
-                children: [
-                  const Text('建议打缺: ', style: TextStyle(color: Colors.white70, fontSize: 10, decoration: TextDecoration.none)),
-                  TileChip(tile: dqTile, size: 20),
-                ],
-              ),
-            ],
-          ],
-        ),
+          ),
+        ],
       );
     }
 
@@ -3179,6 +3464,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            tacticalWidget,
             if (alertWidget != null) alertWidget,
             tingRadarWidget,
           ],
@@ -3201,6 +3487,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          tacticalWidget,
           if (alertWidget != null) alertWidget,
           if (evGaugeWidget != null) evGaugeWidget,
           if (handRangesWidget != null) handRangesWidget,
@@ -3272,6 +3559,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        tacticalWidget,
         if (evGaugeWidget != null) evGaugeWidget,
         if (handRangesWidget != null) handRangesWidget,
         Container(
