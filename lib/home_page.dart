@@ -61,6 +61,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _showMoodOdds = false;
   bool _showTileOdds = true; // 默认开启好牌概率
 
+  // 对局配置确认状态：用户必须在主页点击「确定」后，才允许开启悬浮窗。
+  // 若切换了游戏平台或修改了游戏ID，该状态自动重置为未确认。
+  bool _isConfigConfirmed = false;
+
   // 悬浮窗→主 App 的回传订阅。必须持有并在 dispose 取消：旧实现只 listen
   // 不 cancel，页面每次被重建都叠加一个监听/或撞单订阅流报错，状态回传
   // 链路越用越卡甚至损坏。
@@ -238,6 +242,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 开启悬浮窗；返回是否真正打开成功（失败时调用方必须保持待命态，
   /// 绝不能在服务未起来的情况下把 UI 标成“识别中”）。
   Future<bool> showOverlay() async {
+    if (!_isConfigConfirmed) {
+      _setStatus('请先点击上方确定对局信息');
+      return false;
+    }
     try {
       if (await FlutterOverlayWindow.isActive()) {
         _setStatus('悬浮窗已在运行');
@@ -401,7 +409,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _selectPlatform(String platform) async {
     if (platform == selectedPlatform) return;
     final prev = selectedPlatform;
-    setState(() => selectedPlatform = platform);
+    setState(() {
+      selectedPlatform = platform;
+      _isConfigConfirmed = false;
+    });
     final ok = await GamePlatform.set(platform);
     if (!ok && mounted) {
       if (selectedPlatform != platform) return;
@@ -479,6 +490,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _onPlatformQueryChanged(String raw) {
     if (_syncingField) return;
+    if (_isConfigConfirmed) {
+      setState(() => _isConfigConfirmed = false);
+    }
     final q = raw.trim();
     if (q.isEmpty) {
       if (_platformNotice.isNotEmpty) setState(() => _platformNotice = '');
@@ -487,7 +501,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final hit = _matchPlatform(q);
     final notice = hit == null
         ? '没有匹配的平台预设：${GamePlatform.allPlatforms.map((e) => e.name).join('、')}'
-        : '匹配到「${hit.name}」· 回车即切换';
+        : '匹配到「${hit.name}」· 点击确定以生效';
     if (notice != _platformNotice) setState(() => _platformNotice = notice);
   }
 
@@ -500,12 +514,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
       return;
     }
-    setState(() => _platformNotice = '已切换：${hit.name}');
+    setState(() => _platformNotice = '已选「${hit.name}」· 请点击确定');
     if (hit.key != selectedPlatform) _selectPlatform(hit.key);
   }
 
   void _onGameIdChanged(String raw) {
     if (_syncingField) return;
+    if (_isConfigConfirmed) {
+      setState(() => _isConfigConfirmed = false);
+    }
     final v = SessionStore.normalize(raw);
     final err = SessionStore.validate(v);
     if (err != null) {
@@ -524,6 +541,115 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         }
       });
     });
+  }
+
+  /// 确认对局信息（游戏平台与游戏ID）：
+  /// 校验输入合法性、同步平台、持久化ID并解除悬浮窗开启拦截。
+  Future<void> _confirmMatchConfig() async {
+    FocusScope.of(context).unfocus();
+
+    // 1. 若平台输入框有手动键入内容，解析并同步生效
+    final rawPlatform = _platformCtrl.text.trim();
+    if (rawPlatform.isNotEmpty) {
+      final hit = _matchPlatform(rawPlatform);
+      if (hit == null) {
+        setState(() {
+          _platformNotice = '暂不支持该平台，请从上方预设选择';
+          _isConfigConfirmed = false;
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).hideCurrentSnackBar();
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('游戏平台输入无效，请从上方预设选择'),
+              backgroundColor: AppTokens.danger,
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+        return;
+      }
+      if (hit.key != selectedPlatform) {
+        await _selectPlatform(hit.key);
+      }
+    } else {
+      _syncPlatformField(selectedPlatform ?? GamePlatform.defaultPlatform);
+    }
+
+    // 2. 校验游戏ID字符合法性
+    final rawGameId = _gameIdCtrl.text;
+    final normalizedId = SessionStore.normalize(rawGameId);
+    final idErr = SessionStore.validate(normalizedId);
+    if (idErr != null) {
+      setState(() {
+        _gameIdNotice = idErr;
+        _isConfigConfirmed = false;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('游戏ID无效：$idErr'),
+            backgroundColor: AppTokens.danger,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+      return;
+    }
+
+    // 3. 落盘游戏ID
+    final saved = await SessionStore.saveGameId(normalizedId);
+    if (!saved) {
+      setState(() {
+        _gameIdNotice = '本地保存失败，请重试';
+        _isConfigConfirmed = false;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('游戏ID保存失败，请重试'),
+            backgroundColor: AppTokens.danger,
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+      return;
+    }
+
+    if (!mounted) return;
+    final curPlat = selectedPlatform ?? GamePlatform.defaultPlatform;
+    final platLabel = GamePlatform.label(curPlat);
+    final idDisplay = normalizedId.isEmpty ? '默认ID' : normalizedId;
+
+    setState(() {
+      _isConfigConfirmed = true;
+      _gameIdNotice = normalizedId.isEmpty ? '' : '已保存 $normalizedId';
+      _platformNotice = '已确定：$platLabel';
+    });
+
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            const Icon(Icons.check_circle_rounded, color: Colors.white, size: 18),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                '对局信息已确认（$platLabel · $idDisplay），可开启悬浮窗',
+                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+              ),
+            ),
+          ],
+        ),
+        backgroundColor: AppTokens.brand,
+        duration: const Duration(seconds: 2),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ),
+    );
   }
 
   @override
@@ -735,6 +861,34 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         hideOverlay();
         setState(() => isProcessing = false);
       } else {
+        // 对局信息确认守卫：用户必须先点击【确定】确认游戏平台与游戏ID
+        if (!_isConfigConfirmed) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).hideCurrentSnackBar();
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: const Row(
+                  children: [
+                    Icon(Icons.warning_amber_rounded, color: Colors.white, size: 18),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        '请先在对局信息处点击【确定】确认平台与ID，再开启悬浮窗',
+                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                      ),
+                    ),
+                  ],
+                ),
+                backgroundColor: AppTokens.warn,
+                duration: const Duration(seconds: 3),
+                behavior: SnackBarBehavior.floating,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+            );
+          }
+          return;
+        }
+
         // 卡密严密防线：启动识别前核验可用性，未激活/已到期直接拦截
         final licState = await LicenseService.instance.ensureUsable();
         if (!licState.allowsUsage) {
@@ -992,6 +1146,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ],
           const SizedBox(height: 10),
           _buildFieldRow(label: '游戏ID', field: _buildGameIdField()),
+          if (_gameIdNotice.isNotEmpty) ...[
+            const SizedBox(height: 5),
+            _buildNotice(_gameIdNotice),
+          ],
+          const SizedBox(height: 12),
+          _buildConfirmButton(),
           const SizedBox(height: 12),
           Row(
             children: [
@@ -1010,6 +1170,59 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ],
         ],
       ),
+    );
+  }
+
+  /// 对局信息确认按钮：点击后保存平台与游戏ID，解除开启悬浮窗守卫。
+  Widget _buildConfirmButton() {
+    return SizedBox(
+      width: double.infinity,
+      height: 40,
+      child: _isConfigConfirmed
+          ? OutlinedButton.icon(
+              onPressed: _confirmMatchConfig,
+              icon: const Icon(Icons.check_circle_rounded,
+                  size: 16, color: AppTokens.brandDark),
+              label: const Text(
+                '已确定平台与游戏ID · 点击可重新确定',
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                  color: AppTokens.brandDark,
+                ),
+              ),
+              style: OutlinedButton.styleFrom(
+                backgroundColor: AppTokens.brandContainer,
+                side: BorderSide(
+                  color: AppTokens.brand.withAlpha(140),
+                  width: 1,
+                ),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(AppTokens.r10),
+                ),
+              ),
+            )
+          : FilledButton.icon(
+              onPressed: _confirmMatchConfig,
+              icon: const Icon(Icons.check_rounded, size: 17, color: Colors.white),
+              label: const Text(
+                '确 定（保存对局信息）',
+                style: TextStyle(
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white,
+                  letterSpacing: 0.5,
+                ),
+              ),
+              style: FilledButton.styleFrom(
+                backgroundColor: AppTokens.brand,
+                foregroundColor: Colors.white,
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(AppTokens.r10),
+                ),
+              ),
+            ),
     );
   }
 
@@ -1327,8 +1540,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       btnColor = _kAccent.withAlpha(179); // alpha 0.7（CI 锁 Flutter 3.13，禁用 withValues）
       btnText = '开启中…';
     } else if (canStart) {
-      btnColor = _kAccent;
-      btnText = '开启悬浮窗';
+      if (!_isConfigConfirmed) {
+        btnColor = const Color(0xFF0D9488).withAlpha(190);
+        btnText = '开启悬浮窗（请先在上方点击确定）';
+      } else {
+        btnColor = _kAccent;
+        btnText = '开启悬浮窗';
+      }
     } else {
       btnColor = AppTokens.borderStrong;
       btnText = mode.isEmpty ? '请先选择上方玩法' : '开启悬浮窗';
