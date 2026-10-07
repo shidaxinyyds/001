@@ -1594,6 +1594,57 @@ class Engine:
         # [perf] 并塞进 diag，悬浮窗诊断行直接可见哪一段是瓶颈。
         self._perf_ms = {k: deque(maxlen=20) for k in ("decode", "detect", "river", "advice")}
 
+    def _verify_hand_evidence(self, image: np.ndarray) -> int:
+        """从当前画面中获取实体手牌证据张数（兼容 YOLO 检测器与网格切片器）。
+        用于打破纯色桌布（微乐等单色率超高画面）与弱桌布（深色/大弹窗遮挡）的牌桌校验死锁。
+        """
+        if image is None or image.size == 0:
+            return 0
+        ih = image.shape[0]
+
+        # 1. 优先尝试主检测器（若为 YOLODetector，调用 detect_all_rows 切出底部手牌行）
+        det = getattr(self, "_detector", None)
+        if det is None:
+            try:
+                det = self.get_detector()
+            except Exception:
+                det = None
+        if det is not None:
+            if hasattr(det, "detect_hand_strip"):
+                try:
+                    n = len(det.detect_hand_strip(image))
+                    if n >= 5:
+                        return n
+                except Exception:
+                    pass
+            if hasattr(det, "detect_all_rows"):
+                try:
+                    rows = det.detect_all_rows(image, classify=False, allow_rotation=False)
+                    if rows:
+                        for r in rows:
+                            if len(r) >= 5:
+                                cy = sum(d[0][1] + d[0][3] * 0.5 for d in r) / len(r)
+                                if cy >= 0.50 * ih:
+                                    return len(r)
+                except Exception:
+                    pass
+
+        # 2. 尝试手牌专用检测器 (TencentGridDetector)
+        hdet = getattr(self, "_hand_detector", None)
+        if hdet is None:
+            try:
+                hdet = self.get_hand_detector()
+            except Exception:
+                hdet = None
+        if hdet is not None and hasattr(hdet, "detect_hand_strip"):
+            try:
+                n = len(hdet.detect_hand_strip(image))
+                if n >= 5:
+                    return n
+            except Exception:
+                pass
+        return 0
+
     def _is_mahjong_table(self, image: np.ndarray) -> bool:
         """检测当前画面是否为真实的麻将牌桌对局场景（排除大厅/主菜单/结算界面/加载画面）。
 
@@ -1623,33 +1674,15 @@ class Engine:
 
         # 【v4 防误判】纯色背景排除：速配/加载/ splash 页常是铺满全屏的单一
         # 绿底，桌布占比可高达 90%+；而真实牌桌中央必有牌河/副露/玩家头像/
-        # 桌面花纹，单一桌布色占比极少超过 90%。占比高到接近铺满时不再廉价
-        # 早退，改由手牌实证兜底；无实证能力的检测器保守判非牌桌（宁漏报
-        # 不误显残留）。兜底重检测按 4 帧限频并缓存结论，避免纯色页停留意
-        # 义每帧挤占识别线程。
+        # 桌面花纹，单一桌布色占比极少超过 90%。
+        # 但微乐等极简美术风格的真实牌桌中央桌布占比亦可能达到 90%~95%，
+        # 此时通过实体手牌检测验证（支持 YOLO 与网格双通道），只要底部有手牌，立刻放行！
         if max_felt >= 0.90:
             tick = getattr(self, "_table_ev_tick", 0) + 1
             self._table_ev_tick = tick
             if tick % 4 == 1:
-                ev = False
-                # 【死锁修复】此处必须与下方 max_felt<0.18 兜底分支一样惰性初始化
-                # detector。process() 在牌桌校验失败时会提前 return，永远走不到后段
-                # 真正创建 detector 的 get_detector()。若这里只读 self._detector（首帧为
-                # None），则 ev 恒 False → 缓存 False → 返回 waiting → detector 永不创建，
-                # 形成「早期干净牌桌（中央近乎纯色桌布占比>=0.90）永久卡等待牌局开始」的
-                # 鸡生蛋死锁。惰性初始化后 detect_hand_strip 得以运行，实证有手牌即放行。
-                det = getattr(self, "_detector", None)
-                if det is None:
-                    try:
-                        det = self.get_detector()
-                    except Exception:
-                        det = None
-                if det is not None and hasattr(det, "detect_hand_strip"):
-                    try:
-                        ev = len(det.detect_hand_strip(image)) >= 7
-                    except Exception:
-                        ev = False
-                self._table_ev_verdict = ev
+                hand_ev = self._verify_hand_evidence(image)
+                self._table_ev_verdict = (hand_ev >= 7)
             return bool(getattr(self, "_table_ev_verdict", False))
 
         # 真实牌桌中央桌布单色占比通常达到 18% 以上
@@ -1659,34 +1692,18 @@ class Engine:
         # 兜底：中央桌布占比不足（被全屏大弹窗/定缺色盘/换牌面板遮挡）时的
         # 「确凿在对局中」实证。核心不变量：真实牌桌在任何阶段（定缺/换牌/选牌/
         # 摸打）底部都必呈现玩家自己的手牌，而大厅/主菜单/结算/加载画面底部没有
-        # 手牌（只有菜单图标）。故以「手牌区切出的合法牌数」为必要前提：
-        #   ① detect_hand_strip >= 7 直接判牌桌——定缺/换牌/选牌阶段中央色盘与
-        #      面板只遮挡画面中部，底部 10~14 张手牌完整可见，必然满足；
-        #   ② detect_hand_strip >= 5 且命中定缺/换牌/选牌阶段探测器——仅在换牌
-        #      动画把个别手牌压出切分带、张数瞬时跌破 7 时用作放宽，仍强制要求
-        #      底部有 >=5 张牌这一物理前提。
-        # 修复两类问题：
-        #   (A) 定缺选门永久卡「等待牌局开始」：旧实现 detector 直到 process() 后段
-        #       get_detector() 才惰性创建，牌桌校验在其之前，兜底 detector=None 形同
-        #       虚设恒返回 False；此处惰性初始化 detector。
-        #   (B) 大厅/广告弹窗被误判为牌桌并显示选牌推荐：上一版兜底把 is_pick_phase
-        #       当作【独立】铁证，而大厅金色宝箱 + 青色「看广告」按钮恰好命中
-        #       is_pick_phase 宽松的「深色带+少量白块」形式，导致整张大厅被放行。
-        #       现强制任何放行都以底部手牌实证为前提：大厅无手牌 → hand_n≈0 → 绝不放行。
-        det = getattr(self, "_detector", None)
-        if det is None:
-            try:
-                det = self.get_detector()
-            except Exception:
-                det = None
-        if det is not None and hasattr(det, "detect_hand_strip"):
-            try:
-                hand_n = len(det.detect_hand_strip(image))
-            except Exception:
-                hand_n = 0
-            if hand_n >= 7:
-                return True
-            if hand_n >= 5:
+        # 手牌（只有菜单图标）。
+        hand_n = self._verify_hand_evidence(image)
+        if hand_n >= 7:
+            return True
+        if hand_n >= 5:
+            det = getattr(self, "_detector", None)
+            if det is None:
+                try:
+                    det = self.get_detector()
+                except Exception:
+                    det = None
+            if det is not None:
                 try:
                     for _phase_fn in ("is_dingque_phase", "is_swap_phase", "is_pick_phase"):
                         fn = getattr(det, _phase_fn, None)
