@@ -67,15 +67,17 @@ class LicenseService {
   @visibleForTesting
   LicenseState evaluateForTest(LicenseToken tk) => _evaluate(tk);
 
-  Future<void> init() async {
+  Future<void> init({bool reload = false}) async {
     // 【自愈重试】旧实现一旦首轮 getInstance 瞬态失败（厂商杀存储/IO 抖动）就把
     // _prefs=null 锁死整个生命周期，之后本地判定永远 notActivated，已激活的
     // 正常用户会被误踢。现在只要存储仍缺失就每次重试，拿到才视为就绪。
-    if (_ready && _prefs != null && (_deviceId?.isNotEmpty ?? false)) return;
+    if (_ready && _prefs != null && (_deviceId?.isNotEmpty ?? false) && !reload) return;
     // 存储不可用属极端环境异常：吞掉并置 _prefs=null（上层退化为"未激活"），
     // 绝不让授权检查本身把 App 首屏带崩。
     try {
-      _prefs = await SharedPreferences.getInstance();
+      if (_prefs == null) {
+        _prefs = await SharedPreferences.getInstance();
+      }
       try {
         await _prefs?.reload();
       } catch (_) {}
@@ -206,12 +208,19 @@ class LicenseService {
   /// 记录一次服务器签名时间，重置单调锚点；并把高水位 best-effort 落盘（主引擎）。
   void _noteServerTime(int? serverTimeSec) {
     if (serverTimeSec == null || serverTimeSec <= 0) return;
-    _srvNowS = serverTimeSec;
+    int sec = serverTimeSec;
+    // 防毫秒混淆：若传入 13 位毫秒数（> 100 亿），自动转为 10 位秒数
+    if (sec > 10000000000) {
+      sec ~/= 1000;
+    }
+    // 合理性校验：不得超过公元 2038 年，防未来脏数据污染
+    if (sec > 2147483647) return;
+
+    _srvNowS = sec;
     _srvBaseElapsedMs = _mono.elapsedMilliseconds;
     final p = _prefs;
     if (p != null) {
-      final floor = p.getInt(_kMaxServerNowS) ?? 0;
-      if (serverTimeSec > floor) p.setInt(_kMaxServerNowS, serverTimeSec);
+      p.setInt(_kMaxServerNowS, sec);
     }
   }
 
@@ -231,7 +240,19 @@ class LicenseService {
     } else {
       eff = localSec;
     }
-    final floor = _prefs?.getInt(_kMaxServerNowS) ?? 0;
+
+    // 清洗潜在的历史脏数据（如毫秒级或异常远期值）
+    int floor = _prefs?.getInt(_kMaxServerNowS) ?? 0;
+    if (floor > 2147483647) {
+      floor ~/= 1000;
+      _prefs?.setInt(_kMaxServerNowS, floor);
+    }
+    // 若 floor 异常超前本地时间超过 30 天，判定为脏数据直接重置
+    if (floor > eff + 30 * 86400) {
+      floor = eff;
+      _prefs?.setInt(_kMaxServerNowS, eff);
+    }
+
     if (floor > eff) eff = floor;
     return eff;
   }
@@ -334,6 +355,10 @@ class LicenseService {
     final bool isRev = r.error == 'revoked';
     if (isRev) {
       await _clearToken();
+    }
+    // not_found 等非确凿拉黑错误：若当前凭证仍有可用性，保持可用
+    if (!isRev && cur.allowsUsage) {
+      return cur;
     }
     return LicenseState(LicenseStatus.refused,
         message: _friendly(r.error), isRevoked: isRev);
@@ -459,12 +484,20 @@ class LicenseService {
       if (local.allowsUsage) {
         return local; // 本地仍能证明有效：保持放行，不清券
       }
-      // 其余明确负信号（查无且本地不可用/已到期）：清本地券，杜绝残留券被后续复用。
-      await _clearToken();
-      return LicenseState(LicenseStatus.licenseExpired, expiresAt: expDt);
+      // 其余明确负信号：保留凭证信息供 UI 呈现对应状态，绝不在未被明确拉黑时草率清券
+      return local.status == LicenseStatus.licenseExpired
+          ? local
+          : LicenseState(LicenseStatus.licenseExpired, expiresAt: expDt ?? local.expiresAt);
     }
     // 服务器判仍有效：走 ensureUsable（临近续签点时顺带换新券并刷新锚点）。
-    return ensureUsable();
+    final u = await ensureUsable();
+    // 保护：如果服务器心跳判有效（r.valid==true），但本地计算由于瞬态浮动未放行，以服务器为准
+    if (!u.allowsUsage && !u.isRevoked) {
+      final local = _localEval();
+      if (local.allowsUsage) return local;
+      return LicenseState(LicenseStatus.valid, expiresAt: expDt);
+    }
+    return u;
   }
 
   String _friendly(String? err) {

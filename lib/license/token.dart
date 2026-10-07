@@ -61,9 +61,11 @@ class LicenseToken {
 
     final canon = canonical(device, code, expiresAt, tokenExp);
     final expected = hmacB64Url(secretHex, canon);
-    if (expected.isEmpty) return null;
-    if (sig != expected) return null;
-    if (deviceId.isNotEmpty && device != deviceId) return null;
+    if (expected.isEmpty || sig != expected) return null;
+    if (deviceId.isNotEmpty &&
+        device.trim().toLowerCase() != deviceId.trim().toLowerCase()) {
+      return null;
+    }
 
     return LicenseToken(
       device: device,

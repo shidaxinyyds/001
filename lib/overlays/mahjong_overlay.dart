@@ -672,7 +672,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
   Future<void> _refreshLicense() async {
     try {
-      await LicenseService.instance.init();
+      await LicenseService.instance.init(reload: true);
       // 1. 本地极速验券（毫秒级）：已激活且未过期立即保持放行，杜绝网络心跳期间将已激活用户误锁
       final localSt = LicenseService.instance.ensureLocalFast();
       if (localSt.allowsUsage && mounted) {
@@ -688,16 +688,17 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
       // 2. 权威云端核验：获取服务器与本地双重校验状态
       final st = await LicenseService.instance.heartbeat();
-      final bool allows = st.allowsUsage;
+      // 核心铁律：只要本地凭证合法且未被拉黑，绝不因为心跳网络抖动/未查找到而误锁
+      final bool allows = st.allowsUsage || (localSt.allowsUsage && !st.isRevoked);
       _licenseVerified = true; // 拿到权威结论，从此才允许下终态文案
-      final days = st.remainingDays;
+      final days = st.allowsUsage ? st.remainingDays : localSt.remainingDays;
       final String denyText;
-      if (st.status == LicenseStatus.licenseExpired) {
-        denyText = '卡密授权已到期，请重新激活';
-      } else if (st.status == LicenseStatus.notActivated) {
-        denyText = '未激活有效卡密，请先激活';
-      } else if (st.isRevoked) {
+      if (st.isRevoked) {
         denyText = '授权已被停用，请联系客服';
+      } else if (st.status == LicenseStatus.licenseExpired && !localSt.allowsUsage) {
+        denyText = '卡密授权已到期，请重新激活';
+      } else if (st.status == LicenseStatus.notActivated && !localSt.allowsUsage) {
+        denyText = '未激活有效卡密，请先激活';
       } else if (st.message?.isNotEmpty ?? false) {
         denyText = st.message!;
       } else {

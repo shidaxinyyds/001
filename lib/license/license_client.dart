@@ -115,7 +115,9 @@ class LicenseClient {
         return LicenseHeartbeatResult.network();
       }
       final json = jsonDecode(res.body) as Map<String, dynamic>;
-      if (json['ok'] != true) {
+      if (json['ok'] != true || !json.containsKey('valid') || json['valid'] == null) {
+        // 未包含有效 'valid' 字段（如旧版 Edge Function 只回 {"ok": true, "db": 200}）：
+        // 绝不判定为 valid: false，退回网络/离线 fallback 走本地验签放行，杜绝误杀合法用户。
         return LicenseHeartbeatResult.network();
       }
       return LicenseHeartbeatResult.status(

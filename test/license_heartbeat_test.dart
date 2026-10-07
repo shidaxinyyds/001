@@ -81,7 +81,7 @@ void main() {
   });
 
   group('心跳强制拦截', () {
-    test('服务器 valid:false 查无/到期 → licenseExpired 且清本地券', () async {
+    test('服务器 valid:false 查无/到期 → licenseExpired 且未拉黑时保留凭证信息防误删', () async {
       SharedPreferences.setMockInitialValues({'lic_token': 'some-stored-token'});
       final prefs = await SharedPreferences.getInstance();
       final client = _FakeClient()
@@ -92,8 +92,8 @@ void main() {
       final st = await svc.heartbeat();
       expect(st.status, LicenseStatus.licenseExpired);
       expect(st.allowsUsage, isFalse);
-      // 到期必须清券，杜绝残留券被后续复用
-      expect(prefs.getString('lic_token'), isNull);
+      // 未被服务器明确拉黑时保留本地凭证记录供 UI 定性，杜绝网络或云函数抖动误杀
+      expect(prefs.getString('lic_token'), isNotNull);
     });
 
     test('服务器 revoked → refused 且清本地券', () async {

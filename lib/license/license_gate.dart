@@ -43,6 +43,12 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // 0ms 快速本地验签：若本地已存有合法可用凭证，直接瞬间放行，杜绝闪白/激活页闪现
+    final localFast = LicenseService.instance.ensureLocalFast();
+    if (localFast.allowsUsage) {
+      _state = localFast;
+      _checking = false;
+    }
     _refresh();
     // 低频轮询作为兜底：到期/被拉黑最迟 30 分钟内退回（到期精确点另有 one-shot 兜底）。
     _timer = Timer.periodic(_pollInterval, (_) => _refresh());
@@ -77,6 +83,17 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
   }
 
   Future<void> _doRefresh() async {
+    // 1. 本地极速兜底：如果本地凭证目前有效，且当前尚未放行，先立即可用
+    final localFast = LicenseService.instance.ensureLocalFast();
+    if (localFast.allowsUsage && (_state == null || !_state!.allowsUsage)) {
+      if (mounted) {
+        setState(() {
+          _state = localFast;
+          _checking = false;
+        });
+      }
+    }
+
     LicenseState st;
     try {
       st = await LicenseService.instance.heartbeat();
@@ -88,6 +105,15 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
         _scheduleExpiryCheck(_state!);
         return;
       }
+      final local = LicenseService.instance.ensureLocalFast();
+      if (local.allowsUsage) {
+        setState(() {
+          _state = local;
+          _checking = false;
+        });
+        _scheduleExpiryCheck(local);
+        return;
+      }
       st = const LicenseState(LicenseStatus.notActivated);
     }
     if (!mounted) return;
@@ -96,6 +122,7 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
     // 一次；真未激活的用户也只多等一秒，绝不因此反复重验。
     if (st.status == LicenseStatus.notActivated &&
         _state == null &&
+        !localFast.allowsUsage &&
         !_coldRecheckDone) {
       _coldRecheckDone = true;
       _expiryTimer = Timer(const Duration(seconds: 1), _refresh);
@@ -103,14 +130,16 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
     }
 
     // 【核心铁律：仅在真到期或确凿拉黑时才允许退回激活页】
-    // 若当前会话已经处于放行可用状态（_state?.allowsUsage == true）：
+    // 若当前会话已经处于放行可用状态（_state?.allowsUsage == true）或者本地合法可用（localFast.allowsUsage == true）：
     // 只要尚未被服务端明确拉黑（st.isRevoked），且自身有效期尚未真正到期：
     // 无论最新检查结果是 notActivated、缺少指纹导致的 refused、网络抖动超时、
     // 插件初始化延迟、还是服务器心跳并发竞态，统统原地保持功能页放行，严禁跳转激活页！
-    if (_state?.allowsUsage ?? false) {
+    final currentAllows = (_state?.allowsUsage ?? false) || localFast.allowsUsage;
+    if (currentAllows) {
       final bool isRevoked = st.isRevoked;
+      final effectiveSt = (_state?.allowsUsage ?? false) ? _state! : localFast;
       final bool isExpired = (st.status == LicenseStatus.licenseExpired) &&
-          !_retainedSessionStillValid(_state!);
+          !_retainedSessionStillValid(effectiveSt);
 
       if (!isRevoked && !isExpired) {
         // 既没有确凿拉黑，也没有真正到期（仍在有效期内）：
@@ -123,8 +152,14 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
           _scheduleExpiryCheck(st);
         } else {
           // 新状态是瞬态错误/网络失败/设备未就绪等异常：
-          // 原地维持原 _state 放行态，不关闭悬浮窗，不跳激活页，仅安排下次复核
-          _scheduleExpiryCheck(_state!);
+          // 原地维持放行态，不关闭悬浮窗，不跳激活页，仅安排下次复核
+          if (_state == null || !_state!.allowsUsage) {
+            setState(() {
+              _state = effectiveSt;
+              _checking = false;
+            });
+          }
+          _scheduleExpiryCheck(effectiveSt);
         }
         return;
       }
