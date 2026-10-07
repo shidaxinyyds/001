@@ -458,8 +458,38 @@ class _KnowledgePageState extends State<KnowledgePage> {
   }
 
   // ===== 2. 玩法百科 =====
+  /// 未录入百科条目的玩法：从目录元数据派生基础口径，**绝不回退到其它玩法的详情**。
+  /// （早期写法是 `_modeDetails[key] ?? _modeDetails['sc_hz']!`，结果是用户点
+  /// 「无字推倒胡」却读到一屏血流红中的规则与番型，属于静默错信息。）
+  /// 派生卡只说牌集/结构这些与引擎一致的事实，不编造未校准的计分表。
+  static Map<String, dynamic> _deriveBasics(MahjongModeInfo? info) {
+    final m = info;
+    if (m == null) {
+      return {
+        'name': '未知玩法',
+        'tiles': '未登记的玩法 key',
+        'features': '该玩法未在目录中，请切换到已登记玩法',
+        'rules': <String>['目录中找不到当前 key，分析结果可能按默认规则计算。'],
+        'fans': <Map<String, String>>[],
+      };
+    }
+    return {
+      'name': m.name,
+      'tiles': '${m.wall}张 · ${m.category}',
+      'features': m.subtitle,
+      'rules': <String>[
+        m.brief,
+        '牌集与结构要点：${m.tags.join(' · ')}；',
+        '引擎按「牌集 / 鬼牌 / 结构约束（可否吃牌、是否全刻子、七对/国士开关）」计算向听与出牌建议；',
+        '本玩法的完整番型与计分表尚未录入，因此下方不展示任何分数，以免误导。',
+      ],
+      'fans': <Map<String, String>>[],
+    };
+  }
+
   Widget _buildModesBody() {
-    final details = _modeDetails[_selectedModeKey] ?? _modeDetails['sc_hz']!;
+    final details = _modeDetails[_selectedModeKey] ??
+        _deriveBasics(GameMode.info(_selectedModeKey));
     final fans = (details['fans'] as List<Map<String, String>>);
     final rules = (details['rules'] as List<String>);
 
@@ -556,10 +586,12 @@ class _KnowledgePageState extends State<KnowledgePage> {
                           padding: const EdgeInsets.only(bottom: 4),
                           child: Text('• $r', style: const TextStyle(fontSize: 11.5, color: AppTokens.ink2, height: 1.35)),
                         )),
-                    const Divider(height: 20),
-                    const Text('核心番型与计分表', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold, color: AppTokens.ink)),
-                    const SizedBox(height: 8),
-                    ...fans.map((f) => Container(
+                    // 番型表只在真的有条目时才渲染，避免新玩法出现“空标题”
+                    if (fans.isNotEmpty) ...[
+                      const Divider(height: 20),
+                      const Text('核心番型与计分表', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold, color: AppTokens.ink)),
+                      const SizedBox(height: 8),
+                      ...fans.map((f) => Container(
                           margin: const EdgeInsets.only(bottom: 6),
                           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
                           decoration: BoxDecoration(
@@ -581,6 +613,7 @@ class _KnowledgePageState extends State<KnowledgePage> {
                             ],
                           ),
                         )),
+                    ],
                   ],
                 ),
               ),

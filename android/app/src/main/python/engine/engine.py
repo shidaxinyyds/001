@@ -27,6 +27,17 @@ from trainer.objects.tile_collection import TileCollection
 from trainer.objects.tile import Tile
 from trainer.utils.shanten import calculate_shanten
 from trainer.utils.convert import mpsz_to_tile34_index, tiles34_index_to_mpsz, tile_to_chinese
+# 同分牌理裁决链的尾部（两个 analyzer / 知识库已共用同一份；双策略路线主键不同，
+# 但 tie 时必须用同一套裁决，否则“极速流卡片”与“主推牌”会在同分上各选一张）。
+from discards_tiebreak import tie_tail as _tie_tail
+# B-P4：名次差解释与危险行动指令都在最终顺序确定后一次性补上，两个口径都只认
+# 一个源头（决胜链 + 档位表），面板不得自己拿 ev 做减法。
+from discards_tiebreak import advantage_note as _advantage_note
+from probability_bands import (
+    danger_advice as _danger_advice,
+    danger_is_safe as _danger_is_safe,
+    danger_rank as _danger_rank,
+)
 
 from modes import (
     load_mode,
@@ -36,12 +47,12 @@ from modes import (
     hand_sizes,
     available_set,
     MODES,
-    DEFAULT_MODE,
     is_dingque_mode,
     is_sichuan_family,
     get_mode,
-    get_laizi,
+    get_laizi_set,
     get_analyzer,
+    native_solver_ready,
 )
 
 from platforms import (
@@ -168,6 +179,11 @@ PARTIAL_TTL_FRAMES = 10
 DISCARD_HISTORY_FRAMES = 6
 DISCARD_HISTORY_MIN_SAMPLES = 3
 MIN_DROP_DELTA = 4
+
+# 守恒硬门的自愈阈值：连续这么多帧都卡在同一处「同型超过 4 张」上，就判定那不是
+# 真的牌、而是牌河账本里混进的误识别，裁掉它。帧率约 3~5fps，12 帧 ≈ 3 秒：
+# 足以让“瞬时的单帧抖动”靠下一帧自洽消失，又不至于让误识别把整局闭嘴。
+DIRTY_HEAL_FRAMES = 12
 
 # ---------------------------------------------------------------- 手牌稳定化
 # 手牌的语义是「多重集」（13/14 张牌的无序集合），不是有序序列。
@@ -316,6 +332,16 @@ class _FrameSkipper:
         diff = float(np.abs(cur - self._last_sig).sum())
         self._last_sig = cur
         return diff
+
+    def set_baseline(self, work_gray: np.ndarray) -> None:
+        """把基线签名改写成「本帧真正被识别的那张图」（不返回差值）。
+
+        为什么需要：方向验证现在跑在帧差之后，若它推翻了锁定的朝向（反向横屏
+        自愈那一类），本帧的 diff 是在旧朝向裁片上算的，基线也就留在了旧朝向上
+        —— 下一帧会拿旧朝向的裁片当参照，凭空再付一次完整识别。补一次基线刷新
+        （≈1ms）就把这个尾巴收掉。稳态下验证返回的就是同一张图，这条是纯 no-op。
+        """
+        self._last_sig = _block_diff_signature(work_gray)
 
     def remember(self, payload: str, top_score: float) -> None:
         self._last_payload = payload
@@ -741,12 +767,165 @@ def _error_result(status: str, message: str) -> "EngineResult":
         "screen": [0, 0],
         "elapsed": 0.0,
         "message": str(message)[:200],
+        # 错误帧不喂 native：拿不到可靠手牌时让 C++ 侧继续推算只会覆写脏结果。
+        "native_ready": False,
     }
     return EngineResult(
         image=np.zeros((1, 1, 3), dtype=np.uint8),
         result=json.dumps(result),
         stage=None,
     )
+
+
+# annotate_advice_decisions 会写、也必须每次重写的派生字段。
+# 为什么非得先清：analyzer 命中缓存时返回的是同一批 dict 对象，上一帧写进去的
+# 名次/危险提示/预演行会留在对象里。候选变少时末位会带着上一帧的「优于次选 X」，
+# 14 张帧会留着上一帧 13 张的「摸牌预演」——那是凭空的伪造，必须先删再写。
+# 公开名字（不带下划线）是刻意的：测试要拿这份清单逐键断言「上一帧的派生字段
+# 必须被清掉」，私有名让测试无法引用，守卫就会退化成手抄一份常量——一改就漏。
+DECISION_KEYS = (
+    "rank", "rank_total", "advantage", "advantage_reason",
+    "danger_hint", "safer_alternatives",
+    "predraw_simulated", "predraw_kept", "predraw_line", "predraw_flip_line",
+    "predraw_flips",
+)
+
+
+def annotate_advice_decisions(advice: List[Dict], best: str) -> Dict:
+    """B-P4 实时决策空白补全：给每条建议补上三件事（就地改 advice）。
+
+    1. 空白 A — `rank` / `advantage` / `advantage_reason`：为什么排在它前面。
+    2. 空白 C — `danger_hint` / `safer_alternatives`：这一档风险到底该不该换牌，
+       以及换成哪张（只从安全/微危里挑，不给“更安全”的假保证）。
+    3. 空白 D — `predraw_line` / `predraw_flip_line`：摸到什么牌会改主意。
+       只引用 analyzer 真的跑过的摸牌情景（川麻 13 张预摸路径），
+       没有模拟数据一个字段也不写；std 家族没有预摸路径，面板据此不渲染该行。
+
+    为什么放在这一层（不是 analyzer 里）
+    --------------------------------
+    analyzer 排完序后还有两道会改顺序/改字段的环节：defense_radar 回填
+    `defense_level`、`KnowledgeBase.evaluate_tactics` 战术加权重排（都在本文件）。
+    名次相关的句子如果在 analyzer 里就写好，到面板上就会与真实顺序对不上
+    （“优于次选 3p”而次选已经变成 5m）。所以必须在**最终顺序确定之后、序列化
+    之前**一次性算完，并按面板的同一个取首规则对齐顺序。
+
+    口径约束（与 B-P3 一致）：不拿 ev 做减法给用户看（那是合成评分，没有量纲）；
+    档位措辞与次序全部走 `probability_bands` / `discards_tiebreak` 的单一来源。
+    返回计数统计（走 diag）：字段没接上时 `advantage=0` 会直接暴露出来，
+    不会退化成“面板少了一行”那种静默漂移。
+    """
+    stats = {"n": 0, "advantage": 0, "danger_hint": 0, "alternatives": 0,
+             "predraw": 0, "error": None}
+    try:
+        if not advice:
+            return stats
+        # 不改动传入列表：`build_advice` 命中缓存时返回的就是 `self._advice` 本体，
+        # 就地重排会把引擎缓存的候选序改掉（实测下一帧的 `best` 会跟着漂），
+        # 而名次只与展示有关。取首在副本上做，面板那边也会做同样的事。
+        ordered = list(advice)
+        for item in ordered:
+            if isinstance(item, dict):
+                for k in DECISION_KEYS:
+                    item.pop(k, None)
+        if best:
+            bi = next((i for i, a in enumerate(ordered)
+                       if isinstance(a, dict) and a.get("tile") == best), -1)
+            if bi > 0:
+                ordered.insert(0, ordered.pop(bi))
+        n = len(ordered)
+        stats["n"] = n
+
+        for i, item in enumerate(ordered):
+            if not isinstance(item, dict):
+                continue
+            item["rank"] = i + 1
+            item["rank_total"] = n
+
+            # ---- 空白 A：相对优势（只与紧排在自己后面的那一条比）----
+            nxt = ordered[i + 1] if i + 1 < n else None
+            if isinstance(nxt, dict):
+                note = _advantage_note(item, nxt)
+                tb = str(nxt.get("tile") or "")
+                head = (f"与次选 {tb} 等价" if note.get("equivalent")
+                        else f"优于次选 {tb}")
+                item["advantage"] = note
+                item["advantage_reason"] = f"{head}：{note['note']}"
+                stats["advantage"] += 1
+
+            # ---- 空白 C：危险分级行动指令 + 替代方案 ----
+            flow = item.get("danger_flow")
+            if isinstance(flow, dict) and flow.get("danger_level"):
+                lvl = str(flow["danger_level"])
+                item["danger_hint"] = _danger_advice(lvl)
+                stats["danger_hint"] += 1
+                # 只有主推且已到中危及以上才找替代：主推本来就安全时拉一行
+                # 「建议优先选低危出张」是误报，会把用户推去改一个不需要改的决定。
+                if i == 0 and _danger_rank(lvl) >= _danger_rank("medium"):
+                    alts = []
+                    for other in ordered[1:]:
+                        if not isinstance(other, dict) or not other.get("tile"):
+                            continue
+                        of = other.get("danger_flow")
+                        if not isinstance(of, dict):
+                            continue
+                        if _danger_is_safe(str(of.get("danger_level") or "")):
+                            alts.append(other)
+                    # 稳定排序：同安全档内保留原名次（名次已经按牌理排过）
+                    alts.sort(key=lambda d: _danger_rank(
+                        str((d.get("danger_flow") or {}).get("danger_level") or "")))
+                    if alts:
+                        item["safer_alternatives"] = [
+                            {"tile": str(d.get("tile")),
+                             "danger_level": str((d.get("danger_flow") or {})
+                                                 .get("danger_level") or ""),
+                             "danger_band": str((d.get("danger_flow") or {})
+                                                .get("danger_band") or "")}
+                            for d in alts[:3]]
+                        stats["alternatives"] += 1
+
+            # ---- 空白 D：摸牌预演（只给主推一条，避免面板重复同一信息）----
+            pd = item.get("predraw")
+            if i == 0 and isinstance(pd, dict):
+                scen = pd.get("scenarios") or []
+                cur = str(item.get("tile") or "")
+                kept = 0
+                groups: Dict[str, List[str]] = {}
+                order: List[str] = []
+                for row in scen:
+                    if not isinstance(row, (list, tuple)) or len(row) < 3:
+                        continue
+                    draw, rem, to = str(row[0]), int(row[1] or 0), str(row[2])
+                    if not to:
+                        continue
+                    if to == cur:
+                        kept += 1
+                        continue
+                    if to not in groups:
+                        groups[to] = []
+                        order.append(to)
+                    groups[to].append(f"{tile_to_chinese(draw)}·余{rem}张")
+                if scen:
+                    item["predraw_simulated"] = len(scen)
+                    item["predraw_kept"] = kept
+                    # 没算到的情景如实标出来：预摸只取前 6 种高概率摸牌，
+                    # 不写这一句，用户会把「6 种里 4 种不改」当成全部可能性。
+                    omit = int(pd.get("considered_kinds") or 0) - len(scen)
+                    tail = f"（另有 {omit} 种可联络摸牌未参与模拟）" if omit > 0 else ""
+                    item["predraw_line"] = (f"预演 {len(scen)} 种摸牌："
+                                            f"{kept} 种仍打 {tile_to_chinese(cur)}{tail}")
+                    if order:
+                        to0 = order[0]
+                        extra = len(order) - 1
+                        item["predraw_flip_line"] = (
+                            f"若摸到 {'、'.join(groups[to0][:3])} 将改打 "
+                            f"{tile_to_chinese(to0)}"
+                            + (f"（还有 {extra} 种其他改法）" if extra > 0 else ""))
+                        item["predraw_flips"] = [{"to": t, "draws": groups[t]}
+                                                 for t in order]
+                    stats["predraw"] += 1
+    except Exception as exc:      # 降级可以发生，但必须可见（写进 diag）
+        stats["error"] = f"{type(exc).__name__}: {exc}"
+    return stats
 
 
 def _is_valid_image(img) -> bool:
@@ -1185,9 +1364,12 @@ def detect_player_melds(image: np.ndarray, detector, mode: str = "sc_hz", hand_r
                     if hasattr(detector, "templates_bgr") and best_sc < 0.45:
                         try:
                             face = detector.extract_face(t)
+                            to_canvas = getattr(detector, "canonical_canvas", None)
                             for lbl, tmpl in detector.templates_bgr.items():
                                 if mpsz_to_tile34_index(lbl) not in avail:
                                     continue
+                                if to_canvas is not None:
+                                    tmpl = to_canvas(tmpl)
                                 t_compact = tmpl[20:98, 12:68]
                                 res = cv2.matchTemplate(face, t_compact, cv2.TM_CCOEFF_NORMED)
                                 sc_c = float(res.max())
@@ -1242,7 +1424,14 @@ class Engine:
         self._partial_mpsz: str = ""
         self._partial_ttl: int = 0
         # 当前模式（process() 每帧 reload，对比是否变了）
-        self.mode: str = DEFAULT_MODE
+        # 必须与下一行的 platform 同源（都读持久化声明），不能写死常量：
+        # 手牌识别发生在 process 开头的方向验证里，而玩法 reload 在它**之后**
+        # （见 process 内"玩法与平台切换硬重置"），所以建引擎时写的常量会
+        # 成为**首帧识别实际生效的牌集**。实测（localtest/_probe_panel_styles_blame.py，
+        # 广东雀神帧 45329b3e）：DEFAULT_MODE='sc_hz' 的字牌闸门只放开 7z，
+        # 于是画面上的 東/發 被强行判成 1p(0.43)/1s(0.41)；把牌集改成声明的
+        # 全牌玩法后逐位回到 GT（3z/6z，置信度 1.00）。
+        self.mode: str = load_mode()
         self._prev_mode: str = ""
         # 游戏平台预设管理（腾讯、途游、微乐、JJ、通用）
         self.platform: str = load_platform()
@@ -1293,6 +1482,13 @@ class Engine:
         self._prev_raw_n_before_clear: int = 0
         # 单帧识别失败时沿用的上一可信记牌矩阵（stale 呈现，绝不整体清零）
         self._last_trusted_matrix: Optional[Dict] = None
+        # 牌局账本（由 trainer 按本帧可见牌生成，engine 只按签名认领）与连续脏帧计数：
+        # 守恒违例的帧宁可不答，也不能给一个建立在错账上的答案。
+        self._ledger: Optional[Dict] = None
+        self._dirty_streak: int = 0
+        # 自愈剪除过的牌：该型牌河张数上限被钉住（见 _heal_over_count）。不钉住，
+        # 同一张误识牌会在下一次牌河扫描时被重新采纳，把“拒答几秒”变成整局周期性复发。
+        self._healed_caps: Dict[str, int] = {}
         # ===== 方向自检（旋转鲁棒性）=====
         # 真机截屏：竖屏手机 + 横屏麻将游戏时，MediaProjection 的 VirtualDisplay
         # 被强制成横屏缓冲，横屏游戏在里面被系统旋转 90° 塞入。结果所有牌都"横过来"，
@@ -1309,6 +1505,15 @@ class Engine:
         # 方向探测/快路径时已算出的检测结果，供 process() 复用，
         # 避免同一帧做两次完整检测。用完即清。
         self._cached_rows: Optional[list] = None
+        # 这批缓存 rows 出自哪个检测器（手牌通道与主检测器可以不是同一个）。
+        self._cached_rows_src: Optional[str] = None
+        # 本帧的「方向再验证」是否还欠着（几何已归一，但识别没跑）。
+        # 每帧在 process 开头由 `_settle_orientation` 重新赋值，绝不跨帧生效：
+        # 只有跳帧帧会带着 True 提前 return，下一帧开头立刻被覆盖。
+        self._orient_verify_pending: bool = False
+        # 手牌通道（模板网格 NCC）单独一个实例：主检测器还要供牌河/副露/阶段探测。
+        self._hand_detector = None
+        self._hand_bank_key: Optional[tuple] = None
         # ===== 用户可调识别区域（ROI）=====
         # 真机游戏美术/布局与训练截图差异大时，自动行检测可能挑错区域
         # （挑到 banner/UI 而非手牌行）→ 表现为"识别不出来"。
@@ -1340,6 +1545,10 @@ class Engine:
             # 牌河 YOLO 影子对比（E）：开启后每帧额外跑一次 YOLO 条带法检测牌河，
             # 只写进 diag 与日志供离线对比，**绝不参与建议/显示**。默认关（有推理开销）。
             "yolo_river": False,
+            # 手牌通道：平台已挂模板 bank 时，手牌行走网格 NCC（实测精度显著高于
+            # 主检测器，代价是单帧多 ~80ms）。关掉 = 回到“手牌也走主检测器”的旧行为，
+            # 仅供 A/B 对拍与排障。依据见 get_hand_detector 的注释。
+            "hand_grid": True,
         }
         # 出牌建议配置（调试页开关，process() 每帧从 mahjong_advice.json reload）。
         # 这里给一份安全默认：显示出牌建议、不过滤进张。即便文件永远不存在，
@@ -1538,6 +1747,12 @@ class Engine:
         账本逐张 max 合并到单调牌池（同局只增不减，但单帧误检虚高可经连续回退）。
         抽成方法以便离线单测双账本合并/限幅/回退语义。"""
         current_frame_discards = Counter(discard_labels)
+        # 已被判定为误识的超出部分不得借尸还魂：剪过一次就把上限钉住。否则同一张
+        # 误识牌会每 DIRTY_HEAL_FRAMES 帧重新凑满一次“同型 5 张”，把整局变成
+        # “拒答 3 秒 → 正常 3 秒”的周期抽风。上限只限制牌河观测张数，不改手牌/副露。
+        for lab, cap in self._healed_caps.items():
+            if current_frame_discards[lab] > cap:
+                current_frame_discards[lab] = cap
         for lab, cnt in current_frame_discards.items():
             if not lab:
                 continue
@@ -1569,13 +1784,56 @@ class Engine:
             else:
                 self._monotonic_discards[lab] = m
 
+    def _heal_over_count(self, violations: List[Dict], hand_counts: List[int]) -> List[str]:
+        """把「同型已见 > 4」的超出部分从牌河账本里裁掉（守恒硬门的自愈）。
+
+        牌河账本只增不减：一张被误读进去的牌会常驻整局，不裁就会把“本帧拒答”
+        变成“整局拒答”。一种牌只有 4 张，超出上限的那几张不可能是真牌，只能删。
+        必须三本同裁：_monotonic_discards 每帧由 max(_visual_discards, _inferred_discards)
+        重算，只裁单调本会在下一帧被两本子账本顶回来（自愈失效）。
+        裁了什么必须告知 UI，绝不静默改数据。
+        """
+        healed: List[str] = []
+        meld = self._meld_counts_34
+        for v in violations:
+            if str(v.get("kind") or "") != "over_four":
+                continue
+            lab = str(v.get("tile") or "")
+            try:
+                idx = mpsz_to_tile34_index(lab)
+            except Exception:
+                continue
+            allowed = max(0, 4 - int(hand_counts[idx]) - int(meld[idx]))
+            cur = int(self._monotonic_discards.get(lab, 0))
+            if cur <= allowed:
+                continue
+            for book in (self._visual_discards, self._inferred_discards,
+                         self._monotonic_discards):
+                if lab in book:
+                    if allowed <= 0:
+                        book.pop(lab, None)
+                    else:
+                        book[lab] = allowed
+            # 钉住上限：下一帧牌河扫描仍会报回 5 张，不钉住就会重新开始凑脏帧。
+            self._healed_caps[lab] = allowed
+            healed.append(f"{lab} 剪 {cur - allowed} 张")
+        return healed
+
     def _clear_discard_ledgers(self) -> None:
-        """清空全部弃牌账本（单调牌池 + 两子账本 + 确认/缺席计标）。"""
+        """清空全部弃牌账本（单调牌池 + 两子账本 + 确认/缺席计标 + 自愈上限）。
+
+        账本清了就等于“本局从零记账”，硬门计数与钉住上限也必须同步作废：
+        留着旧上限会把新一局里真实存在的同型牌河张数裁小（新局与旧局无关）。
+        """
         self._monotonic_discards.clear()
         self._pending_discards.clear()
         self._visual_discards.clear()
         self._inferred_discards.clear()
         self._river_absent_streak.clear()
+        self._healed_caps.clear()
+        # 脏帧计数属于“本局拒答进度”，清池时必须一同作废（否则新局第一帧就可能
+        # 因旧局残留的 streak 直接跳进自愈分支）。
+        self._dirty_streak = 0
         self._river_zone_counts = {"bottom": 0, "top": 0, "left": 0, "right": 0}
         self._opponent_discards = {1: [], 2: [], 3: []}
         self._opponent_melds = {1: [], 2: [], 3: []}
@@ -1604,6 +1862,8 @@ class Engine:
         self._phase_confirm_frames = 0
         self._prev_raw_n_before_clear = 0
         self._last_trusted_matrix = None
+        self._ledger = None
+        self._dirty_streak = 0
         self._partial_mpsz = ""
         self._partial_ttl = 0
         self._last_hand_y = None
@@ -1640,7 +1900,30 @@ class Engine:
         self._last_hand_y = None
         self._frame_skipper = _FrameSkipper()
         self._cached_rows = None
+        self._cached_rows_src = None
         self._prev_platform = self.platform
+        self._apply_platform_styles(self._detector)
+        self._hand_bank_key = None
+
+    def _apply_platform_styles(self, detector) -> None:
+        """把当前平台的模板 bank 风格 + 当前玩法的牌集推给识别器。
+
+        set_platform 与 get_detector 都要调：前者可能早于 detector 懒加载（那时
+        还没有对象可设），后者可能晚于平台切换（新建的实例默认是全量）。
+        StructuralDetector 没有这些接口，靠 hasattr 兼容。
+
+        牌集（set_mode_tiles）为什么也要推：手牌行/副露区的分类调用自带 avail 参数，
+        但 YOLO 覆盖层、牌桌场景探针、任选牌弹窗那些入口不带，之前只能按平台猜
+        “这批牌里可不可能有字牌”。结果是选了全牌玩法（推倒胡/白板百搭/中发白三鬼），
+        这些路径上永久读不到东/南/西/北/白/发 —— 牌集明明由玩法决定。推入后候选集
+        跟玩法一致，川麻类玩法仍只放开 7z（与旧行为全等，不引入 8p/9p 误配）。
+        """
+        if detector is None:
+            return
+        if hasattr(detector, "set_platform_styles"):
+            detector.set_platform_styles(self.platform)
+        if hasattr(detector, "set_mode_tiles"):
+            detector.set_mode_tiles(available_set(self.mode))
 
     def reset_match(self) -> None:
         """用户或外部显式请求「新对局重置」：瞬间清空牌池、手牌记忆，108张活牌满血恢复。"""
@@ -1864,6 +2147,7 @@ class Engine:
 
     def get_detector(self):
         if self._detector is not None:
+            self._apply_platform_styles(self._detector)
             return self._detector
         # 1. 优先使用 YOLO-Mahjong-Nano 端到端目标检测器
         try:
@@ -1872,6 +2156,7 @@ class Engine:
             if yolo.is_available:
                 self._detector = yolo
                 print("[Engine] Using YOLODetector as primary detection engine.")
+                self._apply_platform_styles(self._detector)
                 return self._detector
         except Exception as e:
             print(f"[Engine] YOLODetector failed to initialize: {e}")
@@ -1883,6 +2168,7 @@ class Engine:
             if grid.is_available:
                 self._detector = grid
                 print("[Engine] Using TencentGridDetector as fallback detection engine.")
+                self._apply_platform_styles(self._detector)
                 return self._detector
         except Exception as e:
             print(f"[Engine] TencentGridDetector failed: {e}")
@@ -1890,6 +2176,75 @@ class Engine:
         # 3. 兜底：通用结构识别器
         self._detector = StructuralDetector()
         return self._detector
+
+    def get_hand_detector(self):
+        """手牌行走哪个检测通道：平台已挂模板 bank 时走网格 NCC，否则走主检测器。
+
+        实测依据（两通道同一帧、都按平台声明口径，`localtest/layer_cost.py`）：
+          腾讯底座 20 帧 253 张：网格 253/253（模板就来自这批帧，属样本内上限），
+            YOLO 220/253 = 87.0%；
+          新素材 4 帧 52 张（模板未收割过，可外推）：网格 50/52 = 96.2%，
+            YOLO 44/52 = 84.6%；逐平台 微乐 100/100、途游 100/92、蜀山 100/77、
+            雀神 85/69（雀神那 2 张是 bank 缺类，补样本才能救，不是换算法）。
+        代价（`localtest/bench_latency.py --channels`，PC/OpenCV CPU）：手牌行
+        p50 网格 193ms vs YOLO 113ms（两条通道都还远未满足 50ms 预算）。
+
+        只换手牌行：牌河/副露/阶段探测继续用主检测器（`detect_river_discards` 需要
+        多行与全图分区，网格通道的 `detect_all_rows` 只出一行手牌，供不出牌河）。
+
+        只在主检测器确实是 YOLODetector 时才接管：兜底链里的网格/结构识别器本来就
+        是一条通道，再造一条只会多占一份模板内存；而测试与调试页通过覆盖
+        `get_detector` 注入的自定义检测器必须被尊重（否则“mock 检测器驱动 process”
+        那类守卫会测不到自己注入的假货，面板却走真模板）。
+        """
+        primary = self.get_detector()
+        if (primary is None or primary.__class__.__name__ != "YOLODetector"
+                or not self._cfg.get("hand_grid", True)):
+            return primary
+        try:
+            from recognition.tencent_grid_detector import (TencentGridDetector,
+                                                          banked_platforms)
+        except Exception:
+            traceback.print_exc()
+            return primary
+        if self.platform not in banked_platforms():
+            # 该平台没有本家字模（generic / 尚未收割的 platforms.py 条目）：
+            # 拿别家牌风认这家的牌比直接认错更糟，维持主检测器。
+            return primary
+        det = self._hand_detector
+        if det is None:
+            try:
+                det = TencentGridDetector()
+            except Exception:
+                traceback.print_exc()
+                return primary
+            if not getattr(det, "is_available", False) or not getattr(det, "_cores", None):
+                return primary
+            self._hand_detector = det
+        key = (self.platform, self.mode)
+        if self._hand_bank_key != key:
+            # 与 _apply_platform_styles 同一语义：平台/玩法变了就重推白名单与候选牌集。
+            if hasattr(det, "set_platform_styles"):
+                try:
+                    det.set_platform_styles(self.platform)
+                except Exception:
+                    traceback.print_exc()
+            if hasattr(det, "set_mode_tiles"):
+                try:
+                    det.set_mode_tiles(available_set(self.mode))
+                except Exception:
+                    traceback.print_exc()
+            self._hand_bank_key = key
+        return det
+
+    def _cache_rows(self, det, rows) -> None:
+        """缓存一批 rows 并记下它出自哪个通道（方向探测顺手算出的 rows 给 process 复用）。
+
+        手牌通道与主检测器可以不是同一个，所以必须记来源：否则方向探测用 YOLO 快检
+        缓存的 rows 会被当成网格结果直接上屏，换了通道也等于没换。
+        """
+        self._cached_rows = rows
+        self._cached_rows_src = det.__class__.__name__ if det is not None else None
 
     def update_trainer(self, hand: TileCollection) -> Optional[str]:
         """根据最新一手牌更新训练器，返回对上一手的中文点评。"""
@@ -1973,7 +2328,9 @@ class Engine:
             if shanten == 0:
                 desc = "已达听牌绝佳状态！牌势凌厉，全力锁定胡牌张，乘胜追击！"
             else:
-                desc = f"一向听优质大进张（{top_ukeire}张活牌），进张面极宽，全力冲刺下叫！"
+                # top_ukeire 是未现牌计数（牌墙 + 对手手上），说“N 张活牌”会把
+                # 上界当确定机会；写清“未现/含对手”才是可核对的说法。
+                desc = f"一向听优质大进张（未现 {top_ukeire} 张，含对手手上），全力冲刺下叫！"
             return {
                 "state": "favorable",
                 "badge": "🌊 牌势顺遂 · 乘胜追击",
@@ -1984,7 +2341,7 @@ class Engine:
         return {
             "state": "steady",
             "badge": "⚖️ 局势平稳 · 见机行事",
-            "desc": f"当前{shanten}向听（进张{top_ukeire}张），牌局平稳推进中，保持节奏等待良机。",
+            "desc": f"当前{shanten}向听（未现进张至多 {top_ukeire} 张），牌局平稳推进中，保持节奏等待良机。",
             "level": "blue",
         }
 
@@ -2072,6 +2429,15 @@ class Engine:
                             "ting_details": sr.get("ting_details", []),
                             "is_dingque": sr.get("is_dingque", False),
                         }
+                        # 账本听口结论与 PVN 可用性标记必须一路透传到 UI：reason 里写了
+                        # 「其中 4 张只能自摸」，UI 拿不到对应字段就没法核对，等于让用户
+                        # 只能选择相信一句无法验证的话（可追溯性正是本次升级的目的）。
+                        # `predraw`（B-P4 空白 D）同理：预摸情景只在 analyzer 内部存在过，
+                        # 不透传就会被 annotate 当成“没模拟数据”，面板永远不渲染预演行。
+                        for _k in ("ting_chance", "ukeire_chance", "pvn_used",
+                                   "analytical_equity", "predraw"):
+                            if _k in sr:
+                                entry[_k] = sr[_k]
                         if "max_fan" in sr:
                             entry["max_fan"] = sr["max_fan"]
                         if "danger_flow" in sr:
@@ -2091,7 +2457,8 @@ class Engine:
                         for sr in _rule_results[:3]:
                             u = sr.get("ukeire", 0)
                             rsn = sr.get("reason", "")
-                            rsn = f"{rsn} · 智能保底" if rsn else f"进张{u}张 · 智能保底"
+                            rsn = (f"{rsn} · 智能保底" if rsn
+                                   else f"进张至多 {u} 张 · 智能保底")
                             entry = {
                                 "tile": sr.get("tile"),
                                 "ukeire": int(u),
@@ -2102,6 +2469,12 @@ class Engine:
                                 "ting_details": sr.get("ting_details", []),
                                 "is_dingque": sr.get("is_dingque", False),
                             }
+                            # 保底分支同样得透传 predraw：残局/深向听恰恰是最需要
+                            # 「摸到什么会改主意」的时刻，少传一个字段就是静默降级。
+                            for _k in ("ting_chance", "ukeire_chance", "pvn_used",
+                                       "analytical_equity", "predraw"):
+                                if _k in sr:
+                                    entry[_k] = sr[_k]
                             if "max_fan" in sr:
                                 entry["max_fan"] = sr["max_fan"]
                             if "danger_flow" in sr:
@@ -2114,6 +2487,9 @@ class Engine:
                                 entry["ev_gauge"] = sr["ev_gauge"]
                             advice.append(entry)
                 elif getattr(self.trainer, "general_results", None):
+                    # 通用分析器（无专属规则引擎的平台）只交出进张总数，交不出是哪些牌，
+                    # 因此无法像川麻/std 那样用账本拆「牌墙 vs 对手手上」。文案一律标
+                    # 「至多/未现」：数字仍是那个上界，但措辞不再把它当成确定机会。
                     advice = []
                     for rank, gr in enumerate(self.trainer.general_results):
                         u = gr.get("ukeire", 0)
@@ -2126,17 +2502,17 @@ class Engine:
                         if sh == 0 and ting_details:
                             wait_names = [td["name"] for td in ting_details]
                             if u > 0:
-                                rsn = f"听 {'/'.join(wait_names[:3])} · 余 {u} 张"
+                                rsn = f"听 {'/'.join(wait_names[:3])} · 未现 {u} 张"
                             else:
                                 rsn = f"听 {'/'.join(wait_names[:3])}（绝张）"
                         elif sh == 0:
-                            rsn = f"听牌 · 进张{u}张"
+                            rsn = f"听牌 · 进张至多 {u} 张"
                         elif sh == 1:
-                            rsn = f"一向听 · 进张{u}张"
+                            rsn = f"一向听 · 进张至多 {u} 张"
                         elif sh is not None and sh >= 2:
-                            rsn = f"{sh}向听 · 进张{u}张"
+                            rsn = f"{sh}向听 · 进张至多 {u} 张"
                         else:
-                            rsn = f"进张{u}张"
+                            rsn = f"进张至多 {u} 张"
                         entry = {
                             "tile": t_str,
                             "ukeire": int(u),
@@ -2160,13 +2536,14 @@ class Engine:
                                 "ukeire": int(u),
                                 "shanten": sh,
                                 "ev": float(10000 - rank * 100 + int(u) * 10),
-                                "reason": f"进张{u}张 · 智能保底",
+                                "reason": f"进张至多 {u} 张 · 智能保底",
                                 "ting_tiles": gr.get("ting_tiles", []),
                                 "ting_details": gr.get("ting_details", []),
                                 "is_dingque": False,
                             }
                             advice.append(entry)
                 else:
+                    # 最底层兜底：只有 count 映射，同样只能按上界表述（理由同上）。
                     items = sorted(raw.items(), key=lambda kv: -kv[1])
                     filtered_items = items
                     is_fallback = False
@@ -2183,13 +2560,13 @@ class Engine:
                         t_str = str(t)
                         fb_tag = " · 智能保底" if is_fallback else ""
                         if shanten == 0:
-                            rsn = f"听牌 · 进张{u}张{fb_tag}"
+                            rsn = f"听牌 · 进张至多 {u} 张{fb_tag}"
                         elif shanten == 1:
-                            rsn = f"一向听 · 进张{u}张{fb_tag}"
+                            rsn = f"一向听 · 进张至多 {u} 张{fb_tag}"
                         elif shanten is not None and shanten >= 2:
-                            rsn = f"{shanten}向听 · 进张{u}张{fb_tag}"
+                            rsn = f"{shanten}向听 · 进张至多 {u} 张{fb_tag}"
                         else:
-                            rsn = f"进张{u}张{fb_tag}"
+                            rsn = f"进张至多 {u} 张{fb_tag}"
                         entry = {
                             "tile": t_str,
                             "ukeire": int(u),
@@ -2615,7 +2992,7 @@ class Engine:
             geo_sorted = sorted(geo, key=lambda g: -g[2])
             cands = [g for g in geo_sorted[:2] if g[2] > 0]
         if not cands:
-            self._cached_rows = []
+            self._cache_rows(det, [])
             return 0, image
 
         # ---------- 阶段 B：仅用几何判据选方向（不做分类，快 ~10x）----------
@@ -2654,7 +3031,7 @@ class Engine:
         except Exception:
             traceback.print_exc()
         # 缓存最优方向的检测结果，process() 直接复用，避免重复检测
-        self._cached_rows = best_rows
+        self._cache_rows(det, best_rows)
         return best_rot, best_img
 
     @staticmethod
@@ -2668,17 +3045,120 @@ class Engine:
             return cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
         return image
 
+    def _frame_diff_source(self, image: CVImage) -> np.ndarray:
+        """把工作图降采样成帧差签名的输入（与识别器同一份降采样口径）。
+
+        纯 numpy/cv2.resize，代价 ≈1ms，比一次完整识别快 ~100x —— 这正是跳帧
+        机制能省钱的前提：判定「画面有没有变」根本不需要先做识别。
+        """
+        ih, iw = image.shape[:2]
+        longest = float(max(ih, iw))
+        if longest > 1100:
+            inv = longest / 1100.0
+            return cv2.resize(
+                cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image,
+                (max(1, int(iw / inv)), max(1, int(ih / inv))),
+                interpolation=cv2.INTER_AREA,
+            )
+        return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+
+    def _apply_hand_roi(self, image: CVImage) -> CVImage:
+        """===== 用户 ROI / 平台预设专属 ROI 裁剪 =====
+
+        优先使用用户手动拖拽指定的 ROI；若未拖拽（None），则自适应套用当前平台
+        专属 hand_roi。切片异常（坏比例/坏尺寸）不阻塞主流程，回退整屏识别。
+
+        注意：手牌行通常**不是**在这里被识别的 —— 方向验证 `_verify_orientation`
+        算出的 rows 是整屏坐标、且在裁剪之前产出（`_apply_conf` 与 aspect 下限校验
+        吃的都是这批整屏框，见 localtest/aspect_floor.py）。本方法裁出来的是给亮度
+        校验、预览等下游用的工作图。
+        """
+        try:
+            effective_roi = self._roi
+            if effective_roi is None:
+                p_roi = get_hand_roi(self.platform)
+                effective_roi = (p_roi[0], p_roi[1])
+            ih, _ = image.shape[:2]
+            y0 = max(0, min(ih, int(effective_roi[0] * ih)))
+            y1 = max(y0, min(ih, int(effective_roi[1] * ih)))
+            if y1 - y0 >= MIN_ROI_HEIGHT:
+                return np.ascontiguousarray(image[y0:y1, :])
+        except Exception:
+            pass
+        return image
+
+    def _settle_orientation(self, image: CVImage) -> Tuple[CVImage, bool]:
+        """纯几何归一：按已锁方向把图旋到规范朝向，**一帧识别都不跑**。
+
+        返回 `(image, needs_verify)`。`needs_verify=True` 表示「方向锁在 0/180，
+        本帧的方向再验证还欠着」—— 调用方只有在确认本帧**不跳帧**之后才需要去还
+        （见 process 的「跳帧判定 → 补验证」顺序）。
+
+        为什么必须把几何与验证拆开：验证每帧要付一次完整的手牌通道识别
+        （实测 ~950ms，占单帧总耗时 96.3%），而跳帧判定所需的帧差签名只依赖几何
+        （朝向 + hand_roi 裁片）。混在一起跑的结果是画面冻结的静默帧照样把识别做完，
+        跳帧白跳 —— 实测 1000 帧里 100 个跳帧帧仍各付 997ms，一分没省。
+        拆开后实测（同进程交替 A/B，localtest/_ab_skip_defer.py）：
+          静默期 跳帧帧 903ms -> 5.3ms（-99.4%），非跳帧帧不变，逐帧 payload 一致；
+          变化期 跳帧率两侧同为 16.7%（没有多跳一帧），逐帧 payload 一致。
+
+        唯一的行为差在「方向锁被推翻的那一帧」，而且是新语义更保守：老顺序先验证
+        再算帧差，纠正完朝向后那张图与上一帧的基线完全一样 → diff=0.0 → 直接跳帧，
+        把翻转**之前**的旧 payload 继续端出去；新顺序的帧差是在旧朝向裁片上算的
+        （实测 diff=7048，远超阈值）→ 不跳帧 → 老老实实识别一次。实测两侧都在这一
+        帧自愈到 180°、手牌/状态/建议完全一致，只有诊断字段 `diag.orient`（记录
+        「产出该 payload 那一帧的方向锁」）不同。
+
+        本方法的几何输出与 `_verify_orientation` 逐字一致（0° 是恒等返回、180° 是
+        同一次 cv2.ROTATE_180），差别只在「有没有顺手把 rows 算出来」。
+        """
+        # 手动方向覆盖优先级最高：与验证路径同一个早退分支，本来就不做自动探测。
+        if self._orient_override is not None:
+            self._orient = self._orient_override
+            self._orient_zerocount = 0
+            return self._rotate_to(image, self._orient_override), False
+
+        if self._orient is None or self._orient in (90, 270):
+            # 未锁定 → 没有「便宜的几何」可言（该探的方向必须探），直接走完整验证，
+            # 本帧该付的识别在这里就付掉了；90/270 是竖屏锁定，老代码本来也不跑
+            # 每帧快检，等价于一次 `_rotate_to`。
+            return self._verify_orientation(image), False
+
+        if not self._cfg.get("auto_orient", True):
+            # 调试页关掉自动方向探测：锁定 0°、不做任何验证（与验证路径同语义）
+            self._orient = 0
+            self._orient_zerocount = 0
+            return image, False
+
+        # 横屏且方向已锁：几何免费，识别欠着，等跳帧判定决定要不要付
+        return self._rotate_to(image, self._orient), True
+
     def _apply_orientation(self, image: CVImage) -> CVImage:
-        """按当前锁定的方向把图旋到规范横屏朝向。未锁定时做一次探测并锁定。
+        """旧入口：几何归一 + 方向验证一起做（**每帧都付完整识别**）。
 
-        手动方向覆盖（悬浮窗「旋转」按钮）优先级最高：直接旋到用户指定的方向，
-        跳过自动探测。自动探测在特殊画面/异常朝向下可能选错，用户一眼看到牌被
-        横置时点一下即可校正，无需等自动重探。
+        保留这个名字有两个理由：① 外部脚本/测试直接调它拿「归一后的整屏图」；
+        ② 它定义了改动前的语义，守卫测试用它做 A/B 的对照侧。生产热路径请走
+        `_settle_orientation`（几何）+ 跳帧判定 + `_verify_orientation`（补验证）。
+        """
+        return self._verify_orientation(image)
 
-        快路径：先按原方向做一次**快速**检测（classify=False，~17ms）。
-        绝大多数情况用户是正常持机的，原方向就是对的 —— 这时直接锁定 0°，
-        省掉 3 个多余方向的探测（3x17ms）和一次重复的方向探测开销。
-        只有原方向明显不对（牌数 <8 或没有长牌行）时才走 4 方向全探测。
+    def _verify_orientation(self, image: CVImage) -> CVImage:
+        """按当前锁定的方向把图旋到规范横屏朝向，并**顺手算出本帧的手牌 rows**。
+
+        未锁定时做一次探测并锁定。手动方向覆盖（悬浮窗「旋转」按钮）优先级最高：
+        直接旋到用户指定的方向，跳过自动探测。自动探测在特殊画面/异常朝向下可能
+        选错，用户一眼看到牌被横置时点一下即可校正，无需等自动重探。
+
+        快检（本方法的主体）：先按原方向跑一次 `detect_all_rows(classify=True,
+        allow_rotation=False)`。绝大多数情况用户是正常持机的，原方向就是对的 ——
+        这时直接锁定 0°，省掉 3 个多余方向的探测和一次重复的方向探测开销。只有原
+        方向明显不对（牌数 <8 或没有长牌行）时才走 4 方向全探测。
+
+        注意 classify 必须为 True：下面「同名牌 >4 判倒置」（dup_fail）这条自愈判据
+        吃的是标签，`classify=False` 会让它永远不触发，倒置画面就会被锁死在 0°。
+        代价实测 ~950ms/帧（不是早先注释里写的 ~17ms —— 那个数字属于 classify=False
+        的时代，改成 True 之后注释没跟上）。正因如此，这个方法每帧无条件跑就是
+        跳帧空转的根因，改为「只在确定不跳帧的帧上跑」（见 `_settle_orientation`）。
         """
         # 手动方向覆盖优先级最高：跳过自动探测，直接旋到用户指定的方向。
         if self._orient_override is not None:
@@ -2695,10 +3175,13 @@ class Engine:
                 self._orient_zerocount = 0
                 return image
 
-            det = self.get_detector()
+            det = self.get_hand_detector()
             if det is not None:
                 try:
                     # 1. 优先快检当前 0° 朝向：手牌行必须在屏幕下半部，且单牌重复不超过4张
+                    # 这里用「手牌通道」而不是主检测器：方向已锁定时这段每帧都跑，它顺手
+                    # 算出的 rows 正是 process 要直接用的那份。两边不是同一个通道时，
+                    # process 会因来源不匹配而重跑一次，等于每帧白付一个检测的钱。
                     rows0 = det.detect_all_rows(image, classify=True, allow_rotation=False)
                     n0 = sum(len(r) for r in rows0)
                     at_bottom0 = self._longest_row_at_bottom(rows0, ih)
@@ -2713,7 +3196,7 @@ class Engine:
                     if at_bottom0 and (has_hand0 or n0 >= 4) and not dup_fail0:
                         self._orient = 0
                         self._orient_zerocount = 0
-                        self._cached_rows = rows0
+                        self._cache_rows(det, rows0)
                         return image
 
                     # 2. 手机反向横屏（Reverse Landscape，如左插充电线）自愈：
@@ -2733,10 +3216,15 @@ class Engine:
                     if at_bottom180 and (has_hand180 or n180 >= 4) and not dup_fail180:
                         self._orient = 180
                         self._orient_zerocount = 0
-                        self._cached_rows = rows180
+                        self._cache_rows(det, rows180)
                         return img180
                 except Exception:
                     traceback.print_exc()
+
+            # 走到这里说明本方向得不出合格手牌行。若手牌通道与主检测器不是同一个，
+            # “看不见”不等于“画面转了”（空手/遮挡/牌风未入 bank 都会让网格报 0 张），
+            # 下面的 4 方向全探测仍用主检测器跑（它能看见牌河与其它行，判据更稳）。
+            # 代价：这类帧会多付一次手牌通道的检测（慢路径缓存的 rows 因来源不同不复用）。
 
             # 3. 慢路径：原方向不对，探测 4 个方向
             rot, image = self._probe_orientation(image)
@@ -2857,7 +3345,7 @@ class Engine:
         # 2. 通用孤张 / 效用价值评分（分数越高代表越无用、越应优先打出）
         counts = {t: tiles.count(t) for t in set(tiles)}
         scored_tiles = []
-        laizi_idx = get_laizi(mode)
+        laizi_idx = get_laizi_set(mode)
 
         for t in set(tiles):
             suit = t[1]
@@ -2869,7 +3357,7 @@ class Engine:
                 t_idx = -1
 
             # 万能赖子百搭牌（红中/白板等）：价值极高，绝不建议弃打！
-            if laizi_idx is not None and t_idx == laizi_idx:
+            if t_idx in laizi_idx:
                 score = -999999
             # 字牌（z）：无刻子/对子时价值极低，优先打出
             elif suit == 'z':
@@ -2927,7 +3415,7 @@ class Engine:
 
         advice = []
         for rank, (t, sc, cnt, t_idx) in enumerate(valid_candidates[:4]):
-            if laizi_idx is not None and t_idx == laizi_idx:
+            if t_idx in laizi_idx:
                 reason = "万能赖子(保留)"
             elif t.endswith('z'):
                 reason = "孤张字牌" if cnt == 1 else "多余字牌"
@@ -2980,13 +3468,18 @@ class Engine:
 
             # ===== 方向归一（旋转鲁棒性）=====
             # 必须在帧差/检测之前做，保证后续所有几何都基于规范朝向。
+            # 这里只做**几何**（按已锁方向旋转），识别留给跳帧判定之后再决定要不要
+            # 付 —— 否则画面冻结的静默帧也会先跑完一次完整识别才被告知「本帧可跳帧」，
+            # 跳帧就成了空转（实测每帧白付 997ms）。
+            raw_for_verify = image          # 未经任何旋转的原始帧，补验证的入参
             try:
-                image = self._apply_orientation(image)
+                image, self._orient_verify_pending = self._settle_orientation(image)
             except Exception as e:
                 traceback.print_exc()
                 print(f"[engine] 方向归一异常，回退到原图: {e}")
                 # 重置方向锁，下一帧重新探测
                 self._orient = None
+                self._orient_verify_pending = False
 
             # ===== 牌桌场景校验（过滤大厅/菜单/结算，加入防抖）=====
             if not self._is_mahjong_table(image):
@@ -3017,6 +3510,8 @@ class Engine:
                             "remaining": get_mode(self.mode).get("wall", 108),
                             "dead": 0,
                             "remaining_matrix": {},
+                            "tile_ledger": None,
+                            "ting_chance": None,
                             "is_drawing": False,
                             "drawing_tile": None,
                             "tiles": [],
@@ -3025,6 +3520,7 @@ class Engine:
                             "elapsed": 0.001,
                             "frame_skipped": False,
                             "message": "等待牌局开始",
+                            "native_ready": native_solver_ready(self.mode),
                         }, ensure_ascii=False),
                         stage=None,
                     )
@@ -3038,20 +3534,7 @@ class Engine:
             full_for_preview = image
 
             # ===== 用户 ROI / 平台预设专属 ROI 裁剪 =====
-            # 优先使用用户手动拖拽指定的 ROI；若未拖拽（None），则自适应套用当前平台专属 hand_roi
-            try:
-                effective_roi = self._roi
-                if effective_roi is None:
-                    p_roi = get_hand_roi(self.platform)
-                    effective_roi = (p_roi[0], p_roi[1])
-                ih, _ = image.shape[:2]
-                y0 = max(0, min(ih, int(effective_roi[0] * ih)))
-                y1 = max(y0, min(ih, int(effective_roi[1] * ih)))
-                if y1 - y0 >= MIN_ROI_HEIGHT:
-                    image = np.ascontiguousarray(image[y0:y1, :])
-            except Exception:
-                # ROI 切片异常（坏比例/坏尺寸）不阻塞主流程，回退整屏识别
-                pass
+            image = self._apply_hand_roi(image)
 
             start_time = time.time()
 
@@ -3059,18 +3542,7 @@ class Engine:
             # 工作区域（与识别器同一份降采样逻辑）作为帧差基线。
             # 这里用纯 numpy 算一个粗签名，代价 ≈ 1ms，比一次完整识别快 100x。
             try:
-                ih, iw = image.shape[:2]
-                longest = float(max(ih, iw))
-                if longest > 1100:
-                    inv = longest / 1100.0
-                    work_gray = cv2.resize(
-                        cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image,
-                        (max(1, int(iw / inv)), max(1, int(ih / inv))),
-                        interpolation=cv2.INTER_AREA,
-                    )
-                else:
-                    work_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
-                diff = self._frame_skipper.diff(work_gray)
+                diff = self._frame_skipper.diff(self._frame_diff_source(image))
             except Exception:
                 diff = float("inf")  # 帧差算不出来就当不动也跑完整识别
 
@@ -3106,6 +3578,11 @@ class Engine:
                 self.trainer = None
                 self._prev_mode = self.mode
                 self._prev_platform = self.platform
+                # 玩法/平台变了就把候选牌集重推给已存在的识别器（detector 还未
+                # 创建的情况不用管，get_detector 里会调同一个入口）。
+                self._apply_platform_styles(self._detector)
+                # 手牌通道的白名单与玩法牌集是按 (platform, mode) 缓存的，跟着作废。
+                self._hand_bank_key = None
             avail = available_set(self.mode)
             hsizes = hand_sizes(self.mode)
 
@@ -3113,6 +3590,9 @@ class Engine:
             if detector is None:
                 print("No templates available")
                 return _error_result("py_error", "识别器初始化失败（模板库为空）")
+            # 手牌行走哪个通道（网格 NCC 优先）：只影响下面取 rows 与手牌直通判定，
+            # 牌河/副露/阶段探测仍用主检测器（网格通道只出一行手牌，供不出牌河）。
+            hand_detector = self.get_hand_detector()
 
             # ===== 智能跳帧（已恢复，语义安全） =====
             # 仅当同时满足全部前提才复用上一 payload：已过 warmup、有缓存、画面冻结
@@ -3133,16 +3613,45 @@ class Engine:
                 return self._build_skip_result(image, self._frame_skipper.cached)
             self._consecutive_skips = 0
 
+            # ===== 补做方向验证（只有确定不跳帧的帧才走到这里）=====
+            # 几何已在帧首归一、帧差已判定本帧需要真识别，此时才付那一次完整的手牌
+            # 通道识别（实测 ~950ms，占单帧耗时 96.3%）。验证会把**整屏坐标**的 rows
+            # 缓存进 `_cached_rows`，下面取 rows 直接复用 —— 与改动前「验证在前、
+            # 复用缓存」的产物逐字相同（坐标系、调用参数、来源类名都不变）。
+            if self._orient_verify_pending:
+                self._orient_verify_pending = False
+                try:
+                    # 入参必须是**未经 settle 的原始帧**：`_verify_orientation` 自己
+                    # 负责判 0°/180° 并旋转，把已旋过的图递给它等于转两次 —— 实测
+                    # 会让方向锁在 180↔0 之间逐帧震荡（每一帧都重付一次全套探测）。
+                    settled = self._verify_orientation(raw_for_verify)
+                except Exception as e:
+                    traceback.print_exc()
+                    print(f"[engine] 方向归一异常，回退到原图: {e}")
+                    self._orient = None
+                    settled = full_for_preview
+                # 验证的产物才是本帧真正被识别的那张图：预览、ROI 工作图、帧差基线
+                # 都要跟着它走。稳态下 settled 与帧首 settle 的产物是同一张图，下面
+                # 三行等于 no-op；只有在验证推翻朝向的帧上才真正起作用。
+                full_for_preview = settled
+                image = self._apply_hand_roi(settled)
+                try:
+                    self._frame_skipper.set_baseline(self._frame_diff_source(image))
+                except Exception:
+                    pass
+
             # 取「所有牌行」（含各家牌河），不再只取手牌行。
-            # 复用方向探测/快路径已经算好的结果，避免同帧重复检测。
-            # 方向已由 _apply_orientation 锁定，也不需要再让识别器
-            # 内部做旋转重试（每次重试都是一次完整检测，很贵）。
+            # 复用方向验证（上面补做的那次）已经算好的结果，避免同帧重复检测。
+            # 方向已由 `_settle_orientation`/`_verify_orientation` 锁定，也不需要再让
+            # 识别器内部做旋转重试（每次重试都是一次完整检测，很贵）。
             _t_detect = time.time()
-            if self._cached_rows is not None:
+            if (self._cached_rows is not None
+                    and self._cached_rows_src == hand_detector.__class__.__name__):
                 rows = self._cached_rows
                 self._cached_rows = None
             else:
-                rows = detector.detect_all_rows(image, allow_rotation=False)
+                rows = hand_detector.detect_all_rows(image, allow_rotation=False)
+                self._cached_rows = None
             self._perf_ms["detect"].append((time.time() - _t_detect) * 1000.0)
 
             # 置信过滤 + 牌形降权（低置信牌直接丢弃，宁可不识别也不臆测）。
@@ -3177,7 +3686,9 @@ class Engine:
                         bootstrap_row_idx = ri
 
             # 若为主力 YOLODetector 或 TencentGridDetector，手牌行直接提取，不经过针对乱序单框的 _tile_voter
-            is_grid_det = (getattr(detector, "__class__", None) and detector.__class__.__name__ in ("YOLODetector", "TencentGridDetector"))
+            # （这里看的是「手牌通道」的类名，不是主检测器：换通道后直通语义必须跟着走）
+            is_grid_det = (getattr(hand_detector, "__class__", None)
+                           and hand_detector.__class__.__name__ in ("YOLODetector", "TencentGridDetector"))
 
             filtered = []
             for ri, row in enumerate(rows):
@@ -3389,6 +3900,9 @@ class Engine:
 
             ih, _ = image.shape[:2]
             discard_labels = []
+            # 后台全图扫描的结果先收在本地，与牌行观测合成**一次** sighting 再喂账本
+            # （为何必须合成，见下方「牌池双账本」注释）。
+            bg_seen: List[str] = []
 
             # 接收后台异步完成的牌河与副露扫描结果，更新视觉累计账本
             rf = getattr(self, "_river_future", None)
@@ -3412,7 +3926,7 @@ class Engine:
                                         seat_discards[seat].append(t34)
                         self._river_zone_counts = bg_zone_counts
                         self._opponent_discards = seat_discards
-                        self._update_visual_ledger(bg_discards)
+                        bg_seen = bg_discards
                     if bg_meld_entries:
                         zone_to_seat = {"right": 1, "top": 2, "left": 3}
                         seat_melds: Dict[int, List[int]] = {1: [], 2: [], 3: []}
@@ -3530,9 +4044,20 @@ class Engine:
             # 牌池双账本（视觉累计）：同局内只增不减 + 两帧确认 + 多帧一致回退；
             # 与手牌差分推断分账，最后逐张 max 合并到单调牌池。
             # 必须用 run_river_scan（真正跑了检测的帧）才更新：牌河未变而跳过时
-            # discard_labels 为空，若仍喂给账本会被当成“牌河消失”误回退，故跳过帧绝不喂。
-            if run_river_scan:
-                self._update_visual_ledger(discard_labels)
+            # discard_labels 为空，若仍喂给账本会被当成“牌河消失”误回退，故跳过帧不单独喂。
+            # 同帧两路观测（后台全图 + 牌行）绝不能分两次喂：后一次空列表会把前一次
+            # 刚凑上的两帧确认抹回 0。网格类识别器只回手牌行（牌行路径恒空），那样
+            # 等于“视觉牌河整局永远确认不上 → 记牌器空转”。合成口径 = 逐型取较大值
+            # （两路各自报同一张牌的实际张数，相加会把一次弃牌双计）。
+            if run_river_scan or bg_seen:
+                if bg_seen and discard_labels:
+                    _c_bg, _c_row = Counter(bg_seen), Counter(discard_labels)
+                    _merged: List[str] = []
+                    for _lab in set(_c_bg) | set(_c_row):
+                        _merged.extend([_lab] * max(_c_bg[_lab], _c_row[_lab]))
+                    self._update_visual_ledger(_merged)
+                else:
+                    self._update_visual_ledger(bg_seen or discard_labels)
 
 
             # 计算手牌各牌计数
@@ -3544,13 +4069,14 @@ class Engine:
                     except Exception:
                         pass
 
-            # 108 张牌物理守恒校验：hand_counts[idx] + disc_counts[idx] <= 4
+            # 牌河记账**不做静默裁剪**：旧写法 disc_counts[idx] = min(cnt, 4-hand) 会把
+            # 「同一型看到 5 张」这件物理上不可能的事抹平成 4 张，于是守恒违规永远查
+            # 不出来，脏帧照常出建议（“看着对、其实错”的那类坑）。原样记账，
+            # 超限与否交给牌局账本的硬门（见下方「守恒硬门」）。
             disc_counts = [0] * 34
             for lab, cnt in self._monotonic_discards.items():
                 try:
-                    idx = mpsz_to_tile34_index(lab)
-                    max_allowed = max(0, 4 - hand_counts[idx])
-                    disc_counts[idx] = min(cnt, max_allowed)
+                    disc_counts[mpsz_to_tile34_index(lab)] += max(0, int(cnt))
                 except Exception:
                     pass
             disc_mpsz = self._labels_to_mpsz([lab for lab, cnt in self._monotonic_discards.items() for _ in range(cnt)], avail)
@@ -3684,12 +4210,15 @@ class Engine:
                             cand_evals.sort(key=lambda x: x[0])
                             _, best_cand, best_shanten, best_u, is_dq = cand_evals[0]
                             c_cn = tile_to_chinese(best_cand)
-                            u_str = f" · 进张{best_u}张" if best_u > 0 else ""
+                            # 选牌阶段的 ukeire 来自 `calculate_ukeire`（按当前手牌+可见牌算），
+                            # 它是「未现张数」的上界：对手按住的牌也算在内。写「至多」是
+                            # B-P3 的区间口径，不能省略（否则面板把上界说成确定的机会数）。
+                            u_str = f" · 进张至多{best_u}张" if best_u > 0 else ""
                             message = f"选牌建议：选 {c_cn}（{best_shanten}向听{u_str}）"
                             advice = []
                             for _, c, s, u, dq in cand_evals:
                                 cn = tile_to_chinese(c)
-                                reason_u = f"，进张{u}张" if u > 0 else ""
+                                reason_u = f"，进张至多{u}张" if u > 0 else ""
                                 advice.append({
                                     "tile": c,
                                     "ukeire": u,
@@ -3864,6 +4393,49 @@ class Engine:
                 if shanten is None:
                     shanten = 2
 
+            # ===== 守恒硬门：牌局账本自相矛盾的帧宁可不答，也不给错答案 =====
+            # 判据用的是分析器同一份账本（trainer.ledger），不在这里另写一套守恒公式：
+            # 两处口径不一致时，“面板说没事、建议说有事”会让用户无从判断该信谁。
+            self._ledger = getattr(self.trainer, "ledger", None) if self.trainer is not None else None
+            ledger_ok = True
+            ledger_violations: List[Dict] = []
+            ledger_wall: Optional[int] = None
+            if isinstance(self._ledger, dict):
+                # 陈旧账本不得参与硬门：拿上一帧的违例把本帧判脏，会把“偶尔少识
+                # 一张”放大成“连续几秒不给建议”。签名不符就当本帧无账本（不门控、
+                # 也不下发听口拆账）。
+                _sig = (tuple(disc_counts), tuple(self._meld_counts_34),
+                        sum(hand_counts))
+                if self._ledger.get("sig") == _sig:
+                    ledger_ok = bool(self._ledger.get("ok", True))
+                    ledger_violations = list(self._ledger.get("violations") or [])
+                    ledger_wall = int(self._ledger.get("wall_remaining", 0))
+                else:
+                    self._ledger = None
+                    ledger_wall = None
+            if not ledger_ok and status == "ok":
+                self._dirty_streak = getattr(self, "_dirty_streak", 0) + 1
+                advice = []
+                best = ""
+                _detail = "；".join(str(v.get("detail") or "") for v in ledger_violations[:2])
+                message = f"可见牌记账自相矛盾，本帧不给建议（{_detail}）"
+                # 牌河账本是单调累加的：一旦某张牌被误识别进去，它会常驻整个牌局，
+                # 硬门就会把“本帧拒答”变成“整局拒答”。连续多帧同一处矛盾时，超出实物
+                # 上限的那几张一定是误识（一种牌只有 4 张），裁回上限并告知已自愈。
+                if self._dirty_streak >= DIRTY_HEAL_FRAMES:
+                    healed = self._heal_over_count(ledger_violations, hand_counts)
+                    if healed:
+                        ledger_violations = []
+                        ledger_ok = True
+                        self._dirty_streak = 0
+                        # 账本已被裁改，本帧不再拿旧账本的牌墙量去驱动末期警报
+                        self._ledger = None
+                        ledger_wall = None
+                        message = (f"已自动剪除误识别的多余牌（{ '、'.join(healed) }），"
+                                   f"记账重新自洽")
+            else:
+                self._dirty_streak = 0
+
             # 标记"最优"那张牌（最高 EV 或最高 ukeire），UI 上加"最优"角标
             if advice:
                 if is_sichuan_family(self.mode) or getattr(self.trainer, "analyzer", "") == "std":
@@ -3972,27 +4544,30 @@ class Engine:
                         hand_counts_final[mpsz_to_tile34_index(hand_mpsz[i:i + 2])] += 1
                     except Exception:
                         pass
-                if self.mode == "sc_hz":
-                    # 血流红中模式：字牌仅有红中 (7z，索引33)，单独呈现
-                    z_counts = [max(0, 4 - (hand_counts_final[33] + disc_counts_out[33] + meld_counts_out[33]))]
-                elif is_sichuan_family(self.mode):
-                    # 普通四川麻将（血战到底/血流成河）：无任何字牌
-                    z_counts = []
-                else:
-                    # 其他包含字牌的玩法（东/南/西/北/白/发/中，共 7 张）：
-                    # 不在本玩法可用集内的字牌（如广东/长沙仅留红中 7z）恒为 0，
-                    # 不得误报成"还剩 4 张"。
-                    z_counts = [
-                        max(0, 4 - (hand_counts_final[i] + disc_counts_out[i] + meld_counts_out[i]))
-                        if i in avail else 0
-                        for i in range(27, 34)
-                    ]
+                def _pool_left(i: int) -> int:
+                    """该型牌池未现张数（= 已现的反面，含被人拿着的部分）。
+
+                    不在本玩法牌集里的型恒为 0。旧写法只对字牌做了牌集过滤，数牌直接
+                    算 4−已见，于是「二人麻将（筒条）」这种根本没有万子的玩法会给
+                    万子报满 4 张活牌——记牌器上凭空多出 36 张不存在的牌。
+                    字牌同理：不再硬编码某个玩法 key，而是问牌集本身。
+                    """
+                    if i not in avail:
+                        return 0
+                    return max(0, 4 - (hand_counts_final[i] + disc_counts_out[i] + meld_counts_out[i]))
+
+                honor_types = [i for i in range(27, 34) if i in avail]
+                z_counts = [_pool_left(i) for i in honor_types]
+                z_names = [tile_to_chinese(tiles34_index_to_mpsz(i)) for i in honor_types]
 
                 remaining_matrix = {
-                    "m": [max(0, 4 - (hand_counts_final[i] + disc_counts_out[i] + meld_counts_out[i])) for i in range(0, 9)],
-                    "p": [max(0, 4 - (hand_counts_final[i] + disc_counts_out[i] + meld_counts_out[i])) for i in range(9, 18)],
-                    "s": [max(0, 4 - (hand_counts_final[i] + disc_counts_out[i] + meld_counts_out[i])) for i in range(18, 27)],
+                    "m": [_pool_left(i) for i in range(0, 9)],
+                    "p": [_pool_left(i) for i in range(9, 18)],
+                    "s": [_pool_left(i) for i in range(18, 27)],
                     "z": z_counts,
+                    # 字牌格子名按牌集给出（三人扣只含东南西北白中、血流红中只含中），
+                    # 不让 UI 靠「长度==1」去猜是哪张。
+                    "z_names": z_names,
                 }
                 known = sum(hand_counts_final[i] + disc_counts_out[i] + meld_counts_out[i] for i in avail_list)
                 remaining = max(0, wall_total - known)
@@ -4004,6 +4579,44 @@ class Engine:
                     "remaining": remaining,
                     "dead": dead,
                 }
+            # ===== 牌局账本下发（每类牌：已现/未现/牌墙可摸/在别人手上(上界)/鬼牌）=====
+            # 只下发本帧签名相符的账本（ledger_ok/violations 已由上方硬门按帧认领），
+            # 陈旧账本宁不下发，也不能让它去驱动「牌墙还剩几张」这类末期判断。
+            tile_ledger_view = None
+            if isinstance(self._ledger, dict):
+                _cells: Dict[str, Dict] = {}
+                for _i, _r in (self._ledger.get("by_type") or {}).items():
+                    if int(_r.get("total", 0)) <= 0 and int(_r.get("seen", 0)) <= 0:
+                        continue
+                    _cells[str(_i)] = {
+                        "tile": _r["tile"], "name": _r["name"],
+                        "total": _r["total"], "seen": _r["seen"],
+                        "unseen": _r["unseen"],
+                        "wall": _r["wall_lo"], "wall_hi": _r["wall_hi"],
+                        "in_hands": _r["opp_hi"], "wall_only": _r["wall_only"],
+                        "is_wild": _r["is_wild"],
+                    }
+                tile_ledger_view = {
+                    "by_type": _cells,
+                    "seen_total": self._ledger.get("seen_total", 0),
+                    "unseen_total": self._ledger.get("unseen_total", 0),
+                    "standing_total": self._ledger.get("standing_total", 0),
+                    "wall_remaining": self._ledger.get("wall_remaining", 0),
+                    "rounds_left": self._ledger.get("rounds_left", 0),
+                    "players": self._ledger.get("players", 0),
+                    "wild": self._ledger.get("wild", {}),
+                    "opp_known": self._ledger.get("opp_known", False),
+                    # 「只能自摸」类牌汇总：定缺门带来的那张结论直接可上面板。
+                    # 在 Python 里算好，不让 UI 自己遍历重算一遍（两处口径会飘）。
+                    "wall_only_types": sum(
+                        1 for _r in _cells.values()
+                        if _r["wall_only"] and int(_r["unseen"]) > 0),
+                    "wall_only_unseen": sum(
+                        int(_r["unseen"]) for _r in _cells.values() if _r["wall_only"]),
+                    "ok": ledger_ok,
+                    "violations": ledger_violations,
+                }
+
             tenpai_alert = None
             swap_advice = None
             defense_radar = []
@@ -4022,9 +4635,17 @@ class Engine:
                         for i in range(27)
                     ]
                     # 功能A：查大叫 / 查花猪生死避坑雷达
+                    # 牌墙真值优先取账本：`remaining` 是「未现总数」，里面还含着三家
+                    # 手上攥着的牌（川麻 3 家×10+ 张），拿它当牌墙会把警报整整晚一截 30 张
+                    # 才触发——末期该避险的时候面板还是一片绿。牌河稳固兜底回补过几张，
+                    # 就从账本牌墙里同量减掉（那几张已变成可见牌）。
+                    wall_for_alert = remaining
+                    if ledger_wall is not None:
+                        wall_for_alert = max(
+                            0, ledger_wall - max(0, sum(disc_counts_out) - sum(disc_counts)))
                     tenpai_alert = SichuanAnalyzer.check_tenpai_alert(
                         hand_counts_final[:27],
-                        tiles_remaining_in_wall=remaining,
+                        tiles_remaining_in_wall=wall_for_alert,
                         dingque_suit=dingque_suit,
                         pool_remaining=pool_rem_27,
                     )
@@ -4100,7 +4721,21 @@ class Engine:
                                 sh_cur, None, 0, pool_rem_27,
                                 opp_probs
                             )
-                            top_ev_gauge = WinEquityGauge.evaluate_gauge(eq)
+                            # 兜底仪表盘也必须带口径：这里的 eq 是纯解析式估值（PVN 不参与），
+                            # 事实字段取自 advice[0] 的账本听口结论——拿不到就不写，绝不编一个
+                            # 百分比充数（未标定数字当胜率展示是 B-P3 要消除的根治问题）。
+                            _fb_tc = advice[0].get("ting_chance") if isinstance(advice[0], dict) else None
+                            _fb_facts = []
+                            if isinstance(_fb_tc, dict) and _fb_tc.get("text"):
+                                _fb_facts.append(str(_fb_tc["text"]))
+                            _fb_dlevel = (top_danger_flow.get("danger_level")
+                                          if isinstance(top_danger_flow, dict) else None)
+                            top_ev_gauge = WinEquityGauge.evaluate_gauge(
+                                eq,
+                                basis="analytical",
+                                facts=_fb_facts,
+                                deal_in_level=_fb_dlevel,
+                            )
                             top_win_equity = eq
                         except Exception:
                             pass
@@ -4241,26 +4876,58 @@ class Engine:
                     except Exception:
                         pass
 
+            # ===== 听牌面板结论（牌局账本口径）=====
+            # advice[0] 里已带就直接用；engine 兜底推出口（上面那三段）时用同一份账本
+            # 补算，保证「听牌雷达卡片上的数字」与建议 reason 里的数字同源。两处数字
+            # 不一致比粗一点更糟：用户无从判断该信谁。
+            top_ting_chance = None
+            if advice and isinstance(advice[0], dict):
+                top_ting_chance = advice[0].get("ting_chance")
+            if top_ting_chance is None and ting_details and isinstance(self._ledger, dict):
+                try:
+                    from tile_ledger import ting_chance as _ledger_ting_chance
+                    _w_idx: List[int] = []
+                    for _td in ting_details:
+                        try:
+                            _w_idx.append(mpsz_to_tile34_index(str(_td.get("tile") or "")))
+                        except Exception:
+                            pass
+                    if _w_idx:
+                        top_ting_chance = _ledger_ting_chance(self._ledger, _w_idx)
+                except Exception:
+                    top_ting_chance = None
+
             # ===== 双策略路线推演（稳胡极速流 vs 大番收益流）=====
             fast_advice = None
             big_advice = None
             if advice:
-                # 稳胡极速流：向听数最小、进张最多
-                sorted_by_speed = sorted(advice, key=lambda a: (a.get("shanten", 2), -a.get("ukeire", 0)))
+                # 稳胡极速流：向听数最小、进张最多；同进张时走统一决胜链
+                sorted_by_speed = sorted(advice, key=lambda a: (
+                    a.get("shanten") if isinstance(a.get("shanten"), int) else 2,
+                    -int(a.get("ukeire") or 0)) + _tie_tail(a))
                 fast_top = sorted_by_speed[0]
+                # desc 优先走账本口径：已听牌时「进张 N 张」必须拆成牌墙/对手两部分，
+                # 与建议 reason、听牌雷达同源（同一个数字在两张卡片上不一样时，用户
+                # 无从判断该信谁）。
+                _ftc = fast_top.get("ting_chance")
+                # 无叫口可拆时（未听牌）不能写「进张 N 张」这种像事实的措辞：N 来自
+                # 未现牌计数，里面含了对手手上按住的牌。标成「至多」才是它的真实含义。
+                _fdesc = (str(_ftc.get("text") or "")
+                          if isinstance(_ftc, dict) and _ftc.get("text")
+                          else f"最快叫听 · 进张至多 {fast_top.get('ukeire', 0)} 张（含对手手上）")
                 fast_advice = {
                     "tile": fast_top.get("tile"),
                     "name": tile_to_chinese(fast_top.get("tile", "")),
                     "ukeire": fast_top.get("ukeire", 0),
                     "shanten": fast_top.get("shanten", 0),
                     "tag": "稳胡极速流",
-                    "desc": f"最快叫听 · 进张{fast_top.get('ukeire', 0)}张",
+                    "desc": _fdesc,
                     "defense_level": fast_top.get("defense_level", "SAFE"),
                     "defense_reason": fast_top.get("defense_reason", ""),
                 }
 
-                # 大番收益流：预期 EV / 番数最高
-                sorted_by_ev = sorted(advice, key=lambda a: -a.get("ev", 0.0))
+                # 大番收益流：预期 EV / 番数最高（同 EV 同样走决胜链，不靠枚举序）
+                sorted_by_ev = sorted(advice, key=lambda a: (-float(a.get("ev") or 0.0),) + _tie_tail(a))
                 big_top = sorted_by_ev[0]
                 if big_top.get("tile") != fast_top.get("tile"):
                     big_advice = {
@@ -4376,9 +5043,51 @@ class Engine:
                 except Exception:
                     pass
 
+            # ===== B-P4：最终顺序已定，补上「为什么是它 / 该不该换 / 摸什么会改」=====
+            # 必须在知识库重排之后、`result` 组装之前：名次文案与面板显示顺序同源于
+            # 这一步（见 annotate_advice_decisions 的层选择说明）。
+            #
+            # 先定主推再算名次：上方 `best = advice[0]` 是在知识库战术加权**之前**
+            # 定的，而下发给面板的列表是加权**之后**重排的。两者分叉时，面板会把
+            # 「建议打」钉在一个已被战术加权否掉的牌上（实测过：同 EV 候选里
+            # 【现物防守】+25 的牌升到首位，而 best 仍指旧首位）。定缺/换牌/选牌
+            # 三个阶段的 best 是阶段语义（缺门花色、换出顺序），不能跟着列表首位走。
+            if (advice and not (is_dq_phase or is_swap_phase or is_pick_phase)
+                    and isinstance(advice[0], dict) and advice[0].get("tile")):
+                best = str(advice[0]["tile"])
+            self._last_decision_stats = annotate_advice_decisions(advice, best)
+
+            # 双策略卡片（稳胡极速流/大番收益流）与主推之间也必须用同一口径说话：
+            # 它们走的是不同的主键（向听/进张 vs EV），不补这一句就是「两张卡各自
+            # 报一个牌，谁说不出差别」。措辞只声明事实（排名/等价），不声明优势：
+            # 大番流常常 EV 高于主推，写「主推优于它」就是假话（advantage_note 里有
+            # 「列在前面不是因为有评分优势」这条分支专门处理它）。本牌名写进前缀，
+            # 免得 note 里的「本牌」在别的卡片上被读成自己。
+            for _alt in (fast_advice, big_advice):
+                if not isinstance(_alt, dict) or not best:
+                    continue
+                if _alt.get("tile") == best:
+                    continue
+                _it = next((a for a in advice if isinstance(a, dict)
+                            and a.get("tile") == _alt.get("tile")), None)
+                _main = next((a for a in advice if isinstance(a, dict)
+                              and a.get("tile") == best), None)
+                if not isinstance(_it, dict) or not isinstance(_main, dict):
+                    continue
+                _n = _advantage_note(_main, _it)
+                _bn = tile_to_chinese(best)
+                _alt["main_compare"] = _n
+                _alt["advantage_reason"] = (
+                    (f"与主推「{_bn}」等价：" if _n.get("equivalent")
+                     else f"主推「{_bn}」排名更前：")
+                    + str(_n.get("note") or ""))
+
             result = {
                 "mode": self.mode,
                 "mode_name": MODES.get(self.mode, {}).get("name", self.mode),
+                # Java 侧 native 接管的路由判据（能力而非 key 前缀）：native 求解器
+                # 没有鬼牌概念且会丢弃所有 z 字牌，只有它能让当前玩法算对时才允许接管。
+                "native_ready": native_solver_ready(self.mode),
                 "platform": self.platform,
                 "platform_name": get_platform(self.platform).get("name", self.platform),
                 "knowledge_doctrine": getattr(self, "_last_doctrine", ""),
@@ -4402,6 +5111,13 @@ class Engine:
                     # 分阶段耗时（ms）：decode/detect/river/advice 各自 avg/max，
                     # 悬浮窗诊断行直接可见当前瓶颈段（跳帧帧不重跑，值不变）。
                     "perf": self._perf_snapshot(),
+                    # 牌局账本生成失败原因（None = 正常）。降级可以发生但必须可见：
+                    # 否则“听口文案退回旧口径”与“本来就没账本”在端上看起来一模一样。
+                    "ledger_error": (getattr(self.trainer, "ledger_error", None)
+                                     if self.trainer is not None else None),
+                    # B-P4 决策补全的接线体检：advantage/danger_hint/predraw 本该
+                    # 在非空 advice 上出现，计数为 0 就说明某一环断开了（而不是“没数据”）。
+                    "decisions": getattr(self, "_last_decision_stats", None),
                 },
                 "hand": hand_mpsz,
                 "count": tile_count,
@@ -4417,6 +5133,8 @@ class Engine:
                 "remaining": remaining,
                 "dead": dead,
                 "remaining_matrix": remaining_matrix,
+                "tile_ledger": tile_ledger_view,
+                "ting_chance": top_ting_chance,
                 "tenpai_alert": tenpai_alert,
                 "swap_advice": swap_advice,
                 "defense_radar": defense_radar,

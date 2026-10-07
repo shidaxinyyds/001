@@ -10,9 +10,13 @@
   * 通道 1: 牌河可见弃牌张数 (0..4)
   * 通道 2: 副露吃碰杠张数 (0..4)
   * 通道 3: 场上未见存活张数 (0..4)
-- 零死代码铁律：
-  * 策略头概率 π(t) 直接乘算融入出牌建议 EV 排序 (权重 30%)
-  * 价值头标量 v 直接融合进入全场胡牌胜率 Win Equity (权重 45%)
+- 训练状态（决定它有没有资格参与融合）：
+  权重来自 RandomState(42/43/44) 固定初始化 + 两条对角先验，**从未用任何对局数据训练**。
+  实测 400 副随机手牌：value 头输出恒落在 0.798~0.955（std 0.025），即 (v+1)/2 ≈ 0.93 的
+  近似常数——它不携带局面信息，融进胜率只会产生整体约 +0.42 的常数偏置（烂牌显示 85%）。
+  policy 头的对角先验是按「牌的索引顺序」给偏好，与牌理无关，只会在同分 tie 上乱序。
+  所以 trained=False，调用方（sichuan/sichuan_analyzer.py）默认完全不融合；
+  只有 load_trained_weights() 成功载入离线训练权重后 trained 才置 True 并恢复融合。
 """
 from __future__ import annotations
 import math
@@ -24,15 +28,53 @@ FEATURE_DIM = 136  # 4 channels * 34
 
 
 class PolicyValueNetwork:
-    """双头策略价值网络超轻量推理器 (纯向量化高性能实现，单次耗时 < 0.5ms)。"""
+    """双头策略价值网络超轻量推理器 (纯向量化高性能实现，单次耗时 < 0.5ms)。
+
+    注意：本类的权重目前是**未训练的固定初始化**，`trained` 为 False；任何想把它
+    的 π/v 融进决策或展示指标的调用方，都必须先检查 `trained`。
+    """
 
     _instance: Optional["PolicyValueNetwork"] = None
+
+    #: 权重是否来自离线训练产出。False = 固定随机初始化，禁止参与融合。
+    trained: bool = False
 
     @classmethod
     def get_instance(cls) -> "PolicyValueNetwork":
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
+
+    def load_trained_weights(self, path: str) -> bool:
+        """载入离线训练产出的权重并置 trained=True（唯一能开启融合的入口）。
+
+        .npz 需同时含 w1/b1/w_policy/b_policy/w_value/b_value 六项且形状与现有权重
+        严格一致；任一项缺失或形状不符都原样返回 False 且不改动任何权重，避免
+        「半套权重」被当成已训练模型用上（那比随机初始化更糟：形状对不上会静默
+        广播出错误激活）。
+        """
+        refs = {
+            "w1": self.w1, "b1": self.b1,
+            "w_policy": self.w_policy, "b_policy": self.b_policy,
+            "w_value": self.w_value, "b_value": self.b_value,
+        }
+        try:
+            data = np.load(path)
+        except Exception:
+            return False
+        loaded = {}
+        for name, ref in refs.items():
+            try:
+                arr = np.asarray(data[name], dtype=np.float32)
+            except Exception:
+                return False
+            if arr.shape != ref.shape:
+                return False
+            loaded[name] = arr
+        for name, arr in loaded.items():
+            setattr(self, name, arr)
+        self.trained = True
+        return True
 
     def __init__(self) -> None:
         # 基于麻将策略特征先验构建的双层网络权重

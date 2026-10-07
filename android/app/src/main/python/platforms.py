@@ -94,7 +94,17 @@ PLATFORMS: Dict[str, Dict] = {
         "supported_modes": [
             "gd_hz", "std_tdh", "hz_bd"
         ],
-        "default_mode": "gd_hz",
+        # 默认走**全牌**玩法，不再用 gd_hz（广东红中王）。实测依据（守卫
+        # localtest/test_mode_gate_guard.py ④）：gd_hz 的牌集是 range(27)+[33]，
+        # 字牌只有中(7z)，而本平台 15 帧素材里明摆着出现 東(1z)/西(3z)/發(6z)
+        # （localtest/gt/shots_b1.json）。默认玩法就是分类器打分前的牌集闸门
+        # （recognition/tencent_grid_detector.py::resolve_candidate_tiles），
+        # 挂着 gd_hz 时这些字牌在识别**之前**就被挤出候选，面板必然少字牌——
+        # 那正是「面板 84 / 网格 91」那 7 张差额的形状，不是识别退化。
+        # hz_bd 也是 34 全牌，但它把白板(5z)当百搭且「每用一张番数翻倍」，
+        # 用在广东雀神上等于把识别修好、把决策改错，故选无赖子的 std_tdh。
+        # 真打红中王的用户仍可在面板里显式选 gd_hz（保留在 supported_modes）。
+        "default_mode": "std_tdh",
     },
     "zj_sichuan": {
         "key": "zj_sichuan",
@@ -141,7 +151,9 @@ PLATFORMS: Dict[str, Dict] = {
         ),
         "supported_modes": [
             "sc_hz", "sc_xz", "sc_xl", "gy_zj", "std_tdh",
-            "wh_kk", "db_qh", "hz_bd", "gd_hz", "cs_zz"
+            "wh_kk", "db_qh", "hz_bd", "gd_hz", "cs_zz",
+            "wz_tdh", "hz_all", "fc_all", "zfb_bd", "pp_zz",
+            "mj_2p", "mj_3p", "hz_ne", "sc_xz_3p",
         ],
         "default_mode": "sc_hz",
     },

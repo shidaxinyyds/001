@@ -77,12 +77,27 @@ localtest/_tmp*
 localtest/_dbg*
 localtest/_*
 localtest/*.jsonl
+localtest/*.txt
 localtest/gt/
 localtest/river_vis/
 localtest/shots/
 localtest/shots_shushan/
 localtest/shots_tencent/
 localtest/shots_diag/
+localtest/shots_calib/
+localtest/shots_montage/
+localtest/shots_tuyou/
 localtest/harvest_shushan/
 localtest/yolo/staging/
+localtest/tiles_quarantine/
+localtest/tiles/jj/
+localtest/tiles/queshen/
+localtest/tiles/shushan/
+localtest/tiles/tencent/
+localtest/tiles/tuyou/
+localtest/tiles/weile/
+localtest/tiles/zj/
+public/
+null
+
 

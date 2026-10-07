@@ -7,8 +7,10 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:auto_vision/channel.dart';
 import 'package:auto_vision/debug_page.dart';
 import 'package:auto_vision/device_info_card.dart';
+import 'package:auto_vision/engine_snapshot.dart';
 import 'package:auto_vision/mode_store.dart';
 import 'package:auto_vision/platform_store.dart';
+import 'package:auto_vision/session_store.dart';
 import 'package:auto_vision/knowledge_page.dart';
 import 'package:auto_vision/license/license_service.dart';
 import 'package:auto_vision/license/license_status.dart';
@@ -44,6 +46,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String? selectedPlatform = GamePlatform.defaultPlatform;
   bool _platformReady = true;
 
+  // ===== 对局信息卡（平台搜索直达 + 游戏ID + 运势/好牌概率）=====
+  // 平台输入框不是"第二个平台真值"：它只是 selectedPlatform 的另一种输入法，
+  // 命中预设就调 _selectPlatform（与点卡片同一条路径），不命中就明确拒绝，
+  // 绝不让"框里写的"和"引擎在用的"变成两个平台。
+  final TextEditingController _platformCtrl = TextEditingController();
+  final TextEditingController _gameIdCtrl = TextEditingController();
+  String _platformNotice = '';
+  String _gameIdNotice = '';
+  // 「程序同步输入框」与「用户键入」共用一个 controller：不按住这个标志，
+  // 回填当前平台名会再触发一次 onChanged，形成自我回声。
+  bool _syncingField = false;
+  // 两个按钮的展开态：null = 都没展开
+  String? _oddsTab;
+
   // 悬浮窗→主 App 的回传订阅。必须持有并在 dispose 取消：旧实现只 listen
   // 不 cancel，页面每次被重建都叠加一个监听/或撞单订阅流报错，状态回传
   // 链路越用越卡甚至损坏。
@@ -61,6 +77,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         selectedPlatform = p;
         _platformReady = true;
       });
+      _syncPlatformField(p);
+    });
+
+    // 拉一次本机已存的游戏ID（持久化在 shared_preferences，重启不丢）
+    SessionStore.loadGameId().then((v) {
+      if (!mounted) return;
+      _setFieldText(_gameIdCtrl, v);
+      setState(() => _gameIdNotice = v.isEmpty ? '' : '已保存 $v');
     });
 
     // 拉一次当前玩法（来自 Java 写的共享文件，Python 引擎也读这个文件）
@@ -92,6 +116,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           });
         }
         return;
+      }
+      // 识别回传帧：喂给全局只读快照，主页「运势 / 好牌概率」两处按钮从这里取值。
+      // 关键：不在这里 setState——识别高峰期每帧整页重建正是"点什么都没反应"的
+      // 病根（教训见 _RecognitionStatusView 的局部订阅注释），这里只通知订阅了
+      // 快照的那一小块结果区。
+      if (event is Map && event['type'] == 'status') {
+        EngineSnapshot.instance.push(Map<String, dynamic>.from(event));
       }
       // 悬浮窗拖动态识别框：把 ROI 比例经主引擎 MethodChannel 转给 Java/引擎。
       // 注意：悬浮窗是独立 Flutter 引擎，它的 MethodChannel 到不了 MainActivity
@@ -166,6 +197,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _overlaySub?.cancel();
     _overlaySub = null;
+    _platformCtrl.dispose();
+    _gameIdCtrl.dispose();
     super.dispose();
   }
 
@@ -372,10 +405,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (!ok && mounted) {
       if (selectedPlatform != platform) return;
       setState(() => selectedPlatform = prev);
+      _syncPlatformField(prev ?? GamePlatform.defaultPlatform);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text('切换到 ${GamePlatform.label(platform)} 失败，请重试'),
       ));
     } else if (mounted) {
+      // 落地成功才把搜索框写成生效中的平台名：框里显示"想切的"而引擎在用
+      // "别的"，是这个输入框最坏的骗人方式。
+      _syncPlatformField(platform);
       final pInfo = GamePlatform.info(platform);
       if (pInfo != null && selectedMode != null) {
         if (!pInfo.supportedModes.contains(selectedMode)) {
@@ -383,6 +420,109 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         }
       }
     }
+  }
+
+  /// 把当前生效平台写回搜索框（程序写入，不触发用户输入分支）。
+  void _syncPlatformField(String platform) =>
+      _setFieldText(_platformCtrl, GamePlatform.label(platform));
+
+  /// 程序化写输入框：TextField 监听 controller，赋值同样会回调 onChanged，
+  /// 所以用标志按住——否则"回填平台名"会被当成用户又输入了一次，自我回声。
+  void _setFieldText(TextEditingController c, String v) {
+    if (c.text == v) return;
+    _syncingField = true;
+    c.value = TextEditingValue(
+      text: v,
+      selection: TextSelection.collapsed(offset: v.length),
+    );
+    _syncingField = false;
+  }
+
+  /// 在 8 个已支持预设里做模糊匹配（key / 名称 / 副标题 / 徽章都算）。
+  ///
+  /// 只做"找得到"的模糊，不做"猜一个"的模糊：认不出就返回 null，由 UI 明确拒绝。
+  /// 平台真值始终只有 selectedPlatform 一个，这个输入框是它的另一种输入法，
+  /// 不是第二个可写的地方。
+  GamePlatformInfo? _matchPlatform(String raw) {
+    final q = raw.trim().toLowerCase();
+    if (q.isEmpty) return null;
+    GamePlatformInfo? best;
+    int bestScore = 0;
+    for (final p in GamePlatform.allPlatforms) {
+      final cands = <String>[
+        p.key,
+        p.name.toLowerCase(),
+        p.subtitle.toLowerCase(),
+        p.badge.toLowerCase(),
+      ];
+      int s = 0;
+      for (final t in cands) {
+        if (t.isEmpty) continue;
+        if (t == q) {
+          s = 100;
+          break;
+        }
+        if (t.startsWith(q) || t.contains(q)) {
+          if (s < 60) s = 60;
+        } else if (q.contains(t)) {
+          if (s < 30) s = 30;
+        }
+      }
+      if (s > bestScore) {
+        bestScore = s;
+        best = p;
+      }
+    }
+    return bestScore >= 30 ? best : null;
+  }
+
+  void _onPlatformQueryChanged(String raw) {
+    if (_syncingField) return;
+    final q = raw.trim();
+    if (q.isEmpty) {
+      if (_platformNotice.isNotEmpty) setState(() => _platformNotice = '');
+      return;
+    }
+    final hit = _matchPlatform(q);
+    final notice = hit == null
+        ? '没有匹配的平台预设：${GamePlatform.allPlatforms.map((e) => e.name).join('、')}'
+        : '匹配到「${hit.name}」· 回车即切换';
+    if (notice != _platformNotice) setState(() => _platformNotice = notice);
+  }
+
+  void _onPlatformQuerySubmitted(String raw) {
+    if (_syncingField) return;
+    final hit = _matchPlatform(raw);
+    if (hit == null) {
+      if (raw.trim().isNotEmpty) {
+        setState(() => _platformNotice = '暂不支持该平台，请从上方预设选择');
+      }
+      return;
+    }
+    setState(() => _platformNotice = '已切换：${hit.name}');
+    if (hit.key != selectedPlatform) _selectPlatform(hit.key);
+  }
+
+  void _onGameIdChanged(String raw) {
+    if (_syncingField) return;
+    final v = SessionStore.normalize(raw);
+    final err = SessionStore.validate(v);
+    if (err != null) {
+      setState(() => _gameIdNotice = err);
+      return;
+    }
+    // 空串=清空：也必须落盘，否则下次进来还看得见上一局的旧 ID（残留比空白更骗人）。
+    SessionStore.saveGameId(v).then((ok) {
+      if (!mounted) return;
+      setState(() {
+        if (!ok) {
+          _gameIdNotice = '本地保存失败，请重试';
+        } else {
+          final cur = SessionStore.normalize(_gameIdCtrl.text);
+          _gameIdNotice = cur.isEmpty ? '' : '已保存 $cur';
+        }
+      });
+    });
   }
 
   @override
@@ -533,6 +673,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           children: [
             // 游戏平台预设快速切换栏
             _buildPlatformSelector(),
+            // 对局信息：平台搜索直达 / 游戏ID / 运势概率 · 好牌概率
+            _buildSessionCard(),
             // 分类切换栏
             _buildCategorySelector(),
             const SizedBox(height: AppTokens.s12),
@@ -612,6 +754,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         // 绝不拿着已销毁的 context 再 setState。
         if (!mounted) return;
         if (!opened) return; // 开窗失败：留在待命态，不假装“识别中”
+        // 新一轮识别 = 新的一局牌。上一帧的牌墙数字不属于这一局，留着让按钮
+        // 继续显示旧百分比，就是把旧数据当新数据卖。
+        EngineSnapshot.instance.clear();
         setProcessingState(true);
         setState(() => isProcessing = true);
       }
@@ -777,6 +922,212 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
           ],
         ],
+      ),
+    );
+  }
+
+  // 对局信息卡：平台搜索直达 + 游戏ID + 两个取数按钮（运势概率 / 好牌概率）。
+  // 版式借用参考图（左标签 + 右圆角输入框），配色一律走 AppTokens，不另起色值。
+  Widget _buildSessionCard() {
+    final cur = selectedPlatform ?? GamePlatform.defaultPlatform;
+    final pInfo = GamePlatform.info(cur);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: AppTokens.s12),
+      padding: const EdgeInsets.all(AppTokens.s14),
+      decoration: BoxDecoration(
+        color: AppTokens.surface,
+        borderRadius: BorderRadius.circular(AppTokens.r14),
+        border: Border.all(color: AppTokens.border, width: 0.9),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x06000000),
+            blurRadius: 5,
+            offset: Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.assignment_outlined,
+                  size: 17, color: AppTokens.brand),
+              const SizedBox(width: 7),
+              const Text(
+                '对局信息',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                  color: AppTokens.ink,
+                ),
+              ),
+              const Spacer(),
+              // 徽章只报"引擎正在用哪个平台"，与卡片选中态同一个真值。
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                decoration: BoxDecoration(
+                  color: AppTokens.brandContainer,
+                  borderRadius: BorderRadius.circular(AppTokens.r8),
+                ),
+                child: Text(
+                  pInfo != null ? pInfo.name : cur,
+                  style: const TextStyle(
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.bold,
+                    color: AppTokens.brandDark,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          _buildFieldRow(label: '游戏平台', field: _buildPlatformField()),
+          if (_platformNotice.isNotEmpty) ...[
+            const SizedBox(height: 5),
+            _buildNotice(_platformNotice),
+          ],
+          const SizedBox(height: 10),
+          _buildFieldRow(label: '游戏ID', field: _buildGameIdField()),
+          if (_gameIdNotice.isNotEmpty) ...[
+            const SizedBox(height: 5),
+            _buildNotice(_gameIdNotice),
+          ],
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(child: _buildOddsButton('mood')),
+              const SizedBox(width: 8),
+              Expanded(child: _buildOddsButton('tile')),
+            ],
+          ),
+          if (_oddsTab != null) ...[
+            const SizedBox(height: 10),
+            _OddsResultView(tab: _oddsTab!),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFieldRow({required String label, required Widget field}) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        SizedBox(
+          width: 62,
+          child: Text(
+            label,
+            style: const TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w600,
+              color: AppTokens.ink2,
+            ),
+          ),
+        ),
+        Expanded(child: field),
+      ],
+    );
+  }
+
+  InputDecoration _fieldDecoration(String hint) {
+    OutlineInputBorder line(Color c, double w) => OutlineInputBorder(
+          borderRadius: BorderRadius.circular(AppTokens.r10),
+          borderSide: BorderSide(color: c, width: w),
+        );
+    return InputDecoration(
+      isDense: true,
+      hintText: hint,
+      hintStyle: const TextStyle(fontSize: 12.5, color: AppTokens.faint),
+      filled: true,
+      fillColor: AppTokens.pillBg,
+      contentPadding:
+          const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      border: line(AppTokens.border, 0.8),
+      enabledBorder: line(AppTokens.border, 0.8),
+      focusedBorder: line(AppTokens.brand, 1.2),
+    );
+  }
+
+  Widget _buildNotice(String text) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 62),
+      child: Text(
+        text,
+        style: const TextStyle(
+          fontSize: 11,
+          color: AppTokens.muted,
+          height: 1.3,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPlatformField() {
+    return TextField(
+      controller: _platformCtrl,
+      textInputAction: TextInputAction.done,
+      onChanged: _onPlatformQueryChanged,
+      onSubmitted: _onPlatformQuerySubmitted,
+      style: const TextStyle(fontSize: 13, color: _kTextMain),
+      decoration: _fieldDecoration('请输入游戏平台'),
+    );
+  }
+
+  Widget _buildGameIdField() {
+    return TextField(
+      controller: _gameIdCtrl,
+      textInputAction: TextInputAction.done,
+      onChanged: _onGameIdChanged,
+      style: const TextStyle(fontSize: 13, color: _kTextMain),
+      // 字符集与本机存储上限在这里就拦住：让非法输入根本进不了控制器，
+      // 比"先收下再报错"少一次误导（Java 侧写文件时用的是同一条正则）。
+      inputFormatters: <TextInputFormatter>[
+        FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9_\-]')),
+        LengthLimitingTextInputFormatter(SessionStore.maxLen),
+      ],
+      decoration: _fieldDecoration('请输入游戏ID'),
+    );
+  }
+
+  Widget _buildOddsButton(String tab) {
+    final bool sel = _oddsTab == tab;
+    final bool mood = tab == 'mood';
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => setState(() => _oddsTab = sel ? null : tab),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        padding: const EdgeInsets.symmetric(vertical: 9),
+        decoration: BoxDecoration(
+          color: sel ? AppTokens.brandContainer : AppTokens.surface,
+          borderRadius: BorderRadius.circular(AppTokens.r10),
+          border: Border.all(
+            color: sel ? AppTokens.brand : AppTokens.border,
+            width: sel ? 1.4 : 0.9,
+          ),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              mood ? Icons.auto_awesome_rounded : Icons.percent_rounded,
+              size: 15,
+              color: sel ? AppTokens.brandDark : AppTokens.muted,
+            ),
+            const SizedBox(width: 5),
+            Text(
+              mood ? '运势概率' : '好牌概率',
+              style: TextStyle(
+                fontSize: 12.5,
+                fontWeight: sel ? FontWeight.bold : FontWeight.w500,
+                color: sel ? AppTokens.brandDark : AppTokens.ink,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1158,6 +1509,264 @@ class _RecognitionStatusViewState extends State<_RecognitionStatusView> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 「运势概率 / 好牌概率」结果区：只渲染最近一帧的引擎数据。
+///
+/// 订阅 EngineSnapshot（ChangeNotifier），每帧只重建这一小块，不整页 setState
+/// ——与 _RecognitionStatusView 同一个性能约束。
+///
+/// 两个按钮的口径差别是硬约束，不是样式选择：
+/// - **运势**：来源是未标定的模型估值，所以只出档位词（极优/较优/均势/承压）
+///   加引擎自带的 note，**这一项结构上就没有百分号**；
+/// - **好牌概率**：牌局账本里两个可逐张核对的整数相除，所以可以出百分号，
+///   但方向词（至少/至多）与分子分母必须同屏，用户能自己复算一遍。
+/// 没有帧数据时给空态并说明缺什么，绝不填 0%、也不把档位换成"中性"糊过去。
+class _OddsResultView extends StatelessWidget {
+  const _OddsResultView({Key? key, required this.tab}) : super(key: key);
+
+  final String tab;
+
+  // 配色只读 tier 三档词（Python `coarse_tier` 的投影），不在这里重算阈值。
+  static Color _inkFor(String tier) {
+    switch (tier) {
+      case '偏优':
+        return AppTokens.successDark;
+      case '中性':
+        return AppTokens.warn;
+      case '偏劣':
+        return AppTokens.danger;
+      default:
+        return AppTokens.muted;
+    }
+  }
+
+  static Color _bgFor(String tier) {
+    switch (tier) {
+      case '偏优':
+        return AppTokens.successBg;
+      case '中性':
+        return const Color(0xFFFFF7E6);
+      case '偏劣':
+        return const Color(0xFFFEF2F2);
+      default:
+        return AppTokens.pillBg;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: EngineSnapshot.instance,
+      builder: (BuildContext context, Widget? child) {
+        return Container(
+          padding: const EdgeInsets.all(AppTokens.s12),
+          decoration: BoxDecoration(
+            color: AppTokens.brandSoft,
+            borderRadius: BorderRadius.circular(AppTokens.r10),
+            border: Border.all(color: AppTokens.border, width: 0.8),
+          ),
+          child: tab == 'mood'
+              ? _moodBody(EngineSnapshot.instance)
+              : _tileBody(EngineSnapshot.instance),
+        );
+      },
+    );
+  }
+
+  Widget _moodBody(EngineSnapshot s) {
+    final MoodReadout m = s.mood;
+    if (!m.available) return _empty(m.reason);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: _bgFor(m.tier),
+                borderRadius: BorderRadius.circular(AppTokens.rPill),
+              ),
+              child: Text(
+                m.band,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.bold,
+                  color: _inkFor(m.tier),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                m.badge,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: AppTokens.ink2,
+                ),
+              ),
+            ),
+          ],
+        ),
+        if (m.desc.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          Text(
+            m.desc,
+            style: const TextStyle(
+              fontSize: 11.5,
+              color: AppTokens.muted,
+              height: 1.35,
+            ),
+          ),
+        ],
+        if (m.insight.isNotEmpty) ...[
+          const SizedBox(height: 5),
+          Text(
+            m.insight,
+            style: const TextStyle(
+              fontSize: 11,
+              color: AppTokens.ink2,
+              height: 1.35,
+            ),
+          ),
+        ],
+        const SizedBox(height: 7),
+        _footnote(m.note.isEmpty ? m.caliber : m.note),
+        _stamp(s),
+      ],
+    );
+  }
+
+  Widget _tileBody(EngineSnapshot s) {
+    final TileReadout t = s.goodTile;
+    if (!t.available) return _empty(t.missing);
+    final double? p = t.percent;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.baseline,
+          textBaseline: TextBaseline.alphabetic,
+          children: [
+            Text(
+              p == null ? '—' : '${t.boundWord} ${p.toStringAsFixed(1)}%',
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.w700,
+                color: p == null ? AppTokens.muted : AppTokens.brandDark,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                t.isLowerBound ? '下一摸推进牌型（保守估计）' : '下一摸推进牌型（乐观估计）',
+                style: const TextStyle(
+                  fontSize: 11.5,
+                  color: AppTokens.muted,
+                ),
+              ),
+            ),
+          ],
+        ),
+        if (t.formula.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          Text(
+            '${t.boundWord} ${t.numerator} 张可推进 ÷ 牌墙剩 ${t.denominator} 张',
+            style: const TextStyle(
+              fontSize: 11.5,
+              color: AppTokens.ink2,
+              height: 1.35,
+            ),
+          ),
+        ],
+        if (t.basis.isNotEmpty) ...[
+          const SizedBox(height: 5),
+          Text(
+            '依据：${t.basis}',
+            style: const TextStyle(
+              fontSize: 11,
+              color: AppTokens.muted,
+              height: 1.35,
+            ),
+          ),
+        ],
+        if (t.caveat.isNotEmpty) ...[
+          const SizedBox(height: 5),
+          Text(
+            t.caveat,
+            style: const TextStyle(
+              fontSize: 11,
+              color: AppTokens.warn,
+              height: 1.35,
+            ),
+          ),
+        ],
+        const SizedBox(height: 7),
+        _footnote('张数取自牌局账本，可与牌河逐张核对'),
+        _stamp(s),
+      ],
+    );
+  }
+
+  Widget _empty(String reason) {
+    return Row(
+      children: [
+        const Icon(Icons.hourglass_empty_rounded,
+            size: 15, color: AppTokens.faint),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            reason.isEmpty ? '开启识别后自动更新' : reason,
+            style: const TextStyle(
+              fontSize: 11.5,
+              color: AppTokens.muted,
+              height: 1.35,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _footnote(String text) {
+    return Row(
+      children: [
+        const Icon(Icons.info_outline_rounded,
+            size: 12, color: AppTokens.faint),
+        const SizedBox(width: 4),
+        Expanded(
+          child: Text(
+            text,
+            style: const TextStyle(
+              fontSize: 10.5,
+              color: AppTokens.faint,
+              height: 1.3,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 数据来自哪一刻要落款：识别关掉之后这里仍显示上一次的数字，
+  /// 没有时间戳就会把十分钟前的牌墙当成当前牌墙。
+  Widget _stamp(EngineSnapshot s) {
+    final String label = s.atLabel();
+    if (label.isEmpty) return const SizedBox.shrink();
+    final String tiles = s.tileCount > 0 ? ' · 手牌 ${s.tileCount} 张' : '';
+    return Padding(
+      padding: const EdgeInsets.only(top: 7),
+      child: Text(
+        '更新于 $label$tiles',
+        style: const TextStyle(fontSize: 10, color: AppTokens.faint),
       ),
     );
   }

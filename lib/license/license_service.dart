@@ -26,6 +26,10 @@ class LicenseService {
   static const String _kMaxWallMs = 'lic_max_wall_ms';
   // 服务器时间高水位（epoch 秒）：跨进程重启仍单调不回退，防重启后调时钟属滥用。
   static const String _kMaxServerNowS = 'lic_max_server_now_s';
+  // 防暴力穷举与安全锁定
+  static const String _kFailAttempts = 'lic_fail_attempts';
+  static const String _kLockoutUntilMs = 'lic_lockout_until_ms';
+  static const String _kTamperLocked = 'sec_tamper_locked';
   // 改时间回拨容忍窗口：比这个大得多的回拨视为篡改。
   static const int _rollbackTolS = 86400; // 1 天
   // 凭证到期后的网络宽限：宽限内 renew/心跳失败仍可离线用（最多 72 小时）。
@@ -111,11 +115,25 @@ class LicenseService {
   /// 当前服务器锚定时间（epoch 秒），供上层排到期精确定时器。
   int get serverNowSec => _effectiveNowSec();
 
+  /// 获取当前防爆破锁定剩余秒数（0 表示未锁定）
+  int get lockoutRemainingSeconds {
+    final until = _prefs?.getInt(_kLockoutUntilMs) ?? 0;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (until <= now) return 0;
+    return ((until - now) / 1000).ceil();
+  }
+
+  bool get isLockedOut => lockoutRemainingSeconds > 0;
+
+  /// 是否因篡改/非法攻击被底层永久拉黑
+  bool get isTamperLocked => _prefs?.getBool(_kTamperLocked) ?? false;
+
   // ===== 本地状态计算（不联网）=====
 
   LicenseToken? _loadToken() {
     final p = _prefs;
     if (p == null) return null;
+    if (p.getBool(_kTamperLocked) == true) return null;
     final stored = p.getString(_kToken) ?? '';
     if (stored.isEmpty) return null;
     return LicenseToken.parseAndVerify(
@@ -242,6 +260,10 @@ class LicenseService {
 
   Future<LicenseState> ensureUsable() async {
     await init();
+    if (isTamperLocked) {
+      return const LicenseState(LicenseStatus.refused,
+          message: '检测到运行环境异常或篡改攻击，设备已被安全熔断', isRevoked: true);
+    }
     final now = _serverNow();
     final tk = _loadToken();
     if (tk == null) {
@@ -302,6 +324,17 @@ class LicenseService {
 
   Future<LicenseState> activate(String code) async {
     await init();
+    if (isTamperLocked) {
+      return const LicenseState(LicenseStatus.refused,
+          message: '检测到运行环境异常或篡改攻击，设备已被安全熔断', isRevoked: true);
+    }
+
+    final remSec = lockoutRemainingSeconds;
+    if (remSec > 0) {
+      return LicenseState(LicenseStatus.refused,
+          message: '尝试过于频繁，安全冷却保护中（剩余 $remSec 秒）');
+    }
+
     final input = code.trim();
     if (input.isEmpty) {
       return const LicenseState(LicenseStatus.notActivated, message: '请输入卡密');
@@ -309,6 +342,9 @@ class LicenseService {
     final r = await _client.activate(deviceId, input);
     if (r.ok && r.token != null) {
       _noteServerTime(r.serverTime);
+      // 成功激活：重置连续输错计数与冷却时间
+      await _prefs?.setInt(_kFailAttempts, 0);
+      await _prefs?.setInt(_kLockoutUntilMs, 0);
       // 【必须落盘才算成功 v3】先确保证券真写进磁盘再返回成功：
       // 否则紧随其后的任何崩溃/杀进程都会把已激活设备打回“未激活”。
       await _saveToken(r.token!);
@@ -320,6 +356,26 @@ class LicenseService {
       return const LicenseState(LicenseStatus.notActivated,
           message: '网络连接失败，请稍后重试');
     }
+
+    // 失败惩罚：阶梯式防暴力穷举冷却惩罚
+    final fails = (_prefs?.getInt(_kFailAttempts) ?? 0) + 1;
+    await _prefs?.setInt(_kFailAttempts, fails);
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    int lockSeconds = 0;
+    if (fails >= 8) {
+      lockSeconds = 1800; // 连续输错 8 次锁定 30 分钟
+    } else if (fails >= 5) {
+      lockSeconds = 180; // 连续输错 5 次锁定 3 分钟
+    } else if (fails >= 3) {
+      lockSeconds = 30; // 连续输错 3 次锁定 30 秒
+    }
+
+    if (lockSeconds > 0) {
+      await _prefs?.setInt(_kLockoutUntilMs, nowMs + (lockSeconds * 1000));
+      return LicenseState(LicenseStatus.refused,
+          message: '连续输入错误 $fails 次，安全冷却中（剩余 $lockSeconds 秒）');
+    }
+
     return LicenseState(LicenseStatus.notActivated, message: _friendly(r.error));
   }
 
@@ -344,6 +400,10 @@ class LicenseService {
   /// 才继续放行；明确无效则立即硬锁；仅网络失败时走离线宽限（绝不因断网误锁）。
   Future<LicenseState> heartbeat() async {
     await init();
+    if (isTamperLocked) {
+      return const LicenseState(LicenseStatus.refused,
+          message: '检测到运行环境异常或篡改攻击，设备已被安全熔断', isRevoked: true);
+    }
     if (deviceId.isEmpty) {
       // 拿不到设备指纹：无法按设备心跳，退回本地判定（保 fail-open，绝不误锁正常用户）。
       return ensureUsable();

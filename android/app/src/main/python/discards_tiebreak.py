@@ -45,8 +45,12 @@ from __future__ import annotations
 
 from typing import Dict, List, Sequence, Tuple
 
+# 档位措辞只允许有一个源头（probability_bands 是叶子模块，不依赖任何层，
+# 顶层 import 不会把循环依赖引进决策链）。
+from probability_bands import danger_band
+
 __all__ = ["tile_flex_rank", "tie_tail", "order_key", "sort_discards",
-           "first_diff_layer"]
+           "first_diff_layer", "advantage_note"]
 
 # 牌面弹性：数牌 1/9 与字牌难以参与顺子，做搭子的改良空间最小。
 _FLEX_HONOR = 0
@@ -162,3 +166,125 @@ def first_diff_layer(a: Dict, b: Dict) -> str:
         if x != y:
             return _LAYERS[i] if i < len(_LAYERS) else f"layer{i}"
     return "完全同序"
+
+
+_FLEX_NAME = {_FLEX_HONOR: "字牌", _FLEX_TERMINAL: "幺九张", _FLEX_SIMPLE: "中张"}
+
+
+def _wall_lo(item: Dict) -> float:
+    """账本「至少在牌墙」张数（听口与进张两条路径都可能带）。"""
+    for key in ("ting_chance", "ukeire_chance"):
+        blk = item.get(key)
+        if isinstance(blk, dict):
+            v = blk.get("wall_lo_total")
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                return float(v)
+    return 0.0
+
+
+def _danger_word(item: Dict) -> str:
+    flow = item.get("danger_flow")
+    if isinstance(flow, dict):
+        band = flow.get("danger_band")
+        if band:
+            return str(band)
+        level = flow.get("danger_level")
+        if level:
+            return danger_band(str(level))
+    return "未定档"
+
+
+def advantage_note(a: Dict, b: Dict) -> Dict:
+    """说清「打 {a.tile} 为什么排在打 {b.tile} 前面」。
+
+    为什么不报 EV 差值（B-P4 空白 A 的设计约束）
+    -----------------------------------------
+    `ev` 是 `-1000*向听 + 进张 + 番数权重` 一类的**合成评分**（实测同帧候选差常见
+    1000/20/9 这种量级），单位既不是番也不是张。把它写成「优于对方 1.2 分」就是
+    B-P3 刚消除的伪量纲：看着精确，实际不可核对。本函数只说**能从账本/牌面
+    逐张核对的差额**（向听、未现上界、叫口门数、牌墙可摸、点炮档位、牌面弹性），
+    事实说不出时就诚实承认「模型评分更高（未标定）」；而主键与所有层都全等时，
+    结论就是「两张等价」——这比硬造一个不存在的优势对用户有用得多。
+
+    返回：`{layer, note, kind, equivalent}`；kind ∈ {fact, model}。
+    """
+    layer = first_diff_layer(a, b)
+    ta = str(a.get("tile") or "")
+    tb = str(b.get("tile") or "")
+    ea = _num(a, "ev")
+    eb = _num(b, "ev")
+    sa = int(_num(a, "shanten"))
+    sb = int(_num(b, "shanten"))
+    ua = int(_num(a, "ukeire"))
+    ub = int(_num(b, "ukeire"))
+    wa = len(a.get("ting_tiles") or [])
+    wb = len(b.get("ting_tiles") or [])
+
+    def _eq(note: str) -> Dict:
+        return {"layer": layer, "note": note, "kind": "fact", "equivalent": True}
+
+    # 两句等价文案都不再自己点名被比较的那张牌：调用方（engine 的
+    # `advantage_reason` / 双策略卡的 `main_compare`）已经用「与次选 X 等价：」这种
+    # 前缀把牌名说过一遍，note 里再说“与打X”就是冗余（面板只有一行宽）。
+    if layer == "完全同序":
+        return _eq("牌理、进张、安全全同，打哪张都不亏")
+    if layer == "索引兜底":
+        return _eq("牌理与安全全等，仅按固定顺序列前（无牌理依据）")
+
+    # 主键（EV）先分出名次的层：EV 本身不可解释，必须先去找它背后的事实。
+    if layer == "EV" and ea < eb:
+        # 排在前面却评分更低：名次不是评分给的，而是上层规则（主推取首/阶段固定
+        # 次序）给的。这时候写「评分更高」就是假的，必须直接说出它俩的评分关系。
+        return {"layer": layer, "kind": "model", "equivalent": False,
+                "note": f"列在前面不是因为有评分优势（本牌评分低于{tb}）"}
+    if sa < sb:
+        return {"layer": layer, "kind": "fact", "equivalent": False,
+                "note": f"比打{tb}少 {sb - sa} 向听（{sa} vs {sb}）"}
+    if sa == sb and ua > ub:
+        # ua/ub 都是「未现张数」上界（对手按住的也算），差值仍是上界之差，
+        # 所以带「上界」二字，不能写成「多 16 张机会」。
+        return {"layer": layer, "kind": "fact", "equivalent": False,
+                "note": f"同 {sa} 向听，未现进张上界多 {ua - ub} 张（{ua} vs {ub}）"}
+    if wa > wb:
+        return {"layer": layer, "kind": "fact", "equivalent": False,
+                "note": f"叫口多 {wa - wb} 门（{wa} vs {wb}），更难被一次弃牌打掉"}
+    if layer == "定缺门":
+        return {"layer": layer, "kind": "fact", "equivalent": False,
+                "note": "先断缺门：川麻不断门不能胡，缺门牌早晚都要打"}
+    if layer == "牌墙可摸":
+        va, vb = _wall_lo(a), _wall_lo(b)
+        if va > vb:
+            return {"layer": layer, "kind": "fact", "equivalent": False,
+                    "note": f"牌墙确实还能摸到 {int(va)} 张（比打{tb}多 {int(va - vb)} 张）"}
+    if layer == "防守安全":
+        ba, bb = _danger_word(a), _danger_word(b)
+        if ba == "未定档" or bb == "未定档":
+            # 候选没带 danger_flow（std 家族就是这样）：只说方向，不给人编一个档位名
+            return {"layer": layer, "kind": "model", "equivalent": False,
+                    "note": "点炮风险更低（未标定模型值，只用于同分裁决）"}
+        if ba != bb:
+            return {"layer": layer, "kind": "model", "equivalent": False,
+                    "note": f"点炮档位更低（{ba} vs {bb}，未标定模型值）"}
+        # 同一个档位里仍有高低（微危 0.012 vs 0.038）：这层确实分了名次，
+        # 但不得披上百分比。说“同档内更低”即可，数值留在 payload 里可查。
+        return {"layer": layer, "kind": "model", "equivalent": False,
+                "note": f"点炮同属{ba}档，本牌在档内风险更低（未标定，只用于同分裁决）"}
+    if layer == "牌面弹性":
+        fa = _FLEX_NAME.get(tile_flex_rank(ta), "中张")
+        return {"layer": layer, "kind": "fact", "equivalent": False,
+                "note": f"{fa}改良空间小，留在手上难成搭，先打它"}
+
+    # 知识库的战术加权是 EV 分层最常见的实际成因（实测：【现物防守】+25 把同
+    # 向听同进张的牌拉到首位）。规则名是可查的，加权的强度不是，所以 kind 给
+    # model，但文案必须把规则名说出来——只说“模型评分更高”等于什么都没解释。
+    tip_a = str(a.get("tactical_tip") or "")
+    tip_b = str(b.get("tactical_tip") or "")
+    if tip_a and tip_a != tip_b and _num(a, "tactical_ev_boost") > _num(b, "tactical_ev_boost"):
+        return {"layer": layer, "kind": "model", "equivalent": False,
+                "note": f"{tip_a}（知识库规则加权后评分更高；规则可查，评分未标定）"}
+
+    # 剩下的就是「EV 分了名次，但上面那些事实层都没分出来」：
+    # 可能是番数/副露/知识库加权的结果。说不出可核对的事实就直接承认，
+    # 比编一个似是而非的理由诚实。
+    return {"layer": layer, "kind": "model", "equivalent": False,
+            "note": "模型综合评分更高（内部评分，未经实战标定，只用于相对排序）"}

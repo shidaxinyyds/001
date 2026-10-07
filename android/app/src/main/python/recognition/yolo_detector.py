@@ -29,8 +29,22 @@ CLASSES = [
 MODEL_W = 640
 MODEL_H = 160
 
+# 空白条带护栏：detect_strip 把输入等比 letterbox 到全 0（纯黑）画布上，
+# 而 YOLO 在整幅纯黑输入上会凭空产出一批等间距高置信框（实测黑边竖屏
+# 截屏的 899x600 纯黑条带产出 5 个框，相应手牌 3p3p5p5p，conf 0.95，整帧报 status=ok）。
+# 实测喂进 detect_strip 的条带灰度>120 占比：纯黑条带 0.52%，而真条带最低
+# 7.8%（牌河）、手牌条带最低 34.1%（雀神定缺压暗帧）——0.52% 与 7.8% 之间
+# 取 2%，拦幻觉的余量 3.8 倍，误杀真条带的余量 3.9 倍。
+BLANK_STRIP_BRIGHT_FRAC = 0.02
+BLANK_STRIP_V = 120
+
 
 class YOLODetector(Detector):
+    # 模板覆盖层的放行线：classify_tile 的 ref_conf 高于此值才夺走 YOLO 标签。
+    # 与 __init__ 的 conf_thresh 是两回事（后者管"要不要这个框"，前者管
+    # "框里的牌信谁"），数值巧合相同，改一个不等于改另一个。
+    COVER_GATE = 0.40
+
     def __init__(self, model_path: Optional[str] = None, conf_thresh: float = 0.40, nms_thresh: float = 0.35):
         super().__init__({})
         self.conf_thresh = conf_thresh
@@ -96,6 +110,27 @@ class YOLODetector(Detector):
         else:
             print(f"[YOLODetector] Model file not found at: {model_path}")
 
+    def set_platform_styles(self, platform_key) -> None:
+        """把平台风格白名单转给手牌覆盖层用的模板分类器。
+
+        _phase_helper 是本类自己 new 的实例，外部拿不到，所以必须在这里转发——
+        否则手牌行的「等距节距重切 + 模板覆盖」仍会扫全 bank，雀神牌风会去
+        抢微乐/途游/JJ 的牌。
+        """
+        helper = getattr(self, "_phase_helper", None)
+        if helper is not None and hasattr(helper, "set_platform_styles"):
+            helper.set_platform_styles(platform_key)
+
+    def set_mode_tiles(self, avail) -> None:
+        """把当前玩法牌集转给手牌覆盖层用的模板分类器（同 set_platform_styles）。
+
+        本类的覆盖层调 classify_tile 时不传 avail（helper 自己 new 的，外部拿不到），
+        不转发则全牌玩法在这些调用点上永远读不到字牌。
+        """
+        helper = getattr(self, "_phase_helper", None)
+        if helper is not None and hasattr(helper, "set_mode_tiles"):
+            helper.set_mode_tiles(avail)
+
     def is_dingque_phase(self, image_bgr: np.ndarray) -> bool:
         if self._phase_helper is not None:
             return self._phase_helper.is_dingque_phase(image_bgr)
@@ -133,6 +168,15 @@ class YOLODetector(Detector):
         orig_h, orig_w = strip_bgr.shape[:2]
         if orig_h < 15 or orig_w < 30:
             return []
+
+        # 0. 空白裁片护栏（必须在推理前）：黑边/空桌面/全暗区域直接判“无牌”，
+        # 绝不允许把纯黑裁片喂给模型——它会在黑画布 letterbox 上臆造整排牌。
+        try:
+            _g = cv2.cvtColor(strip_bgr, cv2.COLOR_BGR2GRAY)[::4, ::4]
+            if _g.size and float(np.count_nonzero(_g > BLANK_STRIP_V)) / _g.size < BLANK_STRIP_BRIGHT_FRAC:
+                return []
+        except Exception:
+            pass
 
         # 1. Letterbox 等比缩放到 (MODEL_W, MODEL_H)
         canvas = np.zeros((MODEL_H, MODEL_W, 3), dtype=np.uint8)
@@ -256,6 +300,162 @@ class YOLODetector(Detector):
         detections.sort(key=lambda d: d[0][0])
         return detections
 
+    @staticmethod
+    def _pitch_consistent(tiles) -> bool:
+        """手牌排版是否真的等距（决定能不能按首尾框算 pitch 重切）。
+
+        有漏检或有牌被抬高时，相邻步进会成倍偏离中位；此时强行等距重切，
+        切出的每个 patch 都横跨两张牌，模板分类在垃圾输入上给出的标签
+        比 YOLO 自己的更差（途游帧 34 实测：步进中位 142px 而最大偏差
+        126px，补风格 bank 反而让命中从 4/12 掉到 2/12）。
+        半个步进的容差：真等距排版受检测抖动影响通常在 ±10px 量级。
+        """
+        xs = sorted(d[0][0] for d in tiles)
+        if len(xs) < 3:
+            return True
+        steps = [xs[i + 1] - xs[i] for i in range(len(xs) - 1)]
+        med = float(np.median(steps))
+        if med <= 0:
+            return False
+        return max(abs(s - med) for s in steps) <= med * 0.5
+
+    @staticmethod
+    def _slot_band(tiles, cx, fallback_top, fallback_bot):
+        """槽位的纵向范围：以本张框的中心为准，高度取该行中位。
+
+        重切只解决 x 方向的对齐；y 方向必须跟着每张牌自己的位置走，否则
+        一行里有牌抬高时，所有 patch 都会被包络撑高，牌面在 patch 里的
+        尺度与位置同时错位。
+        为何用中心而不是顶部：顶到中心这一半恰好抵消框自身的偏矮/偏高
+        （按顶部对齐时，一个偏矮的框会把牌底整块切掉；实测微乐帧 06 丢 1 张，
+        而按行中位高 + 顶部对齐又会让雀神帧 14 从 14/14 回退到 13/14）。
+        同一行牌物理等高，所以中位数是高度的稳定估计。
+        """
+        if not tiles:
+            return fallback_top, fallback_bot - fallback_top
+        hs = sorted(d[0][3] for d in tiles)
+        med_h = int(hs[len(hs) // 2])
+        best, bd = tiles[0][0], 1 << 30
+        for d in tiles:
+            x, y, w, _h = d[0]
+            dist = abs(x + w / 2.0 - cx)
+            if dist < bd:
+                bd, best = dist, d[0]
+        cy = best[1] + best[3] // 2
+        return cy - med_h // 2, med_h
+
+    def _classify_slots(self, image, tiles, face_mask):
+        """不等距手牌行的判读：逐张原框分类 + 在异常步进处补出漏检的槽。
+
+        为何必须补槽：途游帧 34/36 物理各 14 张，YOLO 只出 12 框，而所有框
+        conf 都在 0.95~1.00、框宽无异常，把 conf_thresh 从 0.40 一路降到 0.20
+        检出数纹丝不动——所以漏检不是置信度问题，而是抬高牌（摸牌位/杠后
+        补牌位）位置上根本没有 proposal。分类器再准也读不到没切出来的牌。
+        实测补槽让帧 34 从 3/14 升到 9/14、帧 36 从 5/14 升到 10/14。
+
+        两条约束各自来自一次失败尝试：
+          * 只做「局部插空」，原框一律保留。曾用单一 pitch 重排整行，把本来
+            正确的帧 40 从 11/12 崩到 5/12——抬高区与立牌区的间距本来就不等，
+            用全局 pitch 外推必漂。
+          * 步进一律用**框中心**差。用起点差时帧 40 被误插成 14 槽（物理只有
+            13 张）：它最左一枚带「赖」角标、框宽 206 而其它约 150，起点步进
+            被抻到 197 而触发。中心差对框宽抖动免疫（帧 40 降到 173=1.27x
+            不触发，而真漏检的 259/228/242 仍是 1.8x/1.6x/1.8x 照常触发）。
+        """
+        if not tiles:
+            return []
+        order = sorted(tiles, key=lambda d: d[0][0])
+        centers = [d[0][0] + d[0][2] / 2.0 for d in order]
+        if len(centers) >= 3:
+            csteps = sorted(centers[i + 1] - centers[i] for i in range(len(centers) - 1))
+            pitch = csteps[len(csteps) // 2]
+        else:
+            pitch = float(np.median([d[0][2] for d in order]))
+        if pitch <= 0:
+            return list(order)
+
+        y_top_s = min(d[0][1] for d in order)
+        y_bot_s = max(d[0][1] + d[0][3] for d in order)
+
+        # 牌面占比闸门：步进大既可能是“漏检了一张牌”，也可能是“相邻框向外扩
+        # 造成的假空档”。前者插入点真的盖着牌面（低饱和高亮度），后者是桌布。
+        # 实测这道闸门单独不够用（帧 40 的误插点落在真牌上），所以它只是中心
+        # 步进判据的第二道防线，不能反过来拿它当主判据。
+        def face_ratio(cx):
+            a = max(0, int(cx - pitch / 2))
+            b = min(face_mask.shape[1], int(cx + pitch / 2))
+            return float(face_mask[:, a:b].mean()) if b > a else 0.0
+
+        rr = sorted(face_ratio(c) for c in centers)
+        ref_med = rr[len(rr) // 2] if rr else 0.0
+
+        plan = []  # (cx, filled, src_rect, yolo_lbl, yolo_conf)
+        for i, c in enumerate(centers):
+            plan.append((c, False, order[i][0], order[i][1], order[i][2]))
+            if i + 1 >= len(centers):
+                continue
+            step = centers[i + 1] - c
+            k = int(round(step / pitch)) - 1
+            # 只在步进明显过大（≥ 1.45x）时补槽，避免把正常抖动当漏检
+            if k < 1 or step < 1.45 * pitch:
+                continue
+            for j in range(1, k + 1):
+                cx = c + step * j / (k + 1.0)
+                if ref_med > 0.05 and face_ratio(cx) < 0.6 * ref_med:
+                    continue
+                plan.append((cx, True, None, None, 0.0))
+
+        scored = []  # (rect, lbl, conf, filled)
+        for cx, filled, src_rect, yolo_lbl, yolo_conf in plan:
+            if not filled:
+                # 原框槽：切法与原逐张兜底**完全一致**。补槽是新增能力，
+                # 不该顺手改掉已有槽的切法。两个轴上试过“顺便修一下”，都是负的：
+                #   * 横向改中心对齐：帧 40（本来就没漏检）11/12 → 9/12，
+                #     右侧抬高区的间距大于行 pitch；
+                #   * 纵向改 _slot_band：帧 40 再跌到 5/12，而行中位高对抬高
+                #     牌偏矮会把牌面切掉；换来的只是帧 36 的 +1。
+                # 原则：只对“本来读不到”的槽新增能力，不动已经能读的槽。
+                rx, ry, rw, rh = src_rect
+                patch = image[ry:ry + rh, rx:rx + rw]
+                if patch.size == 0:
+                    scored.append((src_rect, yolo_lbl, yolo_conf, False))
+                    continue
+                ref_lbl, ref_conf = self._phase_helper.classify_tile(patch)
+                lbl = ref_lbl if (ref_lbl and ref_conf and ref_conf >= self.COVER_GATE) else yolo_lbl
+                scored.append((src_rect, lbl, max(yolo_conf, ref_conf or 0.0), False))
+                continue
+            # 补出来的槽：没有自己的框，只能按几何中心切
+            x1 = max(0, int(round(cx - pitch / 2)))
+            x2 = int(round(cx + pitch / 2))
+            sy, sh = self._slot_band(order, cx, y_top_s, y_bot_s)
+            patch = image[sy:sy + sh, x1:x2]
+            if patch.size == 0:
+                continue
+            ref_lbl, ref_conf = self._phase_helper.classify_tile(patch)
+            # 补出来的槽没有 YOLO 兜底：模板不达标就整槽丢弃。给一个
+            # 没证据的标签比承认这里读不到更糟——它会污染引擎的同牌计数
+            # 与后续推荐。
+            if ref_lbl and ref_conf and ref_conf >= self.COVER_GATE:
+                scored.append(((x1, sy, x2 - x1, sh), ref_lbl, float(ref_conf), True))
+
+        # 补槽后必须复查同牌数：多插的槽可能与相邻框盖住同一张牌，而引擎的
+        # 物理守卫是“同牌 >4 就整手拒绝”——那样补槽反而让这一手彻底读不出来。
+        # 必须先用原框槽建立基线计数，再逐个决定插槽：插槽在序列里落在中间，
+        # 单遍累加会让后面的原框槽把计数推过 4（实测测出一个这样的错）。
+        # 原框槽一律保留，只回滚补出来的槽。
+        counts = {}
+        for rect, lbl, conf, filled in scored:
+            if lbl and not filled:
+                counts[lbl] = counts.get(lbl, 0) + 1
+        out = []
+        for rect, lbl, conf, filled in scored:
+            if lbl and filled and counts.get(lbl, 0) >= 4:
+                continue
+            if lbl:
+                counts[lbl] = counts.get(lbl, 0) + 1
+            out.append((rect, lbl, conf))
+        return out
+
     def detect_all_rows(self, image: CVImage, classify: bool = True, allow_rotation: bool = False, allow_retry: bool = False, **kwargs) -> List[List[Tuple[Rect, Optional[str], float]]]:
         """扫描全图，检出手牌行与牌河各行。"""
         if image is None or image.size == 0 or not self.is_available:
@@ -287,6 +487,28 @@ class YOLODetector(Detector):
         hand_crop = image[y_top:y_bot, x_left:x_right]
         hand_tiles = self.detect_strip(hand_crop, offset_x=x_left, offset_y=y_top)
 
+        # 手牌行会圈进自家牌河/被换出的弃牌：残局手牌少的时候尤其明显。
+        # 用“牌高 / 行高中位数”筛：实测途游帧 41 右侧两张弃牌只有 0.70/0.72，
+        # 而真被抬高的摸牌最矮也有 0.87（帧 34），两者之间有清晰空隙。
+        # 摸牌只是整体上移、牌高不变，所以这条判据不会误伤它。
+        # 反例同样记下：微乐帧 10 混进来的弃牌与立牌同高、同距（h 完全相等），
+        # 这条判据对它无效——那种牌桌态只能靠上游 ROI，不在几何上强求。
+        if len(hand_tiles) >= 4:
+            hs = sorted(d[0][3] for d in hand_tiles)
+            h_med = hs[len(hs) // 2]
+            kept = [d for d in hand_tiles if d[0][3] >= 0.78 * h_med]
+            if len(kept) >= 2:
+                hand_tiles = kept
+
+        # 拿不到 label 的框（检出了位置但分类器给不出牌面）不该留在手牌输出里：
+        # 实测微乐帧 01 混进来的 2 张弃牌就是这种（rect 存在、label 为空）。
+        # 它们会让 count 与真实张数脱节，还会参与后面的等距判定与补槽步进，
+        # 把几何判据带偏。保留“至少 2 张”的下限：全行都读不到时应当整行作废
+        # 走多帧确认，而不是只剩一张牌去凑一手。
+        labelled = [d for d in hand_tiles if d[1]]
+        if len(labelled) >= 2:
+            hand_tiles = labelled
+
         if hand_tiles:
             k = len(hand_tiles)
             has_drawn = False
@@ -300,8 +522,8 @@ class YOLODetector(Detector):
                     if diffs[-1] > max(15.0, median_w * 0.25):
                         has_drawn = True
 
-            # 物理节距精密对齐与分类校准
-            if self._phase_helper is not None and k >= 2:
+            # 物理节距精密对齐与分类校准（仅在排版确实等距时）
+            if self._phase_helper is not None and k >= 2 and self._pitch_consistent(hand_tiles):
                 standing_count = k - 1 if has_drawn else k
                 standing_tiles = hand_tiles[:standing_count]
                 x_start = standing_tiles[0][0][0]
@@ -316,12 +538,18 @@ class YOLODetector(Detector):
                 for i in range(standing_count):
                     x1 = int(round(x_start + i * pitch))
                     x2 = int(round(x_start + (i + 1) * pitch))
-                    patch = image[y_top_s:y_bot_s, x1:x2]
+                    # 纵向范围逐张取，不用整行包络：包络只在“桌布是绿色”时
+                    # 安全（extract_face 能把背景剔掉）。牌被抬高时包络会把
+                    # 背景一并塞进 patch，而非绿桌布（JJ 蓝紫）下背景抠不掉，
+                    # 牌在 patch 里只剩 150/197 高，尺度错位把万子读成 9p/2z
+                    # （帧 30 实测：两路都在同样位置给同样的错）。
+                    sy, sh = self._slot_band(standing_tiles, (x1 + x2) // 2, y_top_s, y_bot_s)
+                    patch = image[sy:sy + sh, x1:x2]
                     ref_lbl, ref_conf = self._phase_helper.classify_tile(patch)
-                    rect = (x1, y_top_s, x2 - x1, y_bot_s - y_top_s)
+                    rect = (x1, sy, x2 - x1, sh)
                     yolo_lbl = standing_tiles[i][1]
                     yolo_conf = standing_tiles[i][2]
-                    lbl = ref_lbl if (ref_lbl and ref_conf and ref_conf >= 0.40) else yolo_lbl
+                    lbl = ref_lbl if (ref_lbl and ref_conf and ref_conf >= self.COVER_GATE) else yolo_lbl
                     conf = max(yolo_conf, ref_conf or 0.0)
                     calibrated.append((rect, lbl, conf))
 
@@ -331,21 +559,15 @@ class YOLODetector(Detector):
                     dx, dy, dw, dh = d_rect
                     patch_d = image[dy:dy+dh, dx:dx+dw]
                     ref_d_lbl, ref_d_conf = self._phase_helper.classify_tile(patch_d)
-                    d_lbl = ref_d_lbl if (ref_d_lbl and ref_d_conf and ref_d_conf >= 0.40) else d_yolo_lbl
+                    d_lbl = ref_d_lbl if (ref_d_lbl and ref_d_conf and ref_d_conf >= self.COVER_GATE) else d_yolo_lbl
                     calibrated.append((d_rect, d_lbl, max(d_yolo_conf, ref_d_conf or 0.0)))
                     self.last_drawn_tile = d_lbl
 
                 hand_tiles = calibrated
             elif self._phase_helper is not None:
-                # 兜底单张
-                calibrated = []
-                for (rect, yolo_lbl, conf) in hand_tiles:
-                    rx, ry, rw, rh = rect
-                    patch = image[ry:ry+rh, rx:rx+rw]
-                    ref_lbl, ref_conf = self._phase_helper.classify_tile(patch)
-                    lbl = ref_lbl if (ref_lbl and ref_conf and ref_conf >= 0.40) else yolo_lbl
-                    calibrated.append((rect, lbl, max(conf, ref_conf or 0.0)))
-                hand_tiles = calibrated
+                # 守卫不通过（有漏检或抬高导致不等距）时的路径：逐张用各自原框
+                # 判读，并在异常步进处把漏检的槽补回来。
+                hand_tiles = self._classify_slots(image, hand_tiles, mask)
 
         rows = []
         if hand_tiles:

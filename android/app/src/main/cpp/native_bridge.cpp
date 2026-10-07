@@ -2,6 +2,9 @@
 #include <string>
 #include <sstream>
 #include <memory>
+#include <cstdio>
+#include <cstring>
+#include <ctime>
 #include <android/log.h>
 
 #include "sichuan_solver.h"
@@ -15,6 +18,54 @@
 static std::unique_ptr<mahjong::TileMemory> g_memory;
 static std::unique_ptr<mahjong::GameFSM> g_fsm;
 static int g_dingque_suit = -1;
+
+static bool is_native_environment_safe() {
+    static long s_last_check_ms = 0;
+    static bool s_cached_safe = true;
+    
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    long now_ms = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    if (now_ms - s_last_check_ms < 5000) {
+        return s_cached_safe;
+    }
+    s_last_check_ms = now_ms;
+
+    // 1. TracerPid 检测底层 GDB/LLDB/IDA Pro 调试器附加
+    FILE* fp = fopen("/proc/self/status", "r");
+    if (fp) {
+        char line[256];
+        while (fgets(line, sizeof(line), fp)) {
+            if (strncmp(line, "TracerPid:", 10) == 0) {
+                int pid = 0;
+                if (sscanf(line + 10, "%d", &pid) == 1 && pid > 0) {
+                    fclose(fp);
+                    s_cached_safe = false;
+                    return false;
+                }
+                break;
+            }
+        }
+        fclose(fp);
+    }
+
+    // 2. /proc/self/maps 内存映射扫描 Frida / Xposed 注入模块
+    FILE* fmaps = fopen("/proc/self/maps", "r");
+    if (fmaps) {
+        char mline[512];
+        while (fgets(mline, sizeof(mline), fmaps)) {
+            if (strstr(mline, "frida-agent") || strstr(mline, "frida-gadget") || strstr(mline, "libfrida")) {
+                fclose(fmaps);
+                s_cached_safe = false;
+                return false;
+            }
+        }
+        fclose(fmaps);
+    }
+
+    s_cached_safe = true;
+    return true;
+}
 
 extern "C" {
 
@@ -78,6 +129,11 @@ Java_com_example_auto_vision_NativeEngine_nativeEvaluate(
     jboolean is_dq,
     jboolean is_table
 ) {
+    if (!is_native_environment_safe()) {
+        LOGE("Native security integrity check failed. Halting evaluation.");
+        return env->NewStringUTF("{\"status\":\"error\",\"message\":\"Security integrity violated\"}");
+    }
+
     if (!g_memory || !g_fsm) {
         return env->NewStringUTF("{\"status\":\"error\",\"message\":\"Engine not initialized\"}");
     }

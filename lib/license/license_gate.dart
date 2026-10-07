@@ -31,6 +31,7 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
   bool _busy = false;
   Timer? _timer;
   Timer? _expiryTimer;
+  Timer? _lockoutTimer;
   // 心跳在飞标志：防 resume/轮询/到期复核多路触发叠乘，也封死任何
   // “守卫→排程→再心跳”的自递归风暴。
   bool _refreshInFlight = false;
@@ -52,6 +53,7 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _timer?.cancel();
     _expiryTimer?.cancel();
+    _lockoutTimer?.cancel();
     _code.dispose();
     super.dispose();
   }
@@ -187,12 +189,29 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
       _state = st;
       _busy = false;
     });
+    if (LicenseService.instance.isLockedOut) {
+      _startLockoutTimer();
+    }
     if (st.allowsUsage) {
       _code.clear();
       // 激活成功后立即排定到期复核（短卡到期即时退回激活页），与 _refresh 一致，
       // 不再等下一次 30 分钟轮询。
       _scheduleExpiryCheck(st);
     }
+  }
+
+  void _startLockoutTimer() {
+    _lockoutTimer?.cancel();
+    _lockoutTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) {
+        t.cancel();
+        return;
+      }
+      if (!LicenseService.instance.isLockedOut) {
+        t.cancel();
+      }
+      setState(() {});
+    });
   }
 
   @override
@@ -213,7 +232,10 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
   }
 
   Widget _activationScreen(LicenseState? st) {
+    final int remLock = LicenseService.instance.lockoutRemainingSeconds;
+    final bool isLocked = remLock > 0;
     // 提示文案只反映真实状态，绝不拿"已到期"兜底吓用户：
+    //  - 冷却锁定：防爆破惩罚倒计时；
     //  - licenseExpired：签名内 expires_at 真到达（或服务器确认到期）才说"已到期"；
     //  - refused：服务端拉黑/换设备/篡改等，逐条显示服务端的拒因原文；
     //  - 其它（未激活/激活失败）：只是请用户输入卡密，不提任何到期字样。
@@ -221,7 +243,9 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
     final bool isExpired = status == LicenseStatus.licenseExpired;
     final bool isRefused = status == LicenseStatus.refused;
     final String prompt;
-    if (isExpired) {
+    if (isLocked) {
+      prompt = '输错次数过多，安全冷却保护中（剩余 $remLock 秒）';
+    } else if (isExpired) {
       prompt = '卡密授权已到期，请输入新卡密激活';
     } else if (isRefused) {
       prompt = st?.message ?? '授权校验未通过，请重新输入卡密激活';
@@ -292,7 +316,7 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
                       const SizedBox(height: AppTokens.s24),
                       TextField(
                         controller: _code,
-                        enabled: !_busy,
+                        enabled: !_busy && !isLocked,
                         autocorrect: false,
                         enableSuggestions: false,
                         textCapitalization: TextCapitalization.characters,
@@ -335,9 +359,9 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
                       SizedBox(
                         height: 50,
                         child: FilledButton(
-                          onPressed: _busy ? null : _activate,
+                          onPressed: (_busy || isLocked) ? null : _activate,
                           style: FilledButton.styleFrom(
-                            backgroundColor: AppTokens.brand,
+                            backgroundColor: isLocked ? AppTokens.borderStrong : AppTokens.brand,
                             foregroundColor: Colors.white,
                             shape: RoundedRectangleBorder(
                                 borderRadius: AppTokens.radius12),
@@ -348,8 +372,8 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
                                   height: 22,
                                   child: CircularProgressIndicator(
                                       strokeWidth: 2.5, color: Colors.white))
-                              : const Text('激活',
-                                  style: TextStyle(
+                              : Text(isLocked ? '安全冷却中 (${remLock}s)' : '激活',
+                                  style: const TextStyle(
                                       fontSize: 16,
                                       fontWeight: FontWeight.w700)),
                         ),

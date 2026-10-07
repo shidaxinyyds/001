@@ -153,6 +153,12 @@ class TestPolicyValueNetwork(unittest.TestCase):
         self.assertAlmostEqual(policy[0] + policy[1], 1.0, places=4)
 
     def test_integration_in_sichuan_analyzer(self):
+        """默认态（权重未训练）：PVN 必须完全不参与决策与胜率。
+
+        旧断言 `policy_prob > 0` 锁的是「未训练网络也在抬高指标」这个 bug 本身，
+        故按真实契约重写：开关关着时 policy 项恒 0、胜率逐字等于解析式、排序由
+        解析式 EV 决定。
+        """
         counts = [0] * 28
         # 手牌 123m 456m 789m 123p 55p
         for t in range(9):
@@ -161,17 +167,64 @@ class TestPolicyValueNetwork(unittest.TestCase):
             counts[t] = 1
         counts[13] = 2  # 5p 对子
 
+        self.assertFalse(self.pvn.trained, "固定初始化权重不得标记为已训练")
+
         results = SichuanAnalyzer.analyze_discards(counts)
         self.assertTrue(results, "应生成有效建议")
         top = results[0]
-        # 断言所有核心新功能字段均被消费且非空！
-        self.assertIn("danger_flow", top)
-        self.assertIn("policy_prob", top)
-        self.assertIn("win_equity", top)
-        self.assertIn("ev_gauge", top)
-        self.assertGreater(top["policy_prob"], 0.0)
-        self.assertGreater(top["win_equity"], 0.0)
+        # 核心字段均存在且口径正确
+        for k in ("danger_flow", "policy_prob", "win_equity", "ev_gauge",
+                  "pvn_used", "analytical_equity"):
+            self.assertIn(k, top)
         self.assertIsNotNone(top["ev_gauge"])
+        for r in results:
+            self.assertFalse(r["pvn_used"], "未训练时不得标记为已融合")
+            self.assertEqual(r["policy_prob"], 0.0, "policy 项必须归零，不得向 EV 注入伪偏好")
+            self.assertAlmostEqual(r["win_equity"], r["analytical_equity"], places=3,
+                                   msg="胜率必须回到纯解析式区间")
+            self.assertGreaterEqual(r["win_equity"], 0.0)
+            self.assertLessEqual(r["win_equity"], 1.0)
+        evs = [r["ev"] for r in results]
+        self.assertEqual(evs, sorted(evs, reverse=True), "排序必须由解析式 EV 给出")
+
+    def test_trained_switch_really_gates(self):
+        """变异检验：把 trained 拨成 True，PVN 必须立刻回到融合路径。
+
+        这条测试专门防止开关被写成「两边都不生效」的死代码：若摘掉权重后
+        再也没人能把它打开，那等于 PVN 永远只是个装饰；若打开后胜率纹丝不动，
+        则融合已接错线。两种错法都会被下面的断言抓住。
+        """
+        counts = [0] * 28
+        for t in range(9):
+            counts[t] = 1
+        for t in range(9, 12):
+            counts[t] = 1
+        counts[13] = 2
+
+        baseline = SichuanAnalyzer.analyze_discards(counts)
+        self.assertTrue(baseline)
+        try:
+            self.pvn.trained = True
+            fused = SichuanAnalyzer.analyze_discards(counts)
+        finally:
+            self.pvn.trained = False
+        self.assertTrue(fused)
+        top = fused[0]
+        self.assertTrue(top["pvn_used"], "trained=True 后必须重新参与融合")
+        self.assertGreater(top["policy_prob"], 0.0)
+        # 常数偏置必须体现为胜率抬高（这正是 P0 摘掉的那 ~+0.4）。按牌对齐，
+        # 不能按位置 zip：加了 policy 项后两侧排序本身就会不同。
+        base_map = {r["tile"]: r["win_equity"] for r in baseline}
+        bias = [r["win_equity"] - base_map[r["tile"]]
+                for r in fused if r["tile"] in base_map]
+        self.assertGreaterEqual(len(bias), 3, "候选牌应能按牌对齐")
+        self.assertTrue(all(d > 0.05 for d in bias),
+                        msg=f"旧融合应显著抬高胜率，实测 {bias[:4]}")
+        # 关掉后必须逐字回到基线（幂等，不因多次调用累计污染）
+        again = SichuanAnalyzer.analyze_discards(counts)
+        self.assertEqual([r["win_equity"] for r in again],
+                         [r["win_equity"] for r in baseline],
+                         msg="恢复开关后胜率必须逐字回到基线")
 
 
 if __name__ == "__main__":

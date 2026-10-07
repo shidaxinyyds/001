@@ -471,8 +471,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // 收起态 = 悬浮按钮；展开态 = 分析面板（可自由缩放）
   bool panelVisible = false;
 
-  // 当前玩法：悬浮窗写入共享文件，Python 引擎每帧读取。默认川麻。
-  String selectedMode = 'sc';
+  // 当前玩法：悬浮窗写入共享文件，Python 引擎每帧读取。默认值只从 GameMode.defaultMode
+  // 取（与 Python modes.DEFAULT_MODE 同一条）：这里曾写死 'sc'，而 'sc' 经别名解析是
+  // sc_xz（108 张无字），与真默认 sc_hz（112 张带红中）不同，导致首帧数据到达前
+  // 面板按 wall=108 显示剩余牌数、标题显示另一个玩法。
+  String selectedMode = GameMode.defaultMode;
 
   List<dynamic> _shownAdvice = const [];
   String _shownBest = '';
@@ -484,7 +487,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   static const double _kCapsuleH = 38;
   // 9x3 剩余牌矩阵面板折叠态：默认折叠，弹窗小巧简约不眼花
   bool _matrixExpanded = false;
-  // 悬浮窗内 10 种玩法切换菜单展开态
+  // 悬浮窗内玩法切换菜单展开态
   bool _showModeSelector = false;
 
   void _selectMode(String key) {
@@ -528,11 +531,18 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
   // ── 授权自守护（悬浮窗子引擎用 device_id 直连服务器心跳，到期即自锁）──
   bool _licenseAllows = false; // 悲观默认，必须经过权威验签通过后方可放行
+  // 是否已拿到过一次权威结论。用来区分「校验失败（终态）」与「还没校验完（瞬态）」：
+  // 不区分的话，冷启动一次网络抖动就会被当成失权硬锁，而用户完全无法手动解锁。
+  bool _licenseVerified = false;
   int _licenseDays = 0;
   // 锁定胶囊文案：只在真到期/被拒时显示对应原因，绝不把一切失权都写成"到期"。
-  String _licenseDenyText = '授权校验未通过';
+  String _licenseDenyText = '授权校验中…';
   Timer? _licenseTimer;
   Timer? _licenseExpiryTimer;
+  // 首次核验失败后的快速重试定时器（不等满 60s 轮询）。
+  Timer? _licenseRetryTimer;
+  // 锁定态是否已把窗口撑到胶囊尺寸（避免每帧重复 resize）。
+  bool _lockSized = false;
 
   // ── socket 服务生命周期：旧实现 Server 建完即丢引用，dispose 不关监听，
   //    关窗重开后旧 State 的监听与新监听共存抢连接丢帧（server.dart 已去 shared）。
@@ -621,6 +631,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   void dispose() {
     _licenseTimer?.cancel();
     _licenseExpiryTimer?.cancel();
+    _licenseRetryTimer?.cancel();
     _signalWatchdog?.cancel();
     // 必须关闭 socket 监听：旧实现泄漏 Server，旧 State 继续抢接 Java 短连接丢帧。
     _server?.close();
@@ -664,6 +675,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       // 必须满足 valid 或 needsRenew(宽限内) 才允许使用，其余（notActivated/refused/licenseExpired）一律硬锁
       final st = await LicenseService.instance.heartbeat();
       final bool allows = st.allowsUsage;
+      _licenseVerified = true; // 拿到权威结论，从此才允许下终态文案
       final days = st.remainingDays;
       final String denyText;
       if (st.status == LicenseStatus.licenseExpired) {
@@ -680,15 +692,39 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       if (allows != _licenseAllows ||
           days != _licenseDays ||
           denyText != _licenseDenyText) {
+        final bool wasAllows = _licenseAllows;
         setState(() {
           _licenseAllows = allows;
           _licenseDays = days;
           _licenseDenyText = denyText;
+          // 恢复放行后把尺寸标记交回正常路径（initState / _togglePanel）管理。
+          if (allows) _lockSized = false;
         });
+        // 从锁定态恢复时，窗口还停在锁定胶囊的尺寸上；不主动收回就会出现
+        // “透明区域比球大”的空档（点了没反应但挡住了牌桌），所以按当前收起模式重设。
+        if (allows && !wasAllows) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) return;
+            _ensureSize(
+              _capsuleMode ? _kCapsuleW : collapsed,
+              _capsuleMode ? _kCapsuleH : collapsed,
+            );
+          });
+        }
       }
       _scheduleLicenseExpiryCheck(st, allows);
     } catch (_) {
-      // 核验异常绝不让悬浮窗引擎崩溃；保持当前状态。
+      // 核验异常绝不让悬浮窗引擎崩溃。但“保持当前状态”不等于“什么都不做”：
+      // 从未拿到权威结论时一路保持 false，用户就会对着一个点不动的锁等满 60s，
+      // 所以文案给「校验中」并 4s 后重试一次。已放行过的不因单次抖动回锁。
+      if (!_licenseVerified) {
+        if (mounted && _licenseDenyText != '授权校验中，点此重试') {
+          setState(() => _licenseDenyText = '授权校验中，点此重试');
+        }
+        _licenseRetryTimer?.cancel();
+        _licenseRetryTimer =
+            Timer(const Duration(seconds: 4), _refreshLicense);
+      }
     }
   }
 
@@ -816,34 +852,82 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   }
 
   // 授权到期/被停用时的悬浮占位胶囊：不给出任何牌建议。
+  //
+  // 为什么必须可点：旧版这里没有任何手势，而 _licenseAllows 是悲观默认 false，
+  // 于是冷启动撞上一次心跳异常（弱网、子引擎凭证未就绪）就会卡在锁上最长 60s；
+  // 用户看到的是“屏幕共享中”“识别中”都在，但球就是点不开。
   Widget _licenseDisabled() {
-    return Center(
-      child: Container(
-        margin: const EdgeInsets.all(8),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-        decoration: BoxDecoration(
-          color: const Color(0xF51A1D24),
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: const Color(0xFFFF8A80), width: 1),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.lock_outline, size: 15, color: Color(0xFFFF8A80)),
-            const SizedBox(width: 6),
-            Text(
-              _licenseDenyText,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12.5,
-                fontWeight: FontWeight.w700,
-                decoration: TextDecoration.none,
+    if (!_lockSized) {
+      // 锁定态可能出现在窗口仍是 56x56 球型尺寸时，胶囊文案会被裁得只剩一个
+      // 锁图标（现象就是“一个红圈球，看不出为什么不可用”）。这里撑到胶囊尺寸。
+      _lockSized = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !_licenseAllows) _ensureSize(_kCapsuleW, _kCapsuleH);
+      });
+    }
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: _retryLicenseNow,
+      child: Center(
+        child: Container(
+          margin: const EdgeInsets.all(8),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+          decoration: BoxDecoration(
+            color: const Color(0xF51A1D24),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: const Color(0xFFFF8A80), width: 1),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.lock_outline, size: 15, color: Color(0xFFFF8A80)),
+              const SizedBox(width: 6),
+              // Flexible 而不是裸 Text：宽度不足时用省略号收尾，
+              // 绝不因溢出而被裁成一个没有文字的光球。
+              Flexible(
+                child: Text(
+                  _licenseDenyText,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                    decoration: TextDecoration.none,
+                  ),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
+  }
+
+  /// 立即重跑授权核验：用户不需要对着锁等满 60s 轮询。
+  void _retryLicenseNow() {
+    _licenseRetryTimer?.cancel();
+    _refreshLicense();
+  }
+
+  /// 胶囊上的平台短名。这里曾经写死 '雀神'：悬浮窗跑在独立 isolate，
+  /// 主页的平台选择并不会传给它，写死就变成“无论选哪个平台都显示雀神”。
+  /// 引擎每帧已回传 platform key，据此显示；未知一律给「通用」，
+  /// 绝不猜一个具体平台——那会把用户引向错误的牌风预期。
+  static const Map<String, String> _kPlatformShort = {
+    'tencent': '腾讯',
+    'tuyou': '途游',
+    'weile': '微乐',
+    'jj': 'JJ',
+    'gd_queshen': '雀神',
+    'zj_sichuan': '指尖',
+    'shushan': '蜀山',
+    'generic': '通用',
+  };
+
+  String _platformShort(Object? key) {
+    final k = (key is String ? key : '').trim().toLowerCase();
+    return _kPlatformShort[k] ?? '通用';
   }
 
   // 只在识别内容真正变化时回传一次摘要给主 App，
@@ -864,9 +948,116 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // 全部做空安全处理，任何字段缺失都不渲染、绝不抛错。
 
 
+  /// 主页「运势 / 好牌概率」要用的字段，只从这里过去。
+  ///
+  /// 三样东西引擎每帧都算好了（mood、ev_gauge、ting_chance/ukeire_chance +
+  /// tile_ledger 的牌墙整数），过去白名单没放行，主页就是拿不到 —— 补的是
+  /// **透传**，不是新算法。档位词与 note 一律取引擎原值：阈值口径只允许存在
+  /// 在 Python 的 `probability_bands` 一份里，这里翻译一套主页就漂移一套。
+  /// 整份 tile_ledger（34 型 × 11 键）不进跨引擎消息，只带面板用的那几个整数。
+  static Map<String, dynamic>? _compactMood(Map<String, dynamic> json) {
+    final m = json['mood'];
+    if (m is! Map) return null;
+    return <String, dynamic>{
+      'state': m['state'],
+      'badge': m['badge'],
+      'desc': m['desc'],
+    };
+  }
+
+  static Map<String, dynamic>? _compactEquity(Map<String, dynamic> json) {
+    final g = json['ev_gauge'];
+    if (g is! Map) return null;
+    return <String, dynamic>{
+      'level': g['level'],
+      'band': g['band'],
+      'tier': g['tier'],
+      'note': g['note'],
+      'calibrated': g['calibrated'],
+      'equity_basis': g['equity_basis'],
+      'insight': g['insight'],
+    };
+  }
+
+  /// 好牌概率的两项事实：可推进张数（分子）与牌墙剩余（分母）。
+  ///
+  /// 分子有两条来源，差别只写在 `bound` 上，UI 据此决定说「至少」还是「至多」：
+  /// - `lo`：账本下界 —— 听口用 ting_chance、未听口用 ukeire_chance 的
+  ///   wall_lo_total（逐型牌墙下界相加，只会保守）。
+  /// - `hi`：拿不到下界时退回 advice[0].ukeire —— 那是**未现**进张数，里面还
+  ///   含着对手按住的牌，除以牌墙只能当上界，说成"至少"就是虚报。
+  static Map<String, dynamic>? _compactTileOdds(Map<String, dynamic> json) {
+    Map<dynamic, dynamic>? chance;
+    final tc = json['ting_chance'];
+    if (tc is Map && tc.isNotEmpty) chance = tc;
+
+    Map<dynamic, dynamic>? top;
+    final adv = json['advice'];
+    if (adv is List && adv.isNotEmpty && adv.first is Map) {
+      top = adv.first as Map;
+      if (chance == null) {
+        final uc = top['ukeire_chance'];
+        final c2 = top['ting_chance'];
+        if (uc is Map && uc.isNotEmpty) {
+          chance = uc;
+        } else if (c2 is Map && c2.isNotEmpty) {
+          chance = c2;
+        }
+      }
+    }
+
+    int wallRemaining = -1;
+    bool? ledgerOk;
+    final ledger = json['tile_ledger'];
+    if (ledger is Map) {
+      wallRemaining = (ledger['wall_remaining'] as num?)?.toInt() ?? -1;
+      if (ledger.containsKey('ok')) ledgerOk = ledger['ok'] == true;
+    }
+    if (wallRemaining < 0 && chance != null) {
+      wallRemaining = (chance['wall_remaining'] as num?)?.toInt() ?? -1;
+    }
+
+    final out = <String, dynamic>{'wall_remaining': wallRemaining};
+    if (ledgerOk != null) out['ledger_ok'] = ledgerOk;
+    if (chance != null) {
+      out['bound'] = 'lo';
+      out['numerator'] = (chance['wall_lo_total'] as num?)?.toInt() ?? 0;
+      out['unseen'] = (chance['total_unseen'] as num?)?.toInt() ?? 0;
+      final t = chance['text'];
+      if (t is String) out['text'] = t;
+      return out;
+    }
+    if (top != null) {
+      final u = (top['ukeire'] as num?)?.toInt();
+      if (u == null) return null; // 引擎没给进张数就没有分子，不编
+      out['bound'] = 'hi';
+      out['numerator'] = u;
+      out['unseen'] = u;
+      final r = top['reason'];
+      if (r is String) out['text'] = r;
+      return out;
+    }
+    return null;
+  }
+
   void _maybeShareStatus(Map<String, dynamic> json) {
-    final key =
-        "${json['hand']}|${json['shanten']}|${json['status']}|${json['count']}|${json['best']}";
+    final mood = _compactMood(json);
+    final equity = _compactEquity(json);
+    final tile = _compactTileOdds(json);
+    // 去抖键必须把牌墙数字算进来：同一副手牌里别人打出一张，牌墙剩余和可推进
+    // 张数都会变，而 hand/best 一字不变 —— 只按旧键去抖，主页那两个按钮就会
+    // 一直停在上一帧的分母上。
+    // 先把参与拼键的值取成局部变量：`${}` 里再套同款引号容易踩解析歧义，
+    // 直接插 Map 又会被 toString 的顺序牵着走。
+    final String moodState =
+        mood == null ? '-' : (mood['state']?.toString() ?? '-');
+    final String equityBand =
+        equity == null ? '-' : (equity['band']?.toString() ?? '-');
+    final String tileSig = tile == null
+        ? '-'
+        : [tile['bound'], tile['numerator'], tile['wall_remaining']].join(':');
+    final key = "${json['hand']}|${json['shanten']}|${json['status']}"
+        "|${json['count']}|${json['best']}|$moodState|$equityBand|$tileSig";
     if (key == _lastSharedKey) return;
     _lastSharedKey = key;
     FlutterOverlayWindow.shareData({
@@ -881,6 +1072,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       'message': json['message'] ?? '',
       'best': json['best'] ?? '',
       'advice': json['advice'] ?? const [],
+      'mood': mood,
+      'equity': equity,
+      'tile_odds': tile,
     }).catchError((_) {});
   }
 
@@ -895,15 +1089,21 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         final List<int> z = wall >= 136
             ? List.filled(7, 4)
             : (wall == 112 ? <int>[4] : <int>[]);
+        final List<String> zNames = wall >= 136
+            ? const ['东', '南', '西', '北', '白', '发', '中']
+            : (wall == 112 ? const ['中'] : const <String>[]);
         final resetMatrix = {
           'm': List.filled(9, 4),
           'p': List.filled(9, 4),
           's': List.filled(9, 4),
           'z': z,
+          'z_names': zNames,
         };
         if (result != null) {
           result = Map<String, dynamic>.from(result!)
             ..['remaining_matrix'] = resetMatrix
+            ..['tile_ledger'] = null
+            ..['ting_chance'] = null
             ..['hand'] = ''
             ..['count'] = 0
             ..['discards'] = ''
@@ -1132,10 +1332,12 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               children: [
                 const Icon(Icons.tune_rounded, color: Color(0xFFFFD54F), size: 14),
                 const SizedBox(width: 5),
-                const Expanded(
+                Expanded(
                   child: Text(
-                    '切换玩法 (10种规则)',
-                    style: TextStyle(
+                    // 条数从目录取，不写死：之前硬编码“10种规则”，上架到 19 条后
+                    // 菜单列表会跟着长但标题还在说 10 种，属于界面静默错信息。
+                    '切换玩法 (${GameMode.allModes.length}种规则)',
+                    style: const TextStyle(
                       color: Color(0xFFFFF9C4),
                       fontSize: 10.5,
                       fontWeight: FontWeight.bold,
@@ -1376,9 +1578,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                       ],
               ),
             ),
-            const Text(
-              '雀神',
-              style: TextStyle(
+            // 平台名取引擎每帧回传的 platform key。写死会让胶囊在任何平台下
+            // 都显示同一个名字（此前就是 '雀神'），看起来就像平台切换没生效。
+            Text(
+              _platformShort(result?['platform']),
+              style: const TextStyle(
                 color: Color(0xFFFFF9C4),
                 fontSize: 11,
                 fontWeight: FontWeight.w700,
@@ -1478,13 +1682,67 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     );
   }
 
+  /// 牌局账本结论行：把「未现 = 牌墙可摸 + 对手手上」这条拆账直接标在记牌器上。
+  /// 旧面板只有每型 0~4 的未现数，看不出这些牌到底还摸得到还是被人攥着，而这两种
+  /// 情况的打法完全不同（前者继续等自摸，后者根本等不到）。
+  /// 对手张数未知时绝不报「牌墙 N 张」（那会把别人手上的牌也说成能摸到）。
+  Widget _ledgerSummaryLine(Map<String, dynamic> ledger) {
+    final bool oppKnown = ledger['opp_known'] == true;
+    final bool ok = ledger['ok'] != false;
+    final int bad = (ledger['violations'] as List?)?.length ?? 0;
+    final int seen = (ledger['seen_total'] as num? ?? 0).toInt();
+    final int unseen = (ledger['unseen_total'] as num? ?? 0).toInt();
+    final int wall = (ledger['wall_remaining'] as num? ?? 0).toInt();
+    final int rounds = (ledger['rounds_left'] as num? ?? 0).toInt();
+    final int standing = (ledger['standing_total'] as num? ?? 0).toInt();
+    final int wallOnly = (ledger['wall_only_unseen'] as num? ?? 0).toInt();
+    final int wallOnlyTypes = (ledger['wall_only_types'] as num? ?? 0).toInt();
+
+    final String head = oppKnown
+        ? '牌墙 $wall 张·约 $rounds 轮·对手手上 $standing 张·已现 $seen 张'
+        : '未现 $unseen 张·已现 $seen 张（对手张数未知，不拆牌墙）';
+    final String tail = wallOnly > 0
+        ? '·定缺门锁定 $wallOnly 张只能自摸（$wallOnlyTypes 种）'
+        : '';
+    final String warn = ok ? '' : '  ⚠ 记账矛盾 $bad 处，本帧不给建议';
+
+    return Padding(
+      padding: const EdgeInsets.only(left: 10, bottom: 2),
+      child: Row(
+        children: [
+          Flexible(
+            child: Text(
+              '$head$tail',
+              style: TextStyle(
+                color: ok ? const Color(0xFF80CBC4) : const Color(0xFFFF8A80),
+                fontSize: 8.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          if (!ok)
+            Text(
+              warn,
+              style: const TextStyle(
+                color: Color(0xFFFF8A80),
+                fontSize: 8.5,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   // 全场记牌器面板（万/筒/条 各 9 种牌及字牌/红中当前牌池/手牌扣除后的剩余存活数 0~4）
-  Widget _remainingMatrixSection(Map<String, dynamic>? matrix) {
+  // ledger 为牌局账本摘要：把「未现 = 牌墙 + 对手手上」这条拆账标在面板头部。
+  Widget _remainingMatrixSection(Map<String, dynamic>? matrix, Map<String, dynamic>? ledger) {
     if (matrix == null) return const SizedBox.shrink();
     final List<dynamic>? m = matrix['m'] as List<dynamic>?;
     final List<dynamic>? p = matrix['p'] as List<dynamic>?;
     final List<dynamic>? s = matrix['s'] as List<dynamic>?;
     final List<dynamic>? z = matrix['z'] as List<dynamic>?;
+    final List<dynamic>? zNames = matrix['z_names'] as List<dynamic>?;
     if (m == null || p == null || s == null) return const SizedBox.shrink();
 
     Widget buildRow(String suitName, Color labelColor, List<dynamic> counts) {
@@ -1574,12 +1832,23 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       );
     }
 
-    Widget buildZRow(String suitName, Color labelColor, List<dynamic> counts) {
+    Widget buildZRow(String suitName, Color labelColor, List<dynamic> counts, List<dynamic>? names) {
       if (counts.isEmpty) return const SizedBox.shrink();
-      // 若只有 1 张字牌（血流红中），专门呈现醒目的【中】
-      final bool isOnlyHongZhong = counts.length == 1;
-      final List<String> zNames = isOnlyHongZhong ? const ['中'] : const ['东', '南', '西', '北', '白', '发', '中'];
-      final int displayCount = isOnlyHongZhong ? 1 : (counts.length >= 7 ? 7 : counts.length);
+      // 字牌格名由 Python 按玩法牌集下发（三人扣只有东南西北白中、血流红中只有中）；
+      // 旧写法靠「长度==1」猜中、否则按 7 个固定名字取前 N 个，6 字牌玩法会整体错位。
+      // 长度对不上就不画，绝不拿错名字去标牌。
+      List<String> cellNames;
+      if (names != null && names.length == counts.length) {
+        cellNames = names.map((e) => e.toString()).toList();
+      } else if (counts.length == 1) {
+        cellNames = const ['中'];
+      } else if (counts.length == 7) {
+        cellNames = const ['东', '南', '西', '北', '白', '发', '中'];
+      } else {
+        return const SizedBox.shrink();
+      }
+      final bool isOnlyHongZhong = counts.length == 1 && cellNames[0] == '中';
+      final int displayCount = counts.length;
 
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 1.0),
@@ -1640,7 +1909,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Text(
-                            zNames[idx],
+                            cellNames[idx],
                             style: TextStyle(
                               color: (isOnlyHongZhong ? const Color(0xFFFF5252) : labelColor).withAlpha(cnt == 0 ? 70 : 220),
                               fontSize: 7.5,
@@ -1754,6 +2023,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               ),
             ],
           ),
+          if (_matrixExpanded && ledger != null) ...[
+            const SizedBox(height: 2),
+            _ledgerSummaryLine(ledger),
+          ],
           if (_matrixExpanded) ...[
             const SizedBox(height: 3),
             Padding(
@@ -1774,7 +2047,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             buildRow('筒', const Color(0xFF42A5F5), p),
             buildRow('条', const Color(0xFF66BB6A), s),
             if (z != null && z.isNotEmpty)
-              buildZRow('字', const Color(0xFFB0BEC5), z),
+              buildZRow('字', const Color(0xFFB0BEC5), z, zNames),
           ],
         ],
       ),
@@ -2030,7 +2303,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     );
   }
 
-  Widget _buildTingRadarWidget(List<dynamic> tingDetails, int? shanten) {
+  Widget _buildTingRadarWidget(List<dynamic> tingDetails, int? shanten,
+      Map<String, dynamic>? chance) {
     if (tingDetails.isEmpty) return const SizedBox.shrink();
 
     int totalRemaining = 0;
@@ -2040,6 +2314,13 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       }
     }
     final bool hasDead = tingDetails.any((t) => (t is Map && t['is_dead'] == true));
+
+    // 牌局账本口径：同一个「余 N 张」拆成牌墙可自摸 / 对手可能打出两部分。
+    // 没拿到账本（陈旧签名/未开局）时逐字回退到旧口径，绝不拿 0 去谎报。
+    final int wallOnly = (chance?['wall_only'] as num?)?.toInt() ?? 0;
+    final int chanceTotal = (chance?['total_unseen'] as num?)?.toInt() ?? totalRemaining;
+    final bool oppKnown = chance?['opp_known'] == true;
+    final String chanceText = (chance?['text'] ?? '') as String;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 5),
@@ -2093,7 +2374,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                   borderRadius: BorderRadius.circular(3),
                 ),
                 child: Text(
-                  hasDead ? '含绝张警报' : '余 $totalRemaining 张机会',
+                  hasDead
+                      ? '含绝张警报'
+                      : (oppKnown && wallOnly > 0
+                          ? '余 $chanceTotal 张·$wallOnly 张只能自摸'
+                          : '余 $chanceTotal 张机会'),
                   style: const TextStyle(
                     color: Colors.white,
                     fontSize: 8.5,
@@ -2160,16 +2445,184 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                   }),
             ],
           ),
+          if (chanceText.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              '🧾 $chanceText',
+              style: const TextStyle(
+                color: Color(0xFFB2DFDB),
+                fontSize: 8.5,
+                height: 1.25,
+                decoration: TextDecoration.none,
+              ),
+            ),
+          ],
         ],
       ),
     );
   }
 
+  /// 以下四个 `*Word` 与 `_bandProgress` 是**旧 payload 兜底**（引擎产物没带 `band` 字段时），
+  /// 阈值/措辞必须与 Python 侧 `probability_bands` 逐字对齐：口径的单一来源
+  /// 在 Python，这里只是防「旧引擎 + 新面板」的空窗。两边一旦分叉，
+  /// `localtest/test_equity_honesty.py` 的跨语言契约用例会红。
+  String _equityBandWord(String level) {
+    switch (level) {
+      case 'extreme':
+        return '极优';
+      case 'high':
+        return '较优';
+      case 'neutral':
+        return '均势';
+      case 'risk':
+        return '承压';
+    }
+    return '未定档';
+  }
+
+  /// 三档粗分（B-P4 空白 B）：`probability_bands.coarse_tier` 的兜底副本。
+  /// 它不是第二套阈值表——只把 level 投影成偏优/中性/偏劣，不看任何数值。
+  String _equityTierWord(String level) {
+    switch (level) {
+      case 'extreme':
+        return '偏优';
+      case 'high':
+        return '偏优';
+      case 'neutral':
+        return '中性';
+      case 'risk':
+        return '偏劣';
+    }
+    return '未定档';
+  }
+
+  /// 危险档位的行动指令兜底副本（B-P4 空白 C），与 `probability_bands.danger_advice`
+  /// 逐字同表：面板不得自己造一句「建议谨慎打出」这种谁都不负责的废话。
+  String _dangerHintWord(String level) {
+    switch (level) {
+      case 'safe':
+        return '绝对安全 · 现物/定缺门，可放心打出';
+      case 'low':
+        return '轻微风险 · 当前形势可接受';
+      case 'medium':
+        return '中等风险 · 建议优先选低危出张';
+      case 'high':
+        return '高危 · 除非已听牌，否则改打安全牌';
+      case 'critical':
+        return '极危 · 生张，不是必胡就别打';
+    }
+    return '未定档';
+  }
+
+  /// 危险行动指令的配色（B-P4 空白 C）：safe=绿、low=灰、medium=黄、high/critical=红。
+  /// 颜色必须从 `danger_level` 派生，不能再拿字符串比大小（旧面板写的是
+  /// `danger_level >= "high"` 才显红，中间档就这样被当不存在）。
+  Color _dangerHintColor(String level) {
+    switch (level) {
+      case 'safe':
+        return const Color(0xFFA5D6A7);
+      case 'low':
+        return const Color(0xFFB0BEC5);
+      case 'medium':
+        return const Color(0xFFFFD54F);
+      case 'high':
+        return const Color(0xFFFF8A65);
+      case 'critical':
+        return const Color(0xFFFF5252);
+    }
+    return const Color(0xFFB0BEC5);
+  }
+
+  String _dangerBandWord(String level) {
+    switch (level) {
+      case 'safe':
+        return '安';
+      case 'low':
+        return '微危';
+      case 'medium':
+        return '中危';
+      case 'high':
+        return '高危';
+      case 'critical':
+        return '极危';
+    }
+    return '未定档';
+  }
+
+  String _tenpaiBandWord(double p) {
+    if (p < 0.20) return '低';
+    if (p < 0.45) return '中';
+    if (p < 0.70) return '高';
+    return '极高';
+  }
+
+  String _heldBandWord(double p) {
+    if (p < 0.35) return '低';
+    if (p < 0.60) return '中';
+    return '高';
+  }
+
+  /// 未标定态的进度条：只画档位格（四等分中点），不画百分比刻度。
+  double _bandProgress(String level) {
+    switch (level) {
+      case 'extreme':
+        return 1.0;
+      case 'high':
+        return 0.75;
+      case 'neutral':
+        return 0.50;
+      case 'risk':
+        return 0.25;
+    }
+    return 0.50;
+  }
+
   /// 全场实时胡牌胜率与期望收益 (Win Equity & EV Gauge) - 极致微型
-  Widget _buildWinEquityGaugeWidget(Map<String, dynamic> evGauge, double? winEquity) {
-    final int winRate = (evGauge['win_rate'] as num? ?? ((winEquity ?? 0.5) * 100)).toInt();
+  ///
+  /// 概率诚实化（B-P3）：这里的 `win_equity` / `net_ev` 都是**未标定的模型值**，
+  /// 口径由 Python 侧 `probability_bands` 定死并随 payload 下发，前端只做渲染：
+  /// - `calibrated == false` → 只显档位词（极优/较优/均势/承压），**绝不显「胜率 X%」**；
+  ///   进度条按档位取格，不画百分比刻度（那会把模型打分伪装成测量结果）。
+  /// - `net_ev` 的单位是内部评分「分」，不是「番」（旧版单位错标会让用户按番数取舍）。
+  /// - `equity_basis == 'analytical'`，或 `win_equity == analytical_equity`（PVN 未训练
+  ///   的恒等式）→ 标题写明「纯解析式评估」，不让用户以为有训练好的网络在算胜率。
+  /// 百分比只能在 `calibrated == true` 后复活，而那需要真实标定样本，不是改字串。
+  ///
+  /// B-P4 空白 B（行动映射）：只把数字换小、进度条照旧画，用户仍会以为背后有模型。
+  /// 因此 `pureAnalytical && !calibrated` 时整块退化成一行文本：没有进度条、
+  /// 没有 `net_ev` 分值（那是合成评分，不标量纲），只有一个三档档位词（偏优/中性/偏劣）。
+  Widget _buildWinEquityGaugeWidget(Map<String, dynamic> evGauge, double? winEquity,
+      {double? analyticalEquity}) {
     final double netEv = (evGauge['net_ev'] as num? ?? 0.0).toDouble();
     final String level = (evGauge['level'] as String?) ?? 'neutral';
+    final bool calibrated = (evGauge['calibrated'] as bool?) ?? false;
+    final String band = (evGauge['band'] as String?) ?? _equityBandWord(level);
+    final String basis = (evGauge['equity_basis'] as String?) ?? 'analytical';
+    final String note = (evGauge['note'] as String?) ?? '';
+    final String evUnit = (evGauge['net_ev_unit'] as String?) ?? '分';
+    final double? rawEquity =
+        winEquity ?? (evGauge['win_equity'] as num?)?.toDouble();
+    // PVN 关闭态的两种等价判据：口径字段直接说明，或两个数值逐位相等。
+    // 命中时面板只能说「解析式评估」，不能含糊地报成胜率。
+    final bool pureAnalytical = basis != 'analytical+pvn' ||
+        (rawEquity != null &&
+            analyticalEquity != null &&
+            (rawEquity - analyticalEquity).abs() < 1e-6);
+    final String title =
+        calibrated ? '胜率推算' : (pureAnalytical ? '纯解析式评估' : '牌势评估');
+    final String equityChip = calibrated
+        ? '胜率 ${((rawEquity ?? 0.5) * 100).toStringAsFixed(0)}%'
+        : band;
+    final double barValue = calibrated
+        ? (rawEquity ?? 0.5).clamp(0.0, 1.0)
+        : _bandProgress(level);
+    // 三档粗分走 payload（`probability_bands.coarse_tier`），面板只兜旧帧。
+    final String tier = (evGauge['tier'] as String?) ?? _equityTierWord(level);
+    // 未标定又无模型：本块没有任何可测量的东西，只能当文本说明，不能当仪表。
+    final bool degrade = pureAnalytical && !calibrated;
+    final String degradeLabel = pureAnalytical
+        ? '纯解析式评估（未标定）· 牌势 $tier'
+        : '牌势评估（未标定）· $tier';
 
     Color primaryColor;
     Color gradientStart;
@@ -2215,7 +2668,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                   Icon(Icons.radar_rounded, color: primaryColor, size: 11),
                   const SizedBox(width: 4),
                   Text(
-                    '胜率推算',
+                    title,
                     style: TextStyle(
                       color: primaryColor,
                       fontSize: 9.5,
@@ -2236,7 +2689,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                       border: Border.all(color: primaryColor.withAlpha(80), width: 0.5),
                     ),
                     child: Text(
-                      '胜率 $winRate%',
+                      equityChip,
                       style: TextStyle(
                         color: primaryColor,
                         fontSize: 8.5,
@@ -2245,37 +2698,70 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                       ),
                     ),
                   ),
-                  const SizedBox(width: 4),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0.5),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withAlpha(15),
-                      borderRadius: BorderRadius.circular(3),
-                    ),
-                    child: Text(
-                      netEv >= 0 ? '+${netEv.toStringAsFixed(1)}番' : '${netEv.toStringAsFixed(1)}番',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 8.5,
-                        fontWeight: FontWeight.bold,
-                        decoration: TextDecoration.none,
+                  // B-P4 空白 B：未标定又无模型时不报分值。`net_ev` 是向听/进张
+                  // 折算的合成评分（同帧候选实测差 1000/20/9），没有量纲可解释，
+                  // 写成「+50.5 分」就会被当成能换算成番数的收益（B-P3 刚拆过同类错标）。
+                  if (!degrade) ...[
+                    const SizedBox(width: 4),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0.5),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withAlpha(15),
+                        borderRadius: BorderRadius.circular(3),
+                      ),
+                      child: Text(
+                        // 单位随 payload：这是模型内部评分（分），不是番数。
+                        netEv >= 0
+                            ? '+${netEv.toStringAsFixed(1)}$evUnit'
+                            : '${netEv.toStringAsFixed(1)}$evUnit',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 8.5,
+                          fontWeight: FontWeight.bold,
+                          decoration: TextDecoration.none,
+                        ),
                       ),
                     ),
-                  ),
+                  ],
                 ],
               ),
             ],
           ),
           const SizedBox(height: 3),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(1.5),
-            child: LinearProgressIndicator(
-              value: (winRate / 100.0).clamp(0.0, 1.0),
-              minHeight: 2.5,
-              backgroundColor: Colors.white12,
-              valueColor: AlwaysStoppedAnimation<Color>(primaryColor),
+          // 进度条的形状本身就在说「这是一次测量」，所以纯解析式态下整块换成
+          // 一行文本标签：保留颜色（牌势好坏仍需一眼区分），去掉刻度与数值。
+          if (degrade)
+            Text(
+              degradeLabel,
+              style: TextStyle(
+                color: primaryColor,
+                fontSize: 8,
+                fontWeight: FontWeight.w600,
+                decoration: TextDecoration.none,
+              ),
+            )
+          else
+            ClipRRect(
+              borderRadius: BorderRadius.circular(1.5),
+              child: LinearProgressIndicator(
+                value: barValue,
+                minHeight: 2.5,
+                backgroundColor: Colors.white12,
+                valueColor: AlwaysStoppedAnimation<Color>(primaryColor),
+              ),
             ),
-          ),
+          // 口径脚注：未标定时必须把「这是模型推算、只能当相对参考」写在数字旁边。
+          if (!calibrated && note.isNotEmpty) ...[
+            const SizedBox(height: 2),
+            Text(
+              note,
+              style: TextStyle(
+                color: Colors.white.withAlpha(110),
+                fontSize: 6.8,
+                decoration: TextDecoration.none,
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -2286,8 +2772,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     if (dangerFlow is! Map) return const SizedBox.shrink();
     final Map<dynamic, dynamic> df = dangerFlow;
     final String dLevel = (df['danger_level'] as String?) ?? 'safe';
-    final double dealInP = (df['deal_in_prob'] as num? ?? 0.0).toDouble();
-    final int dealInPercent = (dealInP * 100).toInt();
+    // 档位词由 Python 侧 `probability_bands.danger_band` 下发。`deal_in_prob` 是
+    // P(听牌)×P(打中该牌|听牌) 的手工先验乘积（0.04/0.08/0.14/0.26 全是拍的），
+    // 乘 100 印成「X% 危」就是把未标定打分当频率，所以面板只显档位。
+    final String dBand = (df['danger_band'] as String?) ?? _dangerBandWord(dLevel);
     Color dColor = const Color(0xFF81C784);
     if (dLevel == 'critical') {
       dColor = const Color(0xFFFF5252);
@@ -2305,7 +2793,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           borderRadius: BorderRadius.circular(2),
         ),
         child: Text(
-          dLevel == 'safe' ? '安' : '$dealInPercent%危',
+          dLevel == 'safe' ? '安' : dBand,
           style: TextStyle(
             color: dLevel == 'safe' ? const Color(0xFFC8E6C9) : const Color(0xFFFFCC80),
             fontSize: 7.5,
@@ -2324,7 +2812,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         border: Border.all(color: dColor.withAlpha(90), width: 0.5),
       ),
       child: Text(
-        dLevel == 'safe' ? '安目' : '点炮 $dealInPercent%',
+        dLevel == 'safe' ? '安目' : '点炮 $dBand',
         style: TextStyle(
           color: dColor,
           fontSize: 8,
@@ -2370,7 +2858,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               final String dqName = (opp['dingque_name'] as String?) ?? '未定';
               final int standing = (opp['standing'] as num? ?? 13).toInt();
               final double tenpaiProb = (opp['tenpai_prob'] as num? ?? 0.2).toDouble();
-              final int tenpaiRate = (tenpaiProb * 100).toInt();
+              // 同上：tenpai_prob 是 logistic 手工曲线（斜率 0.28 + 鸣牌 0.20/次），
+              // 未经标定，所以面板只显「叫听 高/中/低」，不显百分比。
+              final String tenpaiBand =
+                  (opp['tenpai_band'] as String?) ?? _tenpaiBandWord(tenpaiProb);
               final List<dynamic> topHeld = (opp['top_held'] as List<dynamic>?) ?? [];
 
               return Expanded(
@@ -2417,9 +2908,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                       ),
                       const SizedBox(height: 1),
                       Text(
-                        '叫听 $tenpaiRate%',
+                        '叫听 $tenpaiBand',
                         style: TextStyle(
-                          color: tenpaiRate >= 50 ? const Color(0xFFFF8A80) : Colors.white60,
+                          color: tenpaiProb >= 0.50 ? const Color(0xFFFF8A80) : Colors.white60,
                           fontSize: 7,
                           decoration: TextDecoration.none,
                         ),
@@ -2431,7 +2922,12 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                           runSpacing: 1,
                           children: topHeld.take(2).map((h) {
                             final String tileStr = (h['tile'] as String?) ?? '';
-                            final int p = ((h['prob'] as num? ?? 0.0) * 100).toInt();
+                            final double p = (h['prob'] as num? ?? 0.0).toDouble();
+                            // top_held.prob 是**未归一化的相对后验**（likelihood 可被
+                            // 染手倾斜乘到 2.2），它只能比大小；显成「68%」是把
+                            // 后验分数当频率概率，因此面板只显档位。
+                            final String heldBand =
+                                (h['band'] as String?) ?? _heldBandWord(p);
                             return Container(
                               padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 0.5),
                               decoration: BoxDecoration(
@@ -2439,7 +2935,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                                 borderRadius: BorderRadius.circular(2),
                               ),
                               child: Text(
-                                '$tileStr $p%',
+                                '$tileStr $heldBand',
                                 style: const TextStyle(
                                   color: Color(0xFFFFECB3),
                                   fontSize: 6.8,
@@ -2464,11 +2960,17 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
 
   /// 次选进张标签：引擎算出真实进张时恒 >0；
   /// `ukeire==0 且 shanten>=2` 表示尚未算得真实进张，显示“—”避免误导“绝张 0 张”。
+  ///
+  /// 另外：`ukeire` 本身是「未现牌计数」（牌墙 + 对手手上）的上界。只有当本条建议
+  /// 带着账本拆账（ting_chance / ukeire_chance）时，才能直接报张数；否则必须加 ≤ 号，
+  /// 不把上界说成确定的机会数（B-P3 区间 vs 点估计规则）。
   String _ukeireLabel(dynamic item) {
     final int u = (item['ukeire'] as num? ?? 0).toInt();
     final int sh = (item['shanten'] as num? ?? 0).toInt();
     if (u == 0 && sh >= 2) return '—';
-    return '$u张';
+    final bool ledgerBacked =
+        item['ting_chance'] is Map || item['ukeire_chance'] is Map;
+    return ledgerBacked ? '$u张' : '≤$u张';
   }
 
   Widget _adviceSection(List<dynamic> advice, String best, int count) {
@@ -2493,13 +2995,23 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         ? _buildTenpaiAlertWidget(alertData)
         : null;
     final Widget? tingRadarWidget = (shanten == 0 || tingDetails.isNotEmpty)
-        ? _buildTingRadarWidget(tingDetails, shanten)
+        ? _buildTingRadarWidget(
+            tingDetails, shanten, result?['ting_chance'] as Map<String, dynamic>?)
         : null;
 
     final evGaugeData = result?['ev_gauge'] as Map<String, dynamic>?;
     final winEquity = (result?['win_equity'] as num?)?.toDouble();
+    // advice[0] 带着解析式原值：两者逐位相等就说明 PVN 没参与（未训练态）。
+    // 面板拿它与 `equity_basis` 作双重判据，才能把标题写成「纯解析式评估」
+    // 而不是含糊地报一个未标定的胜率。
+    final List<dynamic> _adviceList =
+        (result?['advice'] as List<dynamic>?) ?? const <dynamic>[];
+    final double? analyticalEquity = (_adviceList.isNotEmpty && _adviceList.first is Map)
+        ? ((_adviceList.first as Map)['analytical_equity'] as num?)?.toDouble()
+        : null;
     final Widget? evGaugeWidget = (evGaugeData != null && evGaugeData['badge'] != null)
-        ? _buildWinEquityGaugeWidget(evGaugeData, winEquity)
+        ? _buildWinEquityGaugeWidget(evGaugeData, winEquity,
+            analyticalEquity: analyticalEquity)
         : null;
 
     final handRangesData = result?['hand_ranges'] as List<dynamic>?;
@@ -2733,6 +3245,30 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final String? defenseLevel = top['defense_level'] as String?;
     final String? defenseReason = top['defense_reason'] as String?;
 
+    // ---- B-P4 实时决策空白：面板输入。口径全部在 Python 侧定死，这里只渲染。----
+    // 空白 A：为什么它排在次选前面。缺字段（旧 payload）就不显这一行，
+    // 绝不拿 ev 自己相减编一句「更优」——那是 B-P3 刚拆掉的伪量纲。
+    final String? advantageReason = top['advantage_reason'] as String?;
+    final int advRank = (top['rank'] as num?)?.toInt() ?? 0;
+    final int advTotal = (top['rank_total'] as num?)?.toInt() ?? 0;
+    // 决胜链走到兜底层（只剩牌的索引先后）时，引擎会明说两张牌等价。
+    // 这时候徽标不能再写「较优选择」：同一张卡片上面刚承认等价，
+    // 下面就不得再给一个不存在的排序背书。
+    final bool topTied = top['advantage'] is Map &&
+        (top['advantage'] as Map)['equivalent'] == true;
+    // 空白 C：危险档位的行动指令与替代方案（引擎只在主推≥中危时给替代）。
+    final Map<dynamic, dynamic> topFlow =
+        top['danger_flow'] is Map ? top['danger_flow'] as Map : const {};
+    final String dangerLevel = (topFlow['danger_level'] as String?) ?? '';
+    final String? dangerHint = (top['danger_hint'] as String?) ??
+        (dangerLevel.isEmpty ? null : _dangerHintWord(dangerLevel));
+    final List<dynamic> saferAlts =
+        (top['safer_alternatives'] as List<dynamic>?) ?? const [];
+    // 空白 D：摸牌预演。只有引擎真的跑过摸牌情景（川麻 13 张预摸路径）才有这两行，
+    // 14 张帧与 std 家族没有这份数据 → 一个字符也不渲染，不伪造「若摸到…将改打…」。
+    final String? predrawLine = top['predraw_line'] as String?;
+    final String? predrawFlipLine = top['predraw_flip_line'] as String?;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -2762,6 +3298,33 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // 空白 D：摸牌预演——预摸只取前几种高概率摸牌，说清「哪些摸牌会改主意」。
+              // 没有模拟数据时这两行根本不存在，面板也就不会凭空说一句「若摸到…」。[P4D]
+              if (predrawLine != null && predrawLine.isNotEmpty) ...[
+                Text(
+                  '摸牌预演 · $predrawLine',
+                  style: TextStyle(
+                    color: Colors.white.withAlpha(150),
+                    fontSize: 7.8,
+                    height: 1.15,
+                    decoration: TextDecoration.none,
+                  ),
+                ),
+                const SizedBox(height: 2),
+              ],
+              if (predrawFlipLine != null && predrawFlipLine.isNotEmpty) ...[
+                Text(
+                  predrawFlipLine,
+                  style: const TextStyle(
+                    color: Color(0xFFFFD54F),
+                    fontSize: 8,
+                    fontWeight: FontWeight.w600,
+                    height: 1.15,
+                    decoration: TextDecoration.none,
+                  ),
+                ),
+                const SizedBox(height: 3),
+              ],
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
@@ -2873,7 +3436,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                           border: Border.all(color: const Color(0x6600E676), width: 0.5),
                         ),
                         child: Text(
-                          '进张 $topUkeire 张',
+                          // 账本拆过账才直接报张数，没拆过就带 ≤ 号（上界当机会数是虚高）。
+                          '进张 ${_ukeireLabel(top)}',
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
                             color: Color(0xFF69F0AE),
@@ -2894,6 +3458,62 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                     color: Color(0xFF80CBC4),
                     fontSize: 9,
                     height: 1.2,
+                    decoration: TextDecoration.none,
+                  ),
+                ),
+              ],
+              // 空白 A：把「为什么是这一张」说成一句可核对的话（措辞走
+              // `discards_tiebreak.advantage_note` 的决胜链层，不是 ev 减法）。[P4A]
+              if (advantageReason != null && advantageReason.isNotEmpty) ...[
+                const SizedBox(height: 3),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (advRank <= 1 && advTotal > 1)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 3),
+                        child: Container(
+                          padding:
+                              const EdgeInsets.symmetric(horizontal: 3, vertical: 0.5),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF00E676).withAlpha(28),
+                            borderRadius: BorderRadius.circular(2.5),
+                          ),
+                          child: Text(
+                            topTied ? '并列 · 任选其一' : '推荐 · 较优选择',
+                            style: const TextStyle(
+                              color: Color(0xFF69F0AE),
+                              fontSize: 7.5,
+                              fontWeight: FontWeight.bold,
+                              decoration: TextDecoration.none,
+                            ),
+                          ),
+                        ),
+                      ),
+                    Expanded(
+                      child: Text(
+                        advantageReason,
+                        style: TextStyle(
+                          color: Colors.white.withAlpha(175),
+                          fontSize: 8,
+                          height: 1.15,
+                          decoration: TextDecoration.none,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+              // 空白 C：每一档危险度都跟一句可执行的话。旧面板只在 high 以上显红，
+              // 看完只知道「有点危」而不知道该不该改牌；中间档从此不再沉默。[P4C]
+              if (dangerHint != null && dangerHint.isNotEmpty) ...[
+                const SizedBox(height: 2.5),
+                Text(
+                  dangerHint,
+                  style: TextStyle(
+                    color: _dangerHintColor(dangerLevel),
+                    fontSize: 8,
+                    height: 1.15,
                     decoration: TextDecoration.none,
                   ),
                 ),
@@ -2928,7 +3548,16 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             Text(
-                              '次选',
+                              // 这颗标签说的是「本位与它上面那一位」的关系：上面那张
+                              // 刚承认与它等价（决胜链只剩兜底）时，这里就不能再叫
+                              // 「次选」——那是给一个不存在的优劣排序背书。不取本位
+                              // 自己向上的判据：那个对手可能根本没被渲染（只显前两位），
+                              // 用户会看到一个不知与谁并列的标签。
+                              (sorted[i - 1]['advantage'] is Map &&
+                                      (sorted[i - 1]['advantage'] as Map)['equivalent'] ==
+                                          true)
+                                  ? '并列'
+                                  : '次选',
                               style: TextStyle(
                                 color: Colors.white.withAlpha(160),
                                 fontSize: 8,
@@ -2953,6 +3582,50 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                           ],
                         ),
                       ),
+                  ],
+                ),
+              ],
+              // 空白 C 替代方案：只在主推已到中危及以上、且候选里确实有安全/微危牌时
+              // 出现（判定在 engine.annotate_advice_decisions）。列牌不列“更安全”的承诺。[P4C]
+              if (saferAlts.isNotEmpty) ...[
+                const SizedBox(height: 3),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Text(
+                      '替代方案',
+                      style: TextStyle(
+                        color: Colors.white.withAlpha(130),
+                        fontSize: 7.5,
+                        decoration: TextDecoration.none,
+                      ),
+                    ),
+                    const SizedBox(width: 3),
+                    Expanded(
+                      child: Wrap(
+                        spacing: 4,
+                        runSpacing: 2,
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          for (final a in saferAlts)
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                TileChip(tile: (a['tile'] ?? '') as String, size: 14),
+                                const SizedBox(width: 1.5),
+                                Text(
+                                  (a['danger_band'] ?? '') as String,
+                                  style: const TextStyle(
+                                    color: Color(0xFFA5D6A7),
+                                    fontSize: 7.5,
+                                    decoration: TextDecoration.none,
+                                  ),
+                                ),
+                              ],
+                            ),
+                        ],
+                      ),
+                    ),
                   ],
                 ),
               ],
@@ -3249,7 +3922,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                         ],
                         // 3. 全场记牌器（对局开始后显示，实时统揽全场 108/136 张活牌剩余数）
                         if (inMatch) ...[
-                          _remainingMatrixSection(result?['remaining_matrix'] as Map<String, dynamic>?),
+                          _remainingMatrixSection(
+                            result?['remaining_matrix'] as Map<String, dynamic>?,
+                            result?['tile_ledger'] as Map<String, dynamic>?,
+                          ),
                         ],
                         // 底部安全留白：确保可以顺畅滑到最底部且不被右下角缩放手柄遮挡
                         const SizedBox(height: 26),

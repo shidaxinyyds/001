@@ -72,7 +72,10 @@ class GamePlatform {
       badge: '地方顶流',
       handRoi: [0.70, 0.99, 0.00, 1.00],
       supportedModes: ['gd_hz', 'std_tdh', 'hz_bd'],
-      defaultMode: 'gd_hz',
+      // 与 Python platforms.gd_queshen.default_mode 同一条（test_new_modes 钉两侧一致）：
+      // 必须走全牌玩法。gd_hz 的字牌只有中(7z)，而广东雀神素材里实拍到 東/西/發，
+      // 默认玩法 = 识别前的牌集闸门，挂 gd_hz 会让这些字牌进不了候选。
+      defaultMode: 'std_tdh',
     ),
     GamePlatformInfo(
       key: 'zj_sichuan',
@@ -100,7 +103,9 @@ class GamePlatform {
       handRoi: [0.70, 1.00, 0.00, 1.00],
       supportedModes: [
         'sc_hz', 'sc_xz', 'sc_xl', 'gy_zj', 'std_tdh',
-        'wh_kk', 'db_qh', 'hz_bd', 'gd_hz', 'cs_zz'
+        'wh_kk', 'db_qh', 'hz_bd', 'gd_hz', 'cs_zz',
+        'wz_tdh', 'hz_all', 'fc_all', 'zfb_bd', 'pp_zz',
+        'mj_2p', 'mj_3p', 'hz_ne', 'sc_xz_3p',
       ],
       defaultMode: 'sc_hz',
     ),

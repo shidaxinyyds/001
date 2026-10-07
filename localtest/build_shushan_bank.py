@@ -9,8 +9,21 @@
 模板键约定：基础标签 或 标签#变体（如 7s#b = 带蓝色「缺」角标变体）。
 检测器加载时 '#' 后后缀会被剥离，同一标签允许多个变体模板参与打分。
 
-用法: py -3.10 localtest/build_shushan_bank.py
+两种跑法：
+  py -3.10 localtest/build_shushan_bank.py                # 旧路径：直接生成 7MB 纯文本模板
+  py -3.10 localtest/build_shushan_bank.py --dump-tiles    # 新路径：只把坐标样本落到
+        # localtest/tiles/shushan/legacy_*.png，后续统一由 build_platform_bank.py 合成。
+
+为什么多了 --dump-tiles：旧路径不写 provenance（模板 ↔ 源帧），而
+ eval_new_material.py --lofo 只能按“这张模板来自哪一帧”剔除它才能给出样本外估计；
+ 没有它，蜀山的百分比永远是样本内（上一轮报告里“无溯源可剔：shushan×10 帧”就是这件事）。
+ 而且旧样本大多是 70px 弃牌区裁片，尺度与 112×151 手牌行不匹敌，手牌上会输给
+ 腾讯全库模板（实测 7m→9m 恒 0.69、5s→7s 高置信 0.99）——补库必须能与新帧共存，
+ 而不是重建一份只含旧坐标的库。
+
+用法: py -3.10 localtest/build_shushan_bank.py [--dump-tiles]
 """
+import argparse
 import os
 import sys
 
@@ -20,12 +33,14 @@ import numpy as np
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PYROOT = os.path.join(REPO, "android", "app", "src", "main", "python")
 sys.path.insert(0, PYROOT)
+sys.path.insert(0, os.path.join(REPO, "localtest"))
 
 from recognition.tencent_grid_detector import TencentGridDetector  # noqa: E402
 
 SHOTS = os.path.join(REPO, "localtest", "shots_shushan")
 OUT_MOD = os.path.join(PYROOT, "recognition", "templates_shushan.py")
 OUT_PNG = os.path.join(PYROOT, "recognition", "images", "shushan_exact")
+OUT_TILES = os.path.join(REPO, "localtest", "tiles", "shushan")
 
 # (截图, x, y, w, h, 模板键)  —— 手牌行样本坐标来自 diag_shushan 实测 rect，
 # 明牌区样本坐标来自 harvest_shushan montage 人工读图定标。
@@ -72,7 +87,39 @@ JOBS = [
 ]
 
 
+def dump_tiles():
+    """把旧坐标样本按 harvest_from_gt 同一预处理落进 tiles/shushan/。
+
+    命名 `legacy_<key>.png` 而不走 `f<帧>_<列>_`：这样（1）harvest_from_gt 的
+    stale 清理范不到它；（2）provenance 的正则 `f(\\d+)_` 不匹配，所以 LOFO
+    剔不到它——等价于声明“旧素材对新帧是真正的样本外知识”，符合事实。
+    落的是 face_align 后的表面对齐图（与新帧同一预处理），不预先
+    extract_face：归一化统一在 build_platform_bank 里做一次，避免同一个样本
+    走两条深度不同的归一化路径而被看成“两个不同的牌”。
+    """
+    from style_harvest import face_align
+    os.makedirs(OUT_TILES, exist_ok=True)
+    n = 0
+    for fname, x, y, w, h, key in JOBS:
+        img = cv2.imread(os.path.join(SHOTS, fname))
+        if img is None:
+            raise SystemExit(f"读不到 {SHOTS}/{fname}：旧坐标样本缺图。"
+                             f"不要继续建库，否则缺的类会被当成本来就没有")
+        crop = img[y:y + h, x:x + w]
+        cv2.imwrite(os.path.join(OUT_TILES, f"legacy_{key}.png"), face_align(crop))
+        n += 1
+    print(f"[ok] 旧坐标样本 {n} 张 -> {OUT_TILES}")
+    print("     下一步：py -3.10 -X utf8 localtest/build_platform_bank.py shushan")
+    return 0
+
+
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dump-tiles", action="store_true",
+                    help="只把坐标样本落进 tiles/shushan/，不改 templates_shushan.py")
+    a = ap.parse_args()
+    if a.dump_tiles:
+        return dump_tiles()
     os.makedirs(OUT_PNG, exist_ok=True)
     bgr_map = {}
     for fname, x, y, w, h, key in JOBS:

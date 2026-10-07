@@ -81,7 +81,7 @@ def make_engine(mode: str, hand_labels, river_labels, meld_labels=None):
     zones = ("right", "top", "left")
     river_entries = [(lab, zones[i % 3]) for i, lab in enumerate(river_labels)]
     meld_entries = [(zones[i % 3], lab, 3) for i, lab in enumerate(meld_labels or [])]
-    eng._run_bg_river_and_melds = staticmethod(  # type: ignore
+    eng._run_bg_river_and_melds = (  # type: ignore
         lambda *a, **k: (list(river_entries), list(meld_entries)))
     eng._tile_voter = engine_mod._TileVoter(window=engine_mod.VOTE_WINDOW)
     eng._frame_skipper = engine_mod._FrameSkipper()

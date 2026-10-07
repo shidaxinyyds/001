@@ -1,16 +1,41 @@
-"""二麻 / 三麻 / 四麻 玩法配置与文件共享态。
+"""玩法目录（20 种主流玩法 + 4 条 legacy 兼容条目）与文件共享态。
 
-三种玩法的差别只在「可用牌集」与「人数 / 手牌张数」：
+索引约定见下方 34 型注释。规则差别全部以**数据**形式写在本表里，改规则只改字典，
+逻辑层不动；分析器只有两个：`sichuan`（28 槽 + 定缺 + 分门 DP）与 `std`（34 型数据
+驱动）。无 analyzer 字段的条目是 legacy，只能走旧的通用 Shanten 回退。
 
-- 四麻（4p）：国标 / 四川 / 广东 / 日麻 / 台麻 / 雀魂 / 腾讯欢乐麻将。
-  34 种牌全用（1-9m / 1-9p / 1-9s / 东南西北白發中），每人 13 张（摸完 14）。
-- 三麻（3p）：日式三麻 sanma 标准。去掉 2m 8m 2p 8p 2s 8s 与白(5z)，
-  剩 27 种，每种 4 张共 108 张。座风只用 东南西。
-- 二麻（2p）：二人麻雀常用变体。只保留 万子 1-9m 与 字牌 东南西北白發中
-  （共 16 种），去掉全部筒/条。牌墙 64 张。
+选型原则：每条玩法必须与现有玩法至少在「牌集 / 鬼牌 / 结构约束」一个维度上有**真
+实差异**，否则只是换个名字凑数。按主差异维度分组：
 
-说明：二/三麻的具体规则在各 App 间并不统一，这里取「最常见」的一套定义，
-全部以**数据**形式写在 MODES 里，改动规则只需改这个字典，逻辑层无需动。
+  定缺 + 鬼牌（川麻家族，analyzer=sichuan）
+    sc_xz     108 张无字、定缺、无鬼                sc_xz_3p  三人血战（3 人）
+    sc_hz     112 张、+4 张红中(7z)作鬼、定缺        sc_xl     血流成河（同牌集，胡后走向见「未建模」）
+    gy_zj     贵阳捉鸡（红中作鬼；捉鸡/豆杠未建模）
+  鬼牌种类/张数（analyzer=std）
+    std_tdh   无鬼、34 型全牌                       wz_tdh    无鬼、108 张无字
+    hz_all    一鬼=红中(7z)、全牌                   fc_all    一鬼=发财(6z)、全牌
+    hz_bd     一鬼=白板(5z)、全牌 + 每用一鬼加一番    zfb_bd    三鬼=中发白同时作鬼
+    wh_kk     一鬼=红中 + 必须开口（need_open 仅软提示）  cf_wild  鬼由本局翻牌决定（哨兵注入）
+  结构约束（关顺子 / 只碰不吃 / 碰碰胡）
+    cs_zz     112 张、红中作鬼、sequences=False（转转胡=碰碰胡）
+    pp_zz     108 张无字、sequences=False
+    hz_ne     全牌、红中作鬼、sequences=False（红中麻将禁吃）
+    gd_hz     112 张、红中作鬼、可吃可碰
+  牌集规模 / 人数
+    mj_3p     三麻：去 2/8 万筒条与白板 → 27 型 108 张、3 人
+    mj_2p     二麻（筒条版）：18 型 72 张、2 人
+    db_qh     东北穷胡：全牌 + 幺九将约束（need_terminals）
+
+未建模规则（**不要当成已实现**，涉及这些口径的番数/走向会少报或不报）：
+  - 番型表只有 calc_fan 里的 6 种（国士16 / 七对4 / 清一色+4 / 混一色+2 / 碰碰胡+2 /
+    百搭×N）。平胡翻番、鸡胡、门清、断幺、全中、杠上开花、抢杠、海底、封顶倍数未建模。
+  - 买马 / 抓鸟 / 捉鸡豆杠结算、换三张（换牌阶段只推荐不换牌分值）、查叫 / 退税未建模。
+  - 血战到底与血流成河的**胡后走向**差异在结算层：手牌分析层两者同构（血流多 4 张红中鬼）。
+  - need_open 只做软提示（副露可见性未接进判胡）；need_all_pungs 不是硬门，必须与
+    sequences=False 同时设置才等价于「只能碰不能吃」。
+  - 花牌 / 144 张牌集（上海、南京麻将）在 34 类识别下不可实现，故未收录。
+  - 日本麻将刻意不加：缺役种检查会把无役手牌报成可听牌，属于「能跑但误导」。
+  - NativeEngine（C++）只覆盖 sichuan 且无鬼牌玩法；路由判据见 native_solver_ready。
 
 玩法切换的跨层通路：悬浮窗(Dart)把选中玩法写入本文件指向的 JSON，
 Python 引擎每帧读取（文件极小，开销可忽略）。路径与 Dart 端保持一致。
@@ -46,6 +71,15 @@ _SANMA_REMOVED = [1, 7, 10, 16, 19, 25, 31]
 
 # 二麻：去全部筒(9-17)与条(18-26)，仅留万(0-8)与字牌(27-33)
 _TWOP_REMOVED = list(range(9, 27))
+
+# 运行时鬼牌（财神）。大量地方玩法的财神是**每局翻牌决定**的，写死在 MODES 里
+# 必然与真实对局不符，所以那类玩法只存 LAIZI_CONFIG 哨兵，牌面由上层每局注入。
+# 刻意不落盘：鬼牌的时效就是一局，重启后必须重新注入；持久化会造成
+# 「上一局的财神被当成这一局」这种难查的错推荐。
+# 本常量必须定义在 MODES 之前：它在玩法表里是**加载期求值**的引用。
+LAIZI_CONFIG = "config"
+_LAIZI_EXPLICIT: List[int] = []
+
 
 MODES: Dict[str, Dict] = {
     # 规则字段说明（供 std 分析器/引擎消费，缺省即关闭）：
@@ -198,11 +232,162 @@ MODES: Dict[str, Dict] = {
         "need_all_pungs": True,  # 转转胡结构：全刻子+将
     },
 
+    # ==== 4. 新增系列（1.4）====
+    # 选型原则：每条新玩法与现有玩法至少在「牌集 / 鬼牌 / 结构约束」一个维度上
+    # 有真实差异，且该差异能被 analyzer 字段精确表达——否则就是换名字凑数，
+    # 给用户的体感是“选了不同玩法、推荐结果一模一样”。
+    # 未建模的规则（买马/抓鸟/封顶/番型表细节）逐条写在注释里，不当作已实现。
+    "wz_tdh": {
+        "name": "无字推倒胡",
+        "players": 4,
+        "available": list(range(27)),  # 纯万筒条 108 张，无字牌
+        "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
+        "wall": 108,
+        "dingque": False,
+        "laizi": None,
+        "analyzer": "std",
+        "sequences": True,
+        "seven_pairs": True,
+        # 无字牌⇒国士结构不可能存在，显式置 False（而不是依赖算法自然不命中）：
+        # 一旦上游误传了字牌，这里能暴露问题而不是默默多算一种胡型。
+        "kokushi": False,
+    },
+    "hz_all": {
+        "name": "红中麻将（全牌）",
+        "players": 4,
+        "available": list(ALL_34),
+        "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
+        "wall": 136,
+        "dingque": False,
+        "laizi": 33,  # 红中作万能鬼牌，不可吃碰打出
+        "analyzer": "std",
+        "sequences": True,
+        "seven_pairs": True,
+        "kokushi": True,
+        # 与广东红中王的差异是牌集：本玩法保留全部字牌（136），后者只到 112。
+    },
+    "fc_all": {
+        "name": "发财麻将",
+        "players": 4,
+        "available": list(ALL_34),
+        "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
+        "wall": 136,
+        "dingque": False,
+        "laizi": 32,  # 6z 发财作鬼牌（部分地区玩法以发财代替红中做赖子）
+        "analyzer": "std",
+        "sequences": True,
+        "seven_pairs": True,
+        "kokushi": True,
+    },
+    "zfb_bd": {
+        "name": "中发白三鬼",
+        "players": 4,
+        "available": list(ALL_34),
+        "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
+        "wall": 136,
+        "dingque": False,
+        # 三类全鬼：需要 laizi 支持列表（StdAnalyzer.laizi_set），单值写法只能支持一鬼。
+        "laizi": [31, 32, 33],
+        "analyzer": "std",
+        "sequences": True,
+        "seven_pairs": True,
+        "kokushi": True,
+        # 不置 fan_wild_per_use：三鬼牌本身已是高倍玩法，再逐张加番会虚抬推荐。
+    },
+    "pp_zz": {
+        "name": "碰碰胡（无字）",
+        "players": 4,
+        "available": list(range(27)),
+        "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
+        "wall": 108,
+        "dingque": False,
+        "laizi": None,
+        "analyzer": "std",
+        "sequences": False,  # 只能碰杠不能吃，牌面必为全刻子+将
+        "seven_pairs": True,
+        "kokushi": False,
+        "need_all_pungs": True,
+    },
+    "sc_xz_3p": {
+        "name": "川麻·三人血战",
+        "players": 3,
+        "available": list(range(27)),
+        "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
+        "wall": 108,
+        "dingque": True,
+        "laizi": None,
+        "analyzer": "sichuan",
+        "sequences": True,
+        "seven_pairs": True,
+        "kokushi": False,
+        # players 只影响人数展示与结算基数；手牌分析（向听/进张/查叫）与四人血战同构，
+        # 所以本条与 sc_xz 的推荐结果相同是**正确行为**，不是凑数。
+    },
+    "mj_2p": {
+        "name": "二人麻将（筒条）",
+        "players": 2,
+        "available": list(range(9, 27)),  # 只留 1p-9s 共 18 类 72 张
+        "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
+        "wall": 72,
+        "dingque": False,
+        "laizi": None,
+        "analyzer": "std",   # 旧 2p 条目无 analyzer 字段，只能走通用 Shanten 回退；本条补齐算番/赖子能力
+        "sequences": True,
+        "seven_pairs": True,
+        "kokushi": False,
+    },
+    "mj_3p": {
+        "name": "三人竞技（去2/8）",
+        "players": 3,
+        "available": _removed_to_available(_SANMA_REMOVED),  # 去 2m8m2p8p2s8s 与白板，共 27 类 108 张
+        "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
+        "wall": 108,
+        "dingque": False,
+        "laizi": None,
+        "analyzer": "std",
+        "sequences": True,
+        "seven_pairs": True,
+        # 国士在本牌集下仅部分幺九可用（白板被剔），因此置 False 避免报出做不出的胡型。
+        "kokushi": False,
+    },
+
+    "hz_ne": {
+        "name": "红中麻将（全牌·禁吃）",
+        "players": 4,
+        "available": list(ALL_34),
+        "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
+        "wall": 136,
+        "dingque": False,
+        "laizi": 33,
+        "analyzer": "std",
+        "sequences": False,  # 只能碰杠；与 hz_all 的唯一差异就是能不能吃
+        "seven_pairs": True,
+        "kokushi": True,
+    },
+    "cf_wild": {
+        "name": "自选鬼牌（每局指定）",
+        "players": 4,
+        "available": list(ALL_34),
+        "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
+        "wall": 136,
+        "dingque": False,
+        # 财神由本局翻牌决定的玩法（温州/江西/内蒙/哈灵/闲来…）都走这一条：
+        # 牌面写死必然不准，所以这里存哨兵，实际鬼牌由 set_laizi_explicit() 注入。
+        "laizi": LAIZI_CONFIG,
+        "analyzer": "std",
+        "sequences": True,
+        "seven_pairs": True,
+        "kokushi": True,
+    },
+
     # 向下兼容历史别名
     "sc": {
         "name": "川麻·血战到底",
         "players": 4,
-        "available": list(range(27)) + [33],
+        # 与 sc_xz 对齐：血战到底无字牌无赖子。此前写成 range(27)+[33]（28 类=112 张）
+        # 却配 wall=108 / laizi=None，三项自相矛盾；靠 ALIASES 指向 sc_xz 才没在运行时
+        # 暴露，但任何直接读这张表的代码（校验/统计/新工具）都会拿到脏数据。
+        "available": list(range(27)),
         "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
         "wall": 108,
         "dingque": True,
@@ -246,9 +431,17 @@ ALIASES = {
 
 
 def get_mode(key: str = DEFAULT_MODE) -> Dict:
-    """返回玩法配置 dict（含 name/players/available/hand_sizes/wall/dingque/laizi）。"""
+    """返回玩法配置 dict（含 name/players/available/hand_sizes/wall/dingque/laizi）。
+
+    哨兵 LAIZI_CONFIG 在此处解析为运行时注入的鬼牌；注意返回的是**副本**，
+    调用方改动不会污染 MODES 原表。
+    """
     key = ALIASES.get(key, key)
-    return MODES.get(key, MODES[DEFAULT_MODE])
+    m = MODES.get(key, MODES[DEFAULT_MODE])
+    if m.get("laizi") == LAIZI_CONFIG:
+        m = dict(m)
+        m["laizi"] = list(_LAIZI_EXPLICIT)
+    return m
 
 
 def is_dingque_mode(key: str = DEFAULT_MODE) -> bool:
@@ -257,14 +450,66 @@ def is_dingque_mode(key: str = DEFAULT_MODE) -> bool:
 
 
 def is_sichuan_family(key: str = DEFAULT_MODE) -> bool:
-    """返回该模式是否属于川麻血战血流家族（采用 sichuan_analyzer）。"""
+    """返回该玩法是否属于川麻血战血流家族（采用 sichuan_analyzer）。
+
+    以 analyzer 字段为唯一判据：早期实现硬编码 key 元组，新增川麻玩法时只要忘记
+    同步这里，engine 就会把川麻手牌交给 StdAnalyzer（牌集/定缺查叫全错），
+    属于“能跑但算错”的静默故障。
+    """
     key = ALIASES.get(key, key)
-    return key in ("sc_hz", "sc_xz", "sc_xl", "gy_zj", "sc")
+    return get_analyzer(key) == "sichuan"
 
 
 def get_laizi(key: str = DEFAULT_MODE) -> Optional[int]:
-    """返回该模式的万能赖子牌 34 型索引（33 为 7z 红中，31 为 5z 白板），None 表示无赖子。"""
+    """返回该玩法的万能赖子牌 34 型索引（33 为 7z 红中，31 为 5z 白板）。
+
+    注意：多赖子玩法下本函数可能返回 list，**不要拿它做 == 比较**；
+    需要“这张牌是不是鬼牌”时用 get_laizi_set()。
+    """
     return get_mode(key).get("laizi", None)
+
+
+def get_laizi_set(key: str = DEFAULT_MODE) -> frozenset:
+    """统一返回赖子索引集合（无赖子为空集），兼容单值与列表两种写法。
+
+    engine 里“赖子绝不建议弃打”这类判断必须走这里：若直接拿 get_laizi() 与索引
+    相等比较，多赖子玩法下会永远不成立，导致把鬼牌当孤张打出去（不报错但行为错）。
+    """
+    lz = get_laizi(key)
+    if lz is None:
+        return frozenset()
+    items = lz if isinstance(lz, (list, tuple, set, frozenset)) else (lz,)
+    return frozenset(int(i) for i in items if isinstance(i, int) and 0 <= int(i) < 34)
+
+
+def native_solver_ready(key: str = DEFAULT_MODE) -> bool:
+    """该玩法能否交给 C++ NativeEngine 求解（Java 侧接管路由的唯一判据）。
+
+    NativeEngine 只实现了「27 型万筒条 + 定缺」，两点硬缺口：
+      1) 完全没有鬼牌概念（sichuan_solver 里没有 laizi/wild 分支）；
+      2) ImageProcessor.parseMpszToTiles 只映射 m/p/s，任何字牌（含 7z 红中赖子）
+         会被静默丢弃后仍照常算向听，并且 native 结果会**覆盖** Python 的
+         shanten/advice/hand —— 血流红中就会拿「少了 4 张红中的手牌」出推荐。
+    因此这里要求 analyzer 是 sichuan **且** 牌集里没有鬼牌；不满足就退回 Python。
+    这是能力判定，不是 key 前缀判定：Java 早先用 mode.startsWith("sc") 路由，而
+    mode 来自被提前清空的 pendingMode，实际恒为兜底值 "sc"，等于给全部玩法开启
+    native 接管（贵阳捉鸡、杭州百搭、推倒胡全被川麻口径覆盖）。
+    """
+    key = ALIASES.get(key, key)
+    if get_analyzer(key) != "sichuan":
+        return False
+    return not get_laizi_set(key)
+
+
+def is_known_mode(key: str) -> bool:
+    """该 key 是否为已登记玩法（含别名）。
+
+    get_mode() 对未知 key 静默回退 DEFAULT_MODE，好处是引擎不会因脏配置崩，
+    代价是“选了一个不存在的花样、实际按另一个规则算”会无声无息。本函数供
+    测试与写入前校验使用，把“静默降级”可发现化。
+    """
+    key = str(key or "").strip().lower()
+    return ALIASES.get(key, key) in MODES
 
 
 def get_analyzer(key: str = DEFAULT_MODE) -> str:
@@ -303,6 +548,33 @@ def set_config_dir(path: str) -> None:
     if path and isinstance(path, str):
         _CONFIG_DIR = path
         _MODE_CACHE["check_time"] = 0.0
+
+
+def set_laizi_explicit(idx) -> bool:
+    """注入本局鬼牌（34 型索引，或其列表）。空列表=本局无鬼，也是合法状态。
+
+    只改内存态，不写磁盘：鬼牌只对当局有效。
+    """
+    global _LAIZI_EXPLICIT
+    if idx is None:
+        idx = []
+    items = idx if isinstance(idx, (list, tuple, set, frozenset)) else [idx]
+    clean: List[int] = []
+    for i in items:
+        try:
+            v = int(i)
+        except (TypeError, ValueError):
+            return False   # 脏输入直接拒绝，不静默丢弃部分牌（避免“只注了一半鬼牌”）
+        if not (0 <= v < 34):
+            return False
+        if v not in clean:
+            clean.append(v)
+    _LAIZI_EXPLICIT = clean
+    return True
+
+
+def get_laizi_explicit() -> List[int]:
+    return list(_LAIZI_EXPLICIT)
 
 
 def set_mode_explicit(key: str) -> bool:

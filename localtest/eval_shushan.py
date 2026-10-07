@@ -1,8 +1,14 @@
 # -*- coding: utf-8 -*-
-"""新平台回归门禁 · 蜀山四川麻将（红中血流）手牌识别 100% 断言。
+"""新平台回归门禁 · 蜀山四川麻将（红中血流）手牌"整帧集合精确"断言。
 
 协议与 eval_base 一致：每张截图新建 Engine、单帧评测（多帧确认类逻辑会破坏
 本协议，改动前先看 eval_base 的架构约束）。GT 为人工逐图核对的手牌多重集。
+
+⚠ 这份 GT 就硬编码在本文件里、没有外部来源记录，所以**它自己也会错**：`s4~s7`
+原记 `7s7s7s`，2026-10 看图改判为 `5s5s5s`（依据见 GT 上方注释）。改后仍红的
+`s4` 两枚 `3m→2m` 是真失误 —— 别再把 GT 改回去压绿，那等于把缺陷改回盲区。
+新平台照抄本文件时，GT 要么落 json 记来源，要么配一张肉眼对照图（见
+`docs/new_platform_onboarding.md` 的"已知边界"）。
 
 后续新增平台帧：把截图放进 localtest/shots_shushan/（或新建平台目录）、
 在 GT 里补一行，先跑 harvest/build_*_bank 收模板再进门禁。
@@ -30,14 +36,20 @@ from engine.engine import Engine  # noqa: E402
 SHOT_DIR = os.path.join(REPO, "localtest", "shots_shushan")
 
 # 人工逐图核对 GT（mpsz：1-9m=1-9万, 1-9p=筒, 1-9s=条, 7z=红中）
+#
+# s4~s7 末三枚原记 `7s7s7s`，2026-10 看图改判为 `5s5s5s`：检测器把这三枚打成
+# 5s 且分数 1.00/0.99/0.99，满分错认只剩"GT 读错"与"bank 贴错标签"两种可能，
+# 逐条排掉后者（shushan bank 内 5s 与 7s 模板峰值 NCC 仅 0.77，非同形；把四帧
+# 这 12 枚与 bank 5s/7s 全部变体拼一张图肉眼比对，牌面是四绿+中心红的五条）。
+# 见 localtest/_diag_shushan_gate.py / _diag_bank_confusion.py / _diag_shushan_visual.py。
 GT = {
     "s1.jpg": "7z8m8m8m9m7p7p7p9p9p",
     "s2.jpg": "7z8m8m8m9m7p7p9p9p7s7p",
     "s3.jpg": "7z8m8m8m9m7p7p9p9p7s7p",
-    "s4.jpg": "7z2m2m3m3m4m4m4m5m5m7s7s7s",
-    "s5.jpg": "7z2m2m3m3m4m4m4m5m5m7s7s7s",
-    "s6.jpg": "7z2m2m3m3m4m4m4m5m5m7s7s7s",
-    "s7.jpg": "7z2m2m3m3m4m4m4m5m5m7s7s7s",
+    "s4.jpg": "7z2m2m3m3m4m4m4m5m5m5s5s5s",
+    "s5.jpg": "7z2m2m3m3m4m4m4m5m5m5s5s5s",
+    "s6.jpg": "7z2m2m3m3m4m4m4m5m5m5s5s5s",
+    "s7.jpg": "7z2m2m3m3m4m4m4m5m5m5s5s5s",
 }
 
 

@@ -571,6 +571,12 @@ public class ImageProcessor {
     }
 
     public void processCapturedImage(Image image) {
+        // 运行时多层纵深安全巡检：一旦检测到非法 Hook/调试注入或凭证失效，主动熔断流水线
+        if (!SecurityGuard.isSafe(sContext) || !SecurityGuard.verifyLicense(sContext)) {
+            sendStatus(NetworkClient.statusJson("security_alert", "安全防护已触发：未授权运行或检测到非法调试/篡改环境"));
+            return;
+        }
+
         byte[] encoded = ImageEncoder.encodeImageToByteArray(image);
         if (encoded == null || encoded.length == 0) {
             sendStatus(NetworkClient.statusJson("java_error", "帧编码失败（Bitmap为空）"));
@@ -672,12 +678,17 @@ public class ImageProcessor {
         }
 
         byte[] bytes;
-        String mode = (pendingMode != null) ? pendingMode : "sc";
-        boolean isSichuan = (mode == null || mode.isEmpty() || mode.startsWith("sc"));
-        if (NativeEngine.isAvailable() && isSichuan) {
+        // native 是否接管由 Python 侧按玩法能力下发（modes.native_solver_ready）。
+        // 旧写法是 mode.startsWith("sc")，而这里的 mode 取自 pendingMode —— 它在
+        // 本帧开头推给 engine 后就立刻被置 null，所以恒为兜底值 "sc"：等于对**全部
+        // 玩法**（含带红中/白板鬼牌的血流红中、贵阳捉鸡、杭州百搭）都用川麻口径
+        // 覆写 Python 的 shanten/advice/hand，且 parseMpszToTiles 会把手牌里所有
+        // 字牌静默丢弃。用子串判据与下面 frame_skipped 的巡检同一套写法，避免为
+        // 取一个布尔位把整帧 JSON 再解析一遍。
+        String pyJsonStr = pythonResultString(engineResult);
+        boolean nativeReady = NativeEngine.isAvailable() && pyJsonStr.contains("\"native_ready\": true");
+        if (nativeReady) {
             try {
-                PyObject resObj = engineResult.get("result");
-                String pyJsonStr = (resObj != null) ? resObj.toString() : "";
                 if (!pyJsonStr.isEmpty() && pyJsonStr.startsWith("{")) {
                     org.json.JSONObject pyObj = new org.json.JSONObject(pyJsonStr);
                     String handStr = pyObj.optString("hand", "");
@@ -688,6 +699,14 @@ public class ImageProcessor {
                     boolean isTable = !"waiting".equals(pyStatus) || !handStr.isEmpty();
 
                     int[] handTiles = parseMpszToTiles(handStr);
+                    // MPSZ 是定长两字符一码，native 只认 m/p/s：一旦解出来的张数
+                    // 对不上串长，说明手牌里混进了 native 表达不了的牌（字牌/鬼牌）
+                    // 或识别串残缺。这种帧绝不接管 —— 少喂一张牌算出的向听是错的，
+                    // 而它的结果会覆写 Python 已经算对的正确答案。
+                    boolean handMappable = handTiles.length * 2 == handStr.length();
+                    if (!handMappable) {
+                        TimedLog.e(TAG, "手牌含 native 无法映射的牌张，本帧回退 Python: " + handStr);
+                    }
 
                     org.json.JSONArray opDqArr = pyObj.optJSONArray("opponents_dingque");
                     if (opDqArr != null) {
@@ -699,7 +718,9 @@ public class ImageProcessor {
                         }
                     }
 
-                    String nativeJsonStr = NativeEngine.evaluate(handTiles, dqSuit, isSwap, isDq, isTable);
+                    String nativeJsonStr = handMappable
+                            ? NativeEngine.evaluate(handTiles, dqSuit, isSwap, isDq, isTable)
+                            : null;
                     if (nativeJsonStr != null && !nativeJsonStr.isEmpty() && nativeJsonStr.startsWith("{")) {
                         org.json.JSONObject nativeObj = new org.json.JSONObject(nativeJsonStr);
                         pyObj.put("native_active", true);
@@ -753,16 +774,13 @@ public class ImageProcessor {
             bytes = engineResult.callAttr("to_bytes").toJava(byte[].class);
         }
 
-        // 提取是否跳帧状态，动态更新巡检降频周期
+        // 提取是否跳帧状态，动态更新巡检降频周期（复用上面已取出的结果串，
+        // 不再向 Python 多要一次 get("result")；结果缺失时归零重算）。
         try {
-            PyObject resObj = engineResult.get("result");
-            if (resObj != null) {
-                String resStr = resObj.toString();
-                if (resStr.contains("\"frame_skipped\": true")) {
-                    consecutiveSkips++;
-                } else {
-                    consecutiveSkips = 0;
-                }
+            if (pyJsonStr.contains("\"frame_skipped\": true")) {
+                consecutiveSkips++;
+            } else {
+                consecutiveSkips = 0;
             }
         } catch (Throwable ignore) {
             consecutiveSkips = 0;
@@ -812,6 +830,17 @@ public class ImageProcessor {
             client.sendStatus(json);
         } catch (Throwable t) {
             TimedLog.e(TAG, "sendStatus failed: " + t);
+        }
+    }
+
+    /** 取 Python 结果里的 result 字段（JSON 串）；任何异常都退化成空串，即不走 native。 */
+    private static String pythonResultString(PyObject engineResult) {
+        try {
+            PyObject r = engineResult.get("result");
+            return (r != null) ? r.toString() : "";
+        } catch (Throwable t) {
+            TimedLog.e(TAG, "读取 python result 字段失败，本帧不走 native: " + t);
+            return "";
         }
     }
 

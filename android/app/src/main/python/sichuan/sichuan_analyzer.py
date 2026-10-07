@@ -16,6 +16,25 @@ from functools import lru_cache
 from sichuan.hand_range import BayesianHandRangeReader, OpponentState
 from sichuan.equity_radar import WinEquityGauge
 from recognition.policy_value_net import PolicyValueNetwork
+from tile_ledger import ting_chance as _ting_chance
+from tile_ledger import idx_to_mpsz as _idx_to_mpsz
+from tile_ledger import ledger_after_draw as _ledger_after_draw
+# 同分牌理裁决：EV/进张完全相等时不得由「牌的索引先后」决定打哪张。
+# 14 张与 13 张预摸两条路径必须共用同一个 key，否则两条路径会对同一手牌给出不同的主推牌。
+from discards_tiebreak import order_key as _tie_order_key
+
+
+def _idx27_to_34(idx: int) -> int:
+    """川麻 28 型索引 → 账本的 34 型索引（红中 27 ↔ 33）。"""
+    return 33 if idx == 27 else idx
+
+
+def _wait_idxs_34(waiting_dict) -> list:
+    """川麻 28 型听口索引 → 账本的 34 型索引（红中 27 ↔ 33）。
+
+    这个换位以前只在丢弃处出错（z 牌被静默吃掉），集中到一个函数并由测试锁定。
+    """
+    return [_idx27_to_34(k) for k in waiting_dict]
 
 
 # 花色索引常量
@@ -670,8 +689,12 @@ class SichuanAnalyzer:
         dingque_suit: Optional[int] = None,
         opponent_dingque_suits: Optional[List[int]] = None,
         opponents: Optional[List[OpponentState]] = None,
+        ledger: Optional[Dict] = None,
     ) -> List[Dict]:
         """核心选叫与出牌分析器入口（EV 期望价值排序模型，含防点炮风险惩罚）。
+
+        ledger 为牌局账本（tile_ledger.build_ledger 的结果），传入后听牌文案会拆成
+        「牌墙可自摸 / 对手可能打出」的可追溯事实；不传则只报未现上界（带「至多」）。
 
         引擎常态喂 13 张（3n+1，刚打完牌等摸牌）：此时直接打一张会剩 12 张（3n），
         听牌/叫口搜索全部短路、进张恒 0。对 3n+1 输入自动改走「预摸牌期望」路径，
@@ -681,9 +704,11 @@ class SichuanAnalyzer:
         total_len = sum(counts[:27]) + num_wild + num_fixed_melds * 3
         if total_len % 3 == 1:
             return cls._analyze_discards_predraw(
-                counts, num_fixed_melds, pool_remaining, dingque_suit, opponent_dingque_suits, opponents=opponents)
+                counts, num_fixed_melds, pool_remaining, dingque_suit, opponent_dingque_suits,
+                opponents=opponents, ledger=ledger)
         return cls._analyze_discards_3n2(
-            counts, num_fixed_melds, pool_remaining, dingque_suit, opponent_dingque_suits, opponents=opponents)
+            counts, num_fixed_melds, pool_remaining, dingque_suit, opponent_dingque_suits,
+            opponents=opponents, ledger=ledger)
 
     @classmethod
     def _analyze_discards_3n2(
@@ -694,8 +719,9 @@ class SichuanAnalyzer:
         dingque_suit: Optional[int] = None,
         opponent_dingque_suits: Optional[List[int]] = None,
         opponents: Optional[List[OpponentState]] = None,
+        ledger: Optional[Dict] = None,
     ) -> List[Dict]:
-        """14 张（3n+2）完整出牌 EV 分析：打每张后剩 13 张（3n+1），叫口/向听可算。"""
+        """14 张（3n+2）完整出牌 EV 分析：打每张后剩 13 张（3n+1），听口/向听可算。"""
         results = []
         suits = cls.get_suits_in_hand(counts)
 
@@ -733,10 +759,16 @@ class SichuanAnalyzer:
             if not opponents:
                 opponents = [OpponentState(seat=1), OpponentState(seat=2), OpponentState(seat=3)]
 
-        # 强化学习策略价值网络 (PVN) 推理 (耗时 < 0.5ms)
+        # 策略价值网络 (PVN) 推理。**仅在权重来自离线训练时才参与融合**：未训练时
+        # 它的 value 头是近似 0.93 的常数（会把胜率整体抬高 ~0.42），policy 头是按
+        # 牌索引顺序的对角先验（会在同分 tie 上打乱牌理排序），两者都是纯噪声。
         pvn = PolicyValueNetwork.get_instance()
-        pvn_policy, pvn_val = pvn.forward(counts[:34], pool_remaining=pool_remaining)
-        pvn_equity = (pvn_val + 1.0) / 2.0
+        pvn_on = bool(getattr(pvn, "trained", False))
+        if pvn_on:
+            pvn_policy, pvn_val = pvn.forward(counts[:34], pool_remaining=pool_remaining)
+            pvn_equity = (pvn_val + 1.0) / 2.0
+        else:
+            pvn_policy, pvn_equity = None, None
         pool_rem = pool_remaining if pool_remaining is not None else [max(0, 4 - (counts[i] if i < len(counts) else 0)) for i in range(27)]
 
         for discard in candidate_discards:
@@ -760,8 +792,15 @@ class SichuanAnalyzer:
 
                 is_qing = len(cls.get_suits_in_hand(counts)) == 1
                 suffix = " (清一色)" if is_qing else ""
-                if real_ukeire > 0:
-                    reason = f"听 {'/'.join(ting_cn_list[:3])}，余 {real_ukeire} 张{suffix}"
+                if ledger is not None:
+                    # 账本口径：拆成「牌墙可自摸 / 对手可能打出 / 牌墙还能撑几轮」，
+                    # 文案里的每个数字都能在 ting_chance 里指回字段。
+                    chance = _ting_chance(ledger, _wait_idxs_34(waiting_dict))
+                    reason = f"{chance['text']}{suffix}"
+                elif real_ukeire > 0:
+                    # 无账本时只能报上界：real_ukeire 是「未现张数」，里面含了对手
+                    # 按住的牌，说成「余 N 张机会」就是伪精确（B-P3 区间口径）。
+                    reason = f"听 {'/'.join(ting_cn_list[:3])}，未现至多 {real_ukeire} 张{suffix}"
                 else:
                     reason = f"听 {'/'.join(ting_cn_list[:3])}（绝张）{suffix}"
             else:
@@ -773,6 +812,17 @@ class SichuanAnalyzer:
                     )
                     real_ukeire = incoming_ukeire
                     incoming_cn = [index27_to_chinese(t) for t in incoming_dict.keys()]
+                    # 账本口径：进张也一样要拆「牌墙可摸 / 对手能打出」，否则“共 8 张”
+                    # 会假装那 8 张真的还有 8 次机会（实际可能 5 张握在已定缺的两家手里）。
+                    if incoming_cn:
+                        ukeire_text = None
+                        if ledger is not None:
+                            ukeire_text = _ting_chance(
+                                ledger, _wait_idxs_34(incoming_dict), verb="进")["text"] or None
+                        if not ukeire_text:
+                            ukeire_text = f"进 {'/'.join(incoming_cn[:3])} 未现至多 {incoming_ukeire} 张"
+                    else:
+                        ukeire_text = ""
                     ev_score = 20000.0 + incoming_ukeire * 10.0
 
                     # 顺子/刻子面子保护：绝对禁止无故拆散完整面子
@@ -805,17 +855,14 @@ class SichuanAnalyzer:
                         ev_score -= 4000.0
 
                     if is_dingque_discard:
-                        if incoming_cn:
-                            reason = f"定缺打{SUIT_NAMES[dingque_suit]}，进 {'/'.join(incoming_cn[:3])} 共 {incoming_ukeire} 张"
-                        else:
-                            reason = f"定缺打{SUIT_NAMES[dingque_suit]}"
+                        reason = (f"定缺打{SUIT_NAMES[dingque_suit]}，{ukeire_text}"
+                                  if ukeire_text else f"定缺打{SUIT_NAMES[dingque_suit]}")
                     elif discard in protected_tiles:
                         reason = "破坏顺子/刻子"
+                    elif ukeire_text:
+                        reason = ukeire_text
                     else:
-                        if incoming_cn:
-                            reason = f"进 {'/'.join(incoming_cn[:3])} 共 {incoming_ukeire} 张"
-                        else:
-                            reason = "改善牌型"
+                        reason = "改善牌型"
                 else:
                     real_ukeire = 0
                     ev_score = -1000.0 * shanten
@@ -865,26 +912,25 @@ class SichuanAnalyzer:
             # 贝叶斯手牌透视与危险流向反推
             dflow = BayesianHandRangeReader.evaluate_danger_flow(discard, pool_rem, opponents)
 
-            # 强化学习策略价值网络先验概率加成 (保证 PVN 真实驱动建议排序)
-            policy_prob = float(pvn_policy[discard]) if discard < len(pvn_policy) else 0.0
-            ev_score += policy_prob * 100.0
+            # PVN 策略项（未训练时恒为 0.0，不得污染 EV 排序）
+            policy_prob = float(pvn_policy[discard]) if pvn_on and discard < len(pvn_policy) else 0.0
+            if pvn_on:
+                ev_score += policy_prob * 100.0
 
             # 全场实时胡牌胜率与期望收益雷达计算
             analytical_equity = WinEquityGauge.calculate_win_equity(
                 shanten, waiting_dict, real_ukeire, pool_rem,
                 [opp.estimate_tenpai_probability() for opp in opponents]
             )
-            combined_equity = max(0.01, min(0.99, analytical_equity * 0.55 + pvn_equity * 0.45))
+            # 未训练时胜率 = 纯解析式结果（不再叠加 PVN 常数偏置）
+            if pvn_on:
+                combined_equity = max(0.01, min(0.99, analytical_equity * 0.55 + pvn_equity * 0.45))
+            else:
+                combined_equity = max(0.0, min(1.0, analytical_equity))
             expected_fan = 1
             if waiting_dict:
                 first_wait = next(iter(waiting_dict.keys()))
                 expected_fan = cls.calculate_fan(counts, first_wait, num_fixed_melds, dingque_suit)
-            ev_gauge = WinEquityGauge.evaluate_gauge(
-                combined_equity,
-                expected_fan=expected_fan,
-                max_deal_in_prob=dflow["deal_in_prob"]
-            )
-
             ting_details = []
             if waiting_dict:
                 for w, rem in waiting_dict.items():
@@ -895,6 +941,24 @@ class SichuanAnalyzer:
                         "is_dead": (rem == 0),
                         "fan": cls.calculate_fan(counts, w, num_fixed_melds, dingque_suit),
                     })
+
+            ting_chance = (_ting_chance(ledger, _wait_idxs_34(waiting_dict))
+                           if ledger is not None and waiting_dict else None)
+
+            # 雷达口径：胜率本身是未标定模型值，所以 insight 里只允许出现
+            # 「档位 + 账本事实」——事实用叫口的拆张结论（共余 N 张 / 只在牌墙 / 还能撑几轮），
+            # 用户可以拿它跟牌河逐张核对。basis 把「这个数从哪来」写进 payload。
+            gauge_facts = []
+            if ting_chance and ting_chance.get("text"):
+                gauge_facts.append(ting_chance["text"])
+            ev_gauge = WinEquityGauge.evaluate_gauge(
+                combined_equity,
+                expected_fan=expected_fan,
+                max_deal_in_prob=dflow["deal_in_prob"],
+                basis=("analytical+pvn" if pvn_on else "analytical"),
+                facts=gauge_facts,
+                deal_in_level=dflow.get("danger_level"),
+            )
 
             results.append({
                 "tile": index27_to_mpsz(discard),
@@ -909,13 +973,17 @@ class SichuanAnalyzer:
                 "danger_penalty": danger_penalty,
                 "danger_flow": dflow,
                 "policy_prob": round(policy_prob, 3),
+                "pvn_used": pvn_on,
+                "analytical_equity": round(analytical_equity, 3),
                 "win_equity": round(combined_equity, 3),
                 "ev_gauge": ev_gauge,
+                "ting_chance": ting_chance,
             })
 
             counts[discard] += 1
 
-        results.sort(key=lambda item: item["ev"], reverse=True)
+        # 排序唯一入口：主键仍是 EV，同分交由决胜链逐层裁决（见 discards_tiebreak）。
+        results.sort(key=_tie_order_key)
         return results
 
     @classmethod
@@ -927,12 +995,17 @@ class SichuanAnalyzer:
         dingque_suit: Optional[int] = None,
         opponent_dingque_suits: Optional[List[int]] = None,
         opponents: Optional[List[OpponentState]] = None,
+        ledger: Optional[Dict] = None,
     ) -> List[Dict]:
         """13 张（3n+1）预摸牌期望分析。
 
         对每种牌池中剩余 > 0 的摸入牌 t 组成 14 张手牌，复用完整 14 张 EV 流程
         算各候选打点的进张/向听，再按摸入概率（剩余张数占比）加权聚合成该
         13 张局面下每张牌的期望值。仅在手牌/牌河变化时由上层缓存控制重算。
+
+        ledger 是每个摸牌场景各自过一遍 `ledger_after_draw` 的账本：那一张牌已从牌墙
+        搬进可见域，直接沿用 13 张的账面会把刚摸进的这张也算成“还能摸到”，
+        系统性多报一张机会。
         """
         draw_opts = []
         for t in range(28):
@@ -960,20 +1033,35 @@ class SichuanAnalyzer:
         if not draw_opts:
             return []
         # 按剩余牌数降序选取最具代表性的前 6 个高概率摸牌情景，将 13 张耗时由近 1 秒压减至 ~200ms
+        considered_kinds = len(draw_opts)
+        rem_considered = sum(w for _, w in draw_opts)
         draw_opts.sort(key=lambda x: -x[1])
         draw_opts = draw_opts[:6]
         total_w = float(sum(w for _, w in draw_opts))
+
+        # B-P4 空白 D：每个摸牌情景各自跑过一次完整的 14 张流程，scen[0] 就是
+        # 「摸到这张牌时的最优出牌」。把它记下来，上层就能回答「摸到什么牌会
+        # 改建议」——这是现成模拟的副产品，不额外算一次牌理（另写一份就会与
+        # 主推牌不同源，面板会出现「预演说摸 X 改打 Y，而主推仍是 Z」的自相矛盾）。
+        scen_rows: List[List] = []
 
         agg: Dict[int, Dict] = {}
         for t, w in draw_opts:
             p = w / total_w
             counts[t] += 1
+            scen_ledger = (None if ledger is None
+                           else _ledger_after_draw(ledger, _idx27_to_34(t)))
             try:
                 scen = cls._analyze_discards_3n2(
                     counts, num_fixed_melds, pool_remaining,
-                    dingque_suit, opponent_dingque_suits, opponents=opponents)
+                    dingque_suit, opponent_dingque_suits, opponents=opponents,
+                    ledger=scen_ledger)
             finally:
                 counts[t] -= 1
+            # 本情景下的最优出牌：scen 已在 `_analyze_discards_3n2` 里按同一份
+            # 决胜链排好序，取第 0 个就是答案，不再自己重排（重排就是第二套牌理）。
+            scen_rows.append([_idx_to_mpsz(_idx27_to_34(t)), int(w),
+                              str(scen[0]["tile"]) if scen else ""])
             for r in scen:
                 idx = r["tile_idx"]
                 a = agg.get(idx)
@@ -984,9 +1072,12 @@ class SichuanAnalyzer:
                         "is_dingque": False,
                         "best_p": -1.0, "best_reason": "",
                         "ting_p": -1.0, "ting_tiles": [], "ting_details": [],
+                        "ting_chance": None,
                         "danger_flow": r.get("danger_flow"),
                         "policy_prob": r.get("policy_prob", 0.0),
+                        "pvn_used": r.get("pvn_used", False),
                         "win_equity": 0.0,
+                        "analytical_equity": 0.0,
                         "ev_gauge": r.get("ev_gauge"),
                     }
                     agg[idx] = a
@@ -996,6 +1087,7 @@ class SichuanAnalyzer:
                 a["shanten"] += p * r["shanten"]
                 a["danger"] += p * r.get("danger_penalty", 0.0)
                 a["win_equity"] = a.get("win_equity", 0.0) + p * r.get("win_equity", 0.0)
+                a["analytical_equity"] = a.get("analytical_equity", 0.0) + p * r.get("analytical_equity", 0.0)
                 a["is_dingque"] = a["is_dingque"] or r["is_dingque"]
                 if p > a["best_p"]:
                     a["best_p"] = p
@@ -1003,12 +1095,25 @@ class SichuanAnalyzer:
                     a["danger_flow"] = r.get("danger_flow")
                     a["ev_gauge"] = r.get("ev_gauge")
                     a["policy_prob"] = r.get("policy_prob", 0.0)
+                    a["pvn_used"] = r.get("pvn_used", False)
                 if r["ting_details"] and p > a["ting_p"]:
                     a["ting_p"] = p
                     a["ting_tiles"] = r["ting_tiles"]
                     a["ting_details"] = r["ting_details"]
+                    a["ting_chance"] = r.get("ting_chance")
 
         results = []
+        # 摸牌预演的原始事实（相对「谁更优」不做任何断言，措辞由上层根据最终
+        # 主推牌生成）：`simulated_kinds < considered_kinds` 是拿时间复杂度换的，必须
+        # 让端上看得见“还有几种没算”，否则预演行会被当成全部可能性。
+        predraw = {
+            # [[摸到的牌, 牌墙还剩几张, 该情景下的最优出牌], ...] 按剩余张数降序
+            "scenarios": scen_rows,
+            "simulated_kinds": len(scen_rows),
+            "considered_kinds": int(considered_kinds),
+            "rem_simulated": int(sum(r[1] for r in scen_rows)),
+            "rem_considered": int(rem_considered),
+        }
         for idx, a in agg.items():
             # 仅推荐当前 13 张里真实持有的牌（某摸牌场景下刚摸进的牌不作为候选）
             if counts[idx] <= 0:
@@ -1021,8 +1126,14 @@ class SichuanAnalyzer:
             avg_shanten = int(round(a["shanten"] / wsum))
             reason = a["best_reason"] or ""
             if a["ting_details"]:
-                cn_names = [d["name"] for d in a["ting_details"][:3]]
-                reason = f"摸牌后听 {'/'.join(cn_names)}，期望进张 {avg_uke:.1f} 张"
+                ch = a.get("ting_chance") or {}
+                if ch.get("text"):
+                    # 账本口径：听口拆成可追溯事实，但必须标清“摸牌后”——它是按
+                    # 权重最大的那个摸牌场景算的，不是当前 13 张已经成立的事实。
+                    reason = f"摸牌后 {ch['text']}（期望进张 {avg_uke:.1f} 张）"
+                else:
+                    cn_names = [d["name"] for d in a["ting_details"][:3]]
+                    reason = f"摸牌后听 {'/'.join(cn_names)}，期望进张 {avg_uke:.1f} 张"
             elif reason and "期望" not in reason:
                 reason = f"{reason}｜摸牌期望进张 {avg_uke:.1f} 张"
             elif not reason:
@@ -1035,15 +1146,23 @@ class SichuanAnalyzer:
                 "ev": round(avg_ev, 1),
                 "ting_tiles": a["ting_tiles"],
                 "ting_details": a["ting_details"],
+                "ting_chance": a.get("ting_chance"),
                 "reason": reason,
                 "is_dingque": a["is_dingque"],
                 "danger_penalty": round(a["danger"] / wsum, 1),
                 "danger_flow": a.get("danger_flow"),
                 "policy_prob": round(a.get("policy_prob", 0.0), 3),
+                "pvn_used": bool(a.get("pvn_used", False)),
+                "analytical_equity": round(a.get("analytical_equity", 0.0) / wsum, 3),
                 "win_equity": round(a.get("win_equity", 0.0) / wsum, 3),
                 "ev_gauge": a.get("ev_gauge"),
+                # 只有预摸路径会产出这个字段（14 张帧根本没有「下一张摸什么」可言）：
+                # 上层据此判断能不能渲染预演行，没数据就不渲染，不编一行看上去聪明的话。
+                "predraw": predraw,
             })
-        results.sort(key=lambda item: item["ev"], reverse=True)
+        # 预摸牌期望路径同样走决胜链：与 14 张路径共用一份 key，保证同一手牌两条
+        # 路径的相对次序一致（两处各写一份排序就是两套牌理，用户会看到理由矛盾）。
+        results.sort(key=_tie_order_key)
         return results
 
     @classmethod

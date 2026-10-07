@@ -18,6 +18,11 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional, Tuple
 
+# 口径单一来源：本模块的 tenpai_prob / deal_in_prob / top_held.prob 全部是**手工先验**
+# 算出的模型值（下面的 0.28/0.20/0.08/0.04~0.26/2.2 等常数都没拿实战标定过），
+# 所以对外只交档位 + 字段类别，由 UI 决定能说到什么程度。
+from probability_bands import danger_band, held_band, held_kind, tenpai_band, value_kind
+
 SUIT_M = 0  # 万 0..8
 SUIT_P = 1  # 筒 9..17
 SUIT_S = 2  # 条 18..26
@@ -81,7 +86,12 @@ class OpponentState:
         self.standing_count = max(1, min(14, standing_count))
 
     def estimate_tenpai_probability(self, total_turn: int = 10, turn: Optional[int] = None) -> float:
-        """估算该对手的实时听牌概率 P(Tenpai) ∈ [0.05, 0.95]。"""
+        """估算该对手的实时听牌倾向 P(Tenpai) ∈ [0.05, 0.95]。
+
+        **这是模型打分，不是频率概率**：下面的 logistic 斜率 0.28、每次鸣牌 +0.20、
+        晚巡中张生张 +0.08 都是手写常数，从未用真实对局标定。它可以用来分档
+        （低/中/高/极高）与算危险度乘积，不可以当「X% 听牌」直接给用户看。
+        """
         # 1. 巡目自然成长曲线 (S型 Logistic)
         effective_turn = turn if turn is not None else (len(self.discards) or total_turn)
         effective_turn = max(1, effective_turn)
@@ -300,6 +310,10 @@ class BayesianHandRangeReader:
             "tile_idx": candidate_tile,
             "deal_in_prob": round(total_deal_in, 3),
             "danger_level": level,
+            # 档位与字段类别：面板拿 `danger_band` 渲染，不再自己把 deal_in_prob
+            # 乘 100 拼成「X% 危」（未标定数字披百分号就是 B-P3 要消除的伪精确）。
+            "danger_band": danger_band(level),
+            "prob_kind": value_kind(),
             "danger_reason": summary_reason,
             "max_threat_seat": max_threat_seat,
             "threats": threats,
@@ -326,6 +340,10 @@ class BayesianHandRangeReader:
                         "tile": index27_to_mpsz(t_idx),
                         "chinese": index27_to_chinese(t_idx),
                         "prob": round(prob, 2),
+                        # prob 是 `p_prior * likelihood`，likelihood 可被染手倾斜乘到 2.2，
+                        # 整个分布**从未归一化**：它只能比大小，不是「有 68% 拿这张」。
+                        # 所以随字段给出档位与含义，不给百分比。
+                        "band": held_band(prob),
                     })
 
             dq_name = {SUIT_M: "万", SUIT_P: "筒", SUIT_S: "条"}.get(opp.dingque_suit, "未定")
@@ -337,7 +355,11 @@ class BayesianHandRangeReader:
                 "dingque_name": dq_name,
                 "standing": opp.standing_count,
                 "tenpai_prob": round(tenpai_p, 2),
+                "tenpai_band": tenpai_band(tenpai_p),
                 "top_held": top_held,
                 "discards_count": len(opp.discards),
+                # 字段含义随 payload 下发，避免前端把相对后验当频率概率印成百分号。
+                "prob_kind": value_kind(),
+                "held_prob_kind": held_kind(),
             })
         return summaries

@@ -11,6 +11,11 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 
+# 战术加权后的重排必须与两个 analyzer 用**同一份**决胜链：旧写法在这里另写一组
+# (定缺/EV/进张) 键，同分时就与 analyzer 层的次序分叉，表现为「知识库重排后主推牌
+# 与 reason 里的描述不相对应」。排序口径只允许有一个源头。
+from discards_tiebreak import order_key as _tie_order_key
+
 
 class KnowledgeBase:
     """麻将实战博弈知识库。"""
@@ -189,12 +194,9 @@ class KnowledgeBase:
             item["tactical_ev_boost"] = round(boost, 1)
             item["ev"] = round(cur_ev + boost, 1)
 
-        # 重新按战术加权后的 EV 排序，确保知识库建议真实改变主推顺序
-        advice_list.sort(key=lambda x: (
-            -float(x.get("is_dingque", False)),
-            -float(x.get("ev", 0.0)),
-            -int(x.get("ukeire", 0))
-        ))
+        # 重新按战术加权后的 EV 排序，确保知识库建议真实改变主推顺序；
+        # 同分部分交给与川麻/std 完全相同的决胜链（定缺→EV→进张→叫口→牌墙→安全→弹性→索引）。
+        advice_list.sort(key=_tie_order_key)
 
         return {
             "doctrine": doctrine,

@@ -7,6 +7,7 @@ std_tdh / wh_kk / db_qh / hz_bd / gd_hz / cs_zz）。
 
 - laizi            赖子/百搭/鬼牌：胡牌判定枚举其充当任意牌（含作将）；
                    赖子永不做弃牌候选（鬼牌不许打出）。
+                   可写单个 34 型索引，也可写列表（两精/中发白全鬼类多赖子玩法）。
 - sequences=False  只能碰杠不能吃（转转胡）：顺子分解路径整体关闭。
 - need_all_pungs   胡牌结构必须全刻子+一将（转转/碰碰类）。
 - need_terminals   胡牌手必须带幺九/字牌（东北穷胡严格判定）。
@@ -22,6 +23,10 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Dict, List, Optional, Tuple
+
+# 同分牌理裁决：与川麻共用同一份决胜链，保证六种 std 玩法与川麻行为一致。
+# 必须放在顶层 import：排序点无降级分支，延迟 import 一旦失败就会在建议链里静默炸。
+from discards_tiebreak import order_key as _tie_order_key
 
 SUIT_NAMES = {0: "万", 1: "筒", 2: "条"}
 _MP = "mps"
@@ -74,23 +79,31 @@ def _complete_melds(t: Tuple[int, ...], melds: int, seq_ok: bool, wild: int) -> 
         if _complete_melds(tuple(lst), melds - 1, seq_ok, wild - w):
             return True
         lst[first] += r
-    # 分支2：顺子（first 必占 1 张；中/张可缺用赖子补；不跨花色边界）
-    if seq_ok and first < 27 and first % 9 <= 6:
-        for a in (0, 1):
-            for b in (0, 1):
-                if lst[first + 1] < a or lst[first + 2] < b:
-                    continue
-                w = 2 - a - b
-                if w > wild:
-                    continue
-                lst[first] -= 1
-                lst[first + 1] -= a
-                lst[first + 2] -= b
-                if _complete_melds(tuple(lst), melds - 1, seq_ok, wild - w):
-                    return True
-                lst[first] += 1
-                lst[first + 1] += a
-                lst[first + 2] += b
+    # 分支2：顺子。first 可以落在顺子的最小/中间/最大任一张上，另两张缺则用赖子补。
+    # 早期实现只把 first 当**最小张**（仅枚举 first+1/first+2），会漏判“赖子当
+    # 顺子最小张”的结构：手上 8m9m + 一张赖子胡 7m8m9m，此时 first=8m 既凑不出
+    # 8m9m10m，又因 8m%9>6 连顺子分支都进不去 → 整手被判不能胡（对拍实测漏判）。
+    if seq_ok and first < 27:
+        for off in (0, 1, 2):
+            s = first - off                      # 顺子起始 index
+            if s < 0 or s % 9 > 6:
+                continue                         # 越界或跨花色
+            p_a, p_b = [p for p in (s, s + 1, s + 2) if p != first]
+            for a in (0, 1):
+                for b in (0, 1):
+                    if a > lst[p_a] or b > lst[p_b]:
+                        continue
+                    w = 2 - a - b
+                    if w > wild:
+                        continue
+                    lst[first] -= 1
+                    lst[p_a] -= a
+                    lst[p_b] -= b
+                    if _complete_melds(tuple(lst), melds - 1, seq_ok, wild - w):
+                        return True
+                    lst[first] += 1
+                    lst[p_a] += a
+                    lst[p_b] += b
     return False  # first 无处可去 → 该分配失败
 
 
@@ -103,6 +116,19 @@ def _suits_present(counts: List[int]) -> Tuple[List[int], bool]:
     return sorted({i // 9 for i in num}), any(counts[i] > 0 for i in range(27, 34))
 
 
+def laizi_set(rules: Dict) -> frozenset:
+    """把 modes 里的 laizi 字段归一为集合：支持 None / 单个索引 / 索引列表。
+
+    历史玩法都写单个索引；两精（江西）、中发白全鬼类玩法需要多个，故此处
+    统一成一个入口，避免各个调用点各自 if-else（漏一处就会出现“赖子被当弃牌”）。
+    """
+    lz = rules.get("laizi")
+    if lz is None:
+        return frozenset()
+    items = lz if isinstance(lz, (list, tuple, set, frozenset)) else (lz,)
+    return frozenset(int(i) for i in items if isinstance(i, int) and 0 <= int(i) < 34)
+
+
 class StdAnalyzer:
     """数据驱动的地方玩法分析核心；rules 传 modes.get_mode(key) 字典。"""
 
@@ -110,13 +136,13 @@ class StdAnalyzer:
 
     @staticmethod
     def split_wild(counts: List[int], rules: Dict) -> Tuple[List[int], int]:
-        """把赖子从计数里剥离（赖子在 34 型中占自己的槽位）。"""
-        laizi = rules.get("laizi")
+        """把所有赖子从计数里剥离（每张赖子都可充当任意牌）。"""
+        lz = laizi_set(rules)
         c = list(counts)
         wild = 0
-        if laizi is not None and 0 <= laizi < 34:
-            wild = c[laizi]
-            c[laizi] = 0
+        for i in lz:
+            wild += c[i]
+            c[i] = 0
         return c, wild
 
     # ---------- 特殊胡型 ----------
@@ -230,9 +256,9 @@ class StdAnalyzer:
         c, wild = cls.split_wild(list(counts), rules)
         if (sum(c) + wild + fixed_melds * 3) % 3 != 1:
             return False
-        laizi = rules.get("laizi")
+        lz = laizi_set(rules)
         for t in range(34):
-            if t == laizi:
+            if t in lz:
                 continue
             counts[t] += 1
             win = cls.can_win(counts, fixed_melds, rules)
@@ -244,10 +270,10 @@ class StdAnalyzer:
     @classmethod
     def find_waits(cls, counts: List[int], fixed_melds: int, rules: Dict,
                    available: List[int], pool_remaining: Optional[List[int]] = None) -> Dict[int, int]:
-        laizi = rules.get("laizi")
+        lz = laizi_set(rules)
         waits: Dict[int, int] = {}
         for t in available:
-            if t == laizi:
+            if t in lz:
                 continue  # 鬼牌不作为"等的牌"上报
             if t >= len(counts):
                 continue
@@ -297,26 +323,33 @@ class StdAnalyzer:
     @classmethod
     def analyze_discards(cls, counts: List[int], rules: Dict, available: List[int],
                          pool_remaining: Optional[List[int]] = None,
-                         fixed_melds: int = 0) -> List[Dict]:
+                         fixed_melds: int = 0,
+                         ledger: Optional[Dict] = None) -> List[Dict]:
         """14(3k+2) 张出牌态逐张推演：向听/进张/听口/最大番 → EV 排序。
-        赖子（鬼牌）永不做弃牌候选。"""
-        laizi = rules.get("laizi")
+        赖子（鬼牌）永不做弃牌候选。
+
+        ledger（tile_ledger.build_ledger 结果）传入后，听牌文案会把“余 N 张”拆成
+        「牌墙可自摸 / 对手可能打出 / 牌墙还能撑几轮」的可追溯事实；不传保持旧口径。
+        std 口径本身就是 34 型，听口索引直接可用，不需川麻那套 27↔33 换位。
+        """
+        lz = laizi_set(rules)
         if sum(counts) % 3 != 2:
             return []
         results: List[Dict] = []
         for d in range(34):
-            if counts[d] <= 0 or d == laizi:
+            if counts[d] <= 0 or d in lz:
                 continue
             counts[d] -= 1
             sh = cls.calculate_shanten(counts, fixed_melds, rules)
             waits: Dict[int, int] = {}
+            improving: List[int] = []
             ukeire = 0
             if sh <= 0:
                 waits = cls.find_waits(counts, fixed_melds, rules, available, pool_remaining)
                 ukeire = sum(waits.values())
             else:
                 for t in available:
-                    if t == laizi or t >= len(counts):
+                    if t in lz or t >= len(counts):
                         continue
                     rem = pool_remaining[t] if pool_remaining is not None and t < len(pool_remaining) else max(0, 4 - counts[t])
                     if rem <= 0:
@@ -326,9 +359,15 @@ class StdAnalyzer:
                     counts[t] -= 1
                     if sh2 < sh:
                         ukeire += rem
+                        improving.append(t)
             ting_details: List[Dict] = []
             max_fan = 0
+            chance = None
+            ukeire_chance = None
             if sh <= 0 and waits:
+                if ledger is not None:
+                    from tile_ledger import ting_chance as _ting_chance
+                    chance = _ting_chance(ledger, sorted(waits))
                 for widx in sorted(waits):
                     counts[widx] += 1
                     fan, fnames = cls.calc_fan(counts, fixed_melds, rules)
@@ -342,30 +381,54 @@ class StdAnalyzer:
                         "fan": fan,
                         "fan_names": fnames,
                     })
+            elif sh > 0 and improving and ledger is not None:
+                # 未听牌的「进张 N 张」同样得拆：N 是未现牌计数（牌墙 + 对手手上），
+                # 直接当机会数展示会高估。账本能给的是同一个口径的下界。
+                # 存进**单独**的 ukeire_chance 字段，不占用 ting_chance：决胜链
+                # （discards_tiebreak）只读 ting_chance 作为第 4 层，写进同一个键会
+                # 连带改掉 B-P2 已锁定的排序行为。
+                from tile_ledger import ting_chance as _ting_chance
+                ukeire_chance = _ting_chance(ledger, improving, verb="进")
             results.append({
                 "tile": index_to_mpsz(d),
                 "ukeire": int(ukeire),
                 "shanten": max(0, sh),
                 "ev": (10000 if sh <= 0 else 0) + float(ukeire) * (1.5 ** max(0, max_fan - 1)),
-                "reason": cls._make_reason(sh, ting_details, ukeire, rules),
+                "reason": cls._make_reason(sh, ting_details, ukeire, rules,
+                                           chance=chance, ukeire_chance=ukeire_chance),
                 "ting_tiles": [td["tile"] for td in ting_details],
                 "ting_details": ting_details,
+                "ting_chance": chance,
+                "ukeire_chance": ukeire_chance,
                 "max_fan": max_fan,
                 "is_dingque": False,
             })
             counts[d] += 1
-        results.sort(key=lambda r: (-r["ev"], -r["ukeire"]))
+        # 旧口径 (-ev, -ukeire) 在两项都相等时依旧靠枚举序分先后（万永远先于条）。
+        # 现走与川麻同一份决胜链：进张→叫口宽→牌墙可摸→安全→弹性→索引兜底。
+        results.sort(key=_tie_order_key)
         return results
 
     @staticmethod
-    def _make_reason(sh: int, ting_details: List[Dict], ukeire: int, rules: Dict) -> str:
+    def _make_reason(sh: int, ting_details: List[Dict], ukeire: int, rules: Dict,
+                     chance: Optional[Dict] = None,
+                     ukeire_chance: Optional[Dict] = None) -> str:
+        open_hint = "（开口翻：须吃/碰开口后方可胡）" if rules.get("need_open") else ""
         if sh <= 0 and ting_details:
-            names = "/".join(td["name"] for td in ting_details[:3])
             fan = max((td["fan"] for td in ting_details), default=1)
-            base = f"听 {names} · 余 {ukeire} 张 · 最高 {fan} 番"
-            if rules.get("need_open"):
-                base += "（开口翻：须吃/碰开口后方可胡）"
-            return base
+            # 账本可用时走它的可追溯口径（拆得开“牌墙还有 / 只剩在人家手上”），
+            # 否则退回旧口径；两条路径都带上番数与开口提示，升级不许丢信息。
+            if chance and chance.get("text"):
+                return f"{chance['text']} · 最高 {fan} 番{open_hint}"
+            names = "/".join(td["name"] for td in ting_details[:3])
+            # 无账本时不拆牌墙/对手，但必须标「未现至多」：那个数是上界，
+            # 含了对手按住的牌（与 sichuan_analyzer 的同位分支同一口径）。
+            return f"听 {names} · 未现至多 {ukeire} 张 · 最高 {fan} 番{open_hint}"
         if sh <= 0:
-            return "听牌（叫口已绝，等碰/自摸换口）"
-        return f"{sh}向听 · 进张{ukeire}张"
+            # 叫口四张全见光时“等碰/自摸”是错的（那张牌已经不存在了），只能换口。
+            return f"叫口已绝（四张全部见光），需换口{open_hint}"
+        # 未听牌：有账本就把进张拆成可追溯事实（共余 N 张 / 只在牌墙 / 还能撑几轮）；
+        # 没账本时必须标「至多」——那个数是未现牌上界，含了对手按住的牌。
+        if ukeire_chance and ukeire_chance.get("text"):
+            return f"{sh}向听 · {ukeire_chance['text']}"
+        return f"{sh}向听 · 进张至多 {ukeire} 张（未现数，含对手手上）"

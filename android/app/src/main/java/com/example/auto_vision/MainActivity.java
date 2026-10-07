@@ -81,8 +81,13 @@ public class MainActivity extends FlutterActivity {
 
       Runnable toRun = null;
       if (call.method.equals("startProcessing")) {
-        // 原生层安全防线：未激活卡密或授权到期时拒绝启动录屏与前台服务
-        if (!verifyLicenseNative()) {
+        // 多层纵深防御：环境安全扫描 + 卡密有效性双重核验
+        if (!SecurityGuard.isSafe(getApplicationContext())) {
+          TimedLog.e(TAG, "startProcessing blocked by SecurityGuard: " + SecurityGuard.getCompromiseReason());
+          result.error("SECURITY_VIOLATION", "检测到非法调试、Hook或运行环境异常，已拒绝启动", null);
+          return;
+        }
+        if (!SecurityGuard.verifyLicense(getApplicationContext())) {
           TimedLog.w(TAG, "startProcessing rejected: invalid or expired license token");
           result.error("UNAUTHORIZED", "未检测到有效卡密授权，无法开启识别", null);
           return;
@@ -206,6 +211,19 @@ public class MainActivity extends FlutterActivity {
         // 卡密设备指纹：ANDROID_ID + 机型指纹做 SHA-256，返回 hex。
         // 不取 IMEI/序列号（权限受限），ANDROID_ID 在 8.0+ 按签名稳定。
         toRun = () -> result.success(computeDeviceId());
+      }
+
+      if (call.method.equals("checkSecurity")) {
+        // 多层安全探针状态读取
+        boolean safe = SecurityGuard.isSafe(getApplicationContext());
+        boolean licOk = SecurityGuard.verifyLicense(getApplicationContext());
+        Map<String, Object> secMap = new HashMap<>();
+        secMap.put("is_safe", safe);
+        secMap.put("license_valid", licOk);
+        secMap.put("is_compromised", SecurityGuard.isCompromised());
+        secMap.put("reason", SecurityGuard.getCompromiseReason());
+        result.success(secMap);
+        return;
       }
 
       if (call.method.equals("exportRiverFrames")) {
@@ -532,41 +550,14 @@ public class MainActivity extends FlutterActivity {
   // 原生层安全防线：在启动录屏服务与推流前核验本地卡密凭证。
   // 杜绝脱离 Flutter UI 绕过授权闸门直接通过 MethodChannel 调用 startProcessing 盗用算力。
   private boolean verifyLicenseNative() {
-    try {
-      SharedPreferences sp =
-          getApplicationContext().getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE);
-      String token = sp.getString("flutter.lic_token", "");
-      if (token == null || token.trim().isEmpty()) {
-        TimedLog.w(TAG, "verifyLicenseNative: missing lic_token in FlutterSharedPreferences");
-        return false;
-      }
-      String currentDeviceId = computeDeviceId();
-      String[] parts = token.split("\\|");
-      if (parts.length < 5) {
-        TimedLog.w(TAG, "verifyLicenseNative: invalid token structure, parts=" + parts.length);
-        return false;
-      }
-      String tokenDevice = parts[0];
-      if (currentDeviceId != null && !currentDeviceId.isEmpty() && !currentDeviceId.equals(tokenDevice)) {
-        TimedLog.w(TAG, "verifyLicenseNative: deviceId mismatch: tokenDevice=" + tokenDevice + ", current=" + currentDeviceId);
-        return false;
-      }
-      long expiresAt = Long.parseLong(parts[2]);
-      long nowSec = System.currentTimeMillis() / 1000L;
-      // 允许 300 秒时间容差；若已超过到期时间，直接判定无效
-      if (expiresAt <= 0 || nowSec > (expiresAt + 300)) {
-        TimedLog.w(TAG, "verifyLicenseNative: token expired: expiresAt=" + expiresAt + ", now=" + nowSec);
-        return false;
-      }
-      return true;
-    } catch (Throwable t) {
-      TimedLog.e(TAG, "verifyLicenseNative exception: " + t.getMessage());
-      return false;
-    }
+    return SecurityGuard.isSafe(getApplicationContext()) && SecurityGuard.verifyLicense(getApplicationContext());
   }
 
-  // 读取玩法共享文件。仅做非常宽松的解析：必须是 {"mode":"2p|3p|4p"} 形式，
-  // 否则一律回退到 "4p"，避免任何一端写脏数据后另一端爆炸。
+  // 读取玩法共享文件。解析宽松：取任意 [a-z0-9_]+ 的 key，解不出来就回退 sc_hz
+  // （与 Python modes.DEFAULT_MODE 一致）。**不要**把这里改回枚举式白名单
+  // （"2p|3p|4p"）：玩法表已有 20 个 key 且会继续增长，白名单会让 Java 把用户选的
+  // 新玩法静默换成旧玩法，属于“能跑但算错”。真正的合法性校验在 Python 侧
+  // modes.is_known_mode，写入口 writeModeFile 只做字符集校验。
   private String readModeFile() {
     try {
       File dir = getApplicationContext().getExternalFilesDir(null);

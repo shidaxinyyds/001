@@ -217,6 +217,123 @@ def _test_phase4_accuracy():
     assert s._hand_top_frac == 0.68 and s._hand_top_override is False
     print("[PASS] set_hand_strip_top 覆盖/恢复/非法入参防御")
 
+    # 5) 等距守卫：漏检/抬高使步进成倍偏离时，禁止按首尾 pitch 重切
+    #（否则每个 patch 横跨两张牌，模板分类在垃圾输入上给出更差的标签）
+    from recognition.yolo_detector import YOLODetector
+
+    def _row(xs):
+        return [((x, 0, 100, 120), "1m", 0.9) for x in xs]
+
+    assert YOLODetector._pitch_consistent(_row([0, 112, 224, 336, 448])) is True
+    assert YOLODetector._pitch_consistent(_row([0, 142, 284, 426, 694])) is False, \
+        "末段漏检一张（步进 142→268）必须拦住重切"
+    assert YOLODetector._pitch_consistent(_row([0, 112])) is True, "少于 3 枚无从判断，按等距处理"
+    print("[PASS] 等距守卫：漏检排版禁止首尾 pitch 重切")
+
+    # 6) 平台风格白名单：专属牌风不得外借，未 set_platform 时保持全量
+    d = TencentGridDetector()
+    assert d.active_styles is None, "默认不得裁剪（保持历史行为）"
+    d.set_platform_styles("weile")
+    assert "queshen" not in d.active_styles and "tuyou" not in d.active_styles
+    d.set_platform_styles("gd_queshen")
+    assert "queshen" in d.active_styles and "tuyou" not in d.active_styles
+    d.set_platform_styles("tuyou")
+    assert "tuyou" in d.active_styles and "queshen" not in d.active_styles
+    # 探针胜出被禁止的风格时，必须退回白名单而不是收窄成空集
+    #（空集会令 scores 为空，classify_tile 返回任意标签 0 分，整行判废）
+    d.active_styles = {"tencent", "shushan"}
+    assert d._resolve_styles({"queshen"}) == d.active_styles, "交集为空要退回白名单"
+    assert d._resolve_styles({"shushan"}) == {"shushan"}, "探针在白名单内时按探针收窄"
+    # 探针胜出 tencent（它永远在白名单里，所以交集非空、不会走上面的空集退回）
+    # 时也不得把本家专属 bank 丢掉：否则“声明了微乐却只拿腾讯字模认微乐的牌”
+    #（实测微乐帧 13 6m/7m 被读成 3m）。
+    assert d._resolve_styles({"tencent"}) == d.active_styles, \
+        "探针不得把声明平台的专属 bank 排除出候选集"
+    d.set_platform_styles("tencent")
+    assert "tencent" in d.active_styles
+    # 只给腾讯一家（own 为空）时，探针的收窄必须照旧生效——这条是探针路由
+    # 存在的全部理由（少扫 bank = 少一半分类开销），不能被上面的保护顺带抵掉。
+    d.active_styles = {"tencent"}
+    assert d._resolve_styles({"tencent"}) == {"tencent"}, \
+        "无专属 bank（own 为空）时探针照旧收窄，别把省下的开销又还回去"
+    d.active_styles = {"tencent", "shushan"}
+    print("[PASS] 平台风格白名单：专属 bank 不外借 + 空交集/跨家路由都退回白名单")
+
+    # 7) 重切的纵向范围必须逐张取框，不能用整行包络：包络只在“桌布是绿色”
+    #    时安全（extract_face 能剔背景）；非绿桌布（JJ 蓝紫）下背景抠不掉，
+    #    有牌抬高时所有 patch 被包络撑高，尺度错位把万子读成 9p/2z。
+    band = [((0, 750, 110, 150), "1m", 0.9), ((112, 708, 110, 150), "2m", 0.9),
+            ((224, 752, 110, 150), "3m", 0.9)]
+    assert YOLODetector._slot_band(band, 55, 708, 902) == (750, 150)
+    assert YOLODetector._slot_band(band, 167, 708, 902) == (708, 150), "抬高牌用自己的 y"
+    assert YOLODetector._slot_band(band, 280, 708, 902) == (752, 150)
+    assert YOLODetector._slot_band([], 10, 708, 902) == (708, 194), "空输入退回包络"
+    low = [((0, 750, 110, 150), "1m", 0.9), ((112, 750, 110, 90), "2m", 0.9),
+           ((224, 750, 110, 152), "3m", 0.9)]
+    # 偏矮框（h=90）不能把牌底切掉：中心对齐后上下各补 30px → y 上提到 720
+    assert YOLODetector._slot_band(low, 167, 750, 902) == (720, 150), \
+        "某框偏矮时必须以中心对齐撑回行高，不能跟着截断牌面"
+    print("[PASS] 重切纵向逐张取框：非绿桌布下不被整行包络撑高")
+
+    # 8) 漏检补槽：不等距行里的异常步进要补出漏掉的牌，但绝不能误补。
+    #    动因：途游帧 34/36 物理 14 张只出 12 框，且所有框 conf 0.95+、
+    #    把 conf_thresh 降到 0.20 也不变多——抬高牌位置上根本没有 proposal，
+    #    分类器再准也读不到没切出来的牌（实测补槽让 3/14 升到 10/14）。
+    class _Helper:
+        """按调用顺序发标签，避免所有槽同牌撞上物理守卫。"""
+        def __init__(self, labels, conf=0.9):
+            self.labels, self.conf, self.i = list(labels), conf, 0
+
+        def classify_tile(self, crop, avail=None, styles=None):
+            lbl = self.labels[min(self.i, len(self.labels) - 1)]
+            self.i += 1
+            return lbl, self.conf
+
+    class _Self:
+        """只带 _classify_slots 需要的成员，避开真实 ONNX 模型加载。"""
+        COVER_GATE = 0.40
+        _slot_band = staticmethod(YOLODetector._slot_band)
+
+        def __init__(self, helper):
+            self._phase_helper = helper
+
+    img = np.full((200, 700, 3), 255, np.uint8)
+    face = np.ones((200, 700), np.uint8)   # 全牌面：让占比闸门恒通过，只考步进判据
+
+    # 中心 25/125/225/435：步进 100/100/210，pitch=100，末档 2.1x → 应补 1 槽
+    gap_tiles = [((0, 10, 50, 80), "1m", 0.9), ((100, 10, 50, 80), "2m", 0.9),
+                 ((200, 10, 50, 80), "3m", 0.9), ((410, 10, 50, 80), "4m", 0.9)]
+    out = YOLODetector._classify_slots(_Self(_Helper(["1m", "2m", "3m", "4m", "5m"])),
+                                       img, gap_tiles, face)
+    assert len(out) == 5, f"异常步进处应补出 1 槽，实得 {len(out)}"
+
+    # 等距行不得无中生有
+    even_tiles = [((0, 10, 50, 80), "1m", 0.9), ((100, 10, 50, 80), "2m", 0.9),
+                  ((200, 10, 50, 80), "3m", 0.9), ((300, 10, 50, 80), "4m", 0.9)]
+    out = YOLODetector._classify_slots(_Self(_Helper(["1m", "2m", "3m", "4m", "5m"])),
+                                       img, even_tiles, face)
+    assert len(out) == 4, "等距排版不能补出槽"
+
+    # 模板不达标时插槽必须整槽丢弃（它没有 YOLO 兜底），原框槽保留自己的标签
+    out = YOLODetector._classify_slots(_Self(_Helper(["9p"], conf=0.2)), img, gap_tiles, face)
+    assert len(out) == 4, f"模板不达标时插槽应被丢弃，实得 {len(out)}"
+    assert [t[1] for t in out] == ["1m", "2m", "3m", "4m"], "原框槽必须退回 YOLO 自己的标签"
+
+    # 补槽不得顶破「同牌 >4」：引擎会因它整手拒绝，那比不补还糟
+    four = [((0, 10, 50, 80), "1m", 0.9), ((100, 10, 50, 80), "1m", 0.9),
+            ((200, 10, 50, 80), "1m", 0.9), ((410, 10, 50, 80), "1m", 0.9)]
+    out = YOLODetector._classify_slots(_Self(_Helper(["1m"])), img, four, face)
+    assert len(out) == 4, f"补槽会造成第 5 张同牌时必须回滚插槽，实得 {len(out)}"
+
+    # 步进必须用框中心而不是起点：帧 40 型误插。最左一枚带角标、框宽 206
+    # 而其它约 150，起点步进 220=1.47x 会误补；中心步进 192=1.28x 不该补。
+    wide = [((0, 10, 206, 80), "1m", 0.9), ((220, 10, 150, 80), "2m", 0.9),
+            ((370, 10, 150, 80), "3m", 0.9), ((520, 10, 150, 80), "4m", 0.9)]
+    out = YOLODetector._classify_slots(_Self(_Helper(["1m", "2m", "3m", "4m", "5m"])),
+                                       img, wide, face)
+    assert len(out) == 4, f"框宽抖动不得被当成漏检（起点步进会误补），实得 {len(out)}"
+    print("[PASS] 漏检补槽：异常步进补槽 + 不误补 + 不顶破同牌>4")
+
     print("\nPHASE4 ACCURACY OK")
 
 
