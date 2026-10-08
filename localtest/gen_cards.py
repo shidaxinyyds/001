@@ -28,16 +28,25 @@ def gen_code(prefix: str) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--type", default="month", help="card_type 标签，如 week/month/trial")
-    ap.add_argument("--days", type=int, help="有效天数（激活起算），与 --minutes 二选一")
-    ap.add_argument("--minutes", type=int, help="有效分钟数（体验卡/测试用），与 --days 二选一")
+    ap.add_argument("--days", type=int, help="有效天数（激活起算），与 --minutes/--seconds 三选一")
+    ap.add_argument("--minutes", type=int, help="有效分钟数（体验卡/测试用），与 --days/--seconds 三选一")
+    ap.add_argument("--seconds", type=int, help="有效秒数（短时测试用），与 --days/--minutes 三选一")
     ap.add_argument("--count", type=int, default=1, help="生成张数")
     ap.add_argument("--prefix", default="MJ", help="卡密前缀，便于区分批次")
     args = ap.parse_args()
 
-    if bool(args.days) == bool(args.minutes):
-        ap.error("--days 与 --minutes 必须二选一（且只能选一个）")
-    duration_s = args.days * 86400 if args.days else args.minutes * 60
-    span = f"{args.days} 天" if args.days else f"{args.minutes} 分钟"
+    specified = [x for x in (args.days, args.minutes, args.seconds) if x is not None]
+    if len(specified) != 1:
+        ap.error("--days、--minutes 与 --seconds 必须且只能指定其中一个")
+    if args.days is not None:
+        duration_s = args.days * 86400
+        span = f"{args.days} 天"
+    elif args.minutes is not None:
+        duration_s = args.minutes * 60
+        span = f"{args.minutes} 分钟"
+    else:
+        duration_s = args.seconds
+        span = f"{args.seconds} 秒"
     rows = []
     print("\n===== 明文卡密（只显示一次，发给客户）=====")
     for _ in range(args.count):
