@@ -15,7 +15,7 @@ import secrets
 import string
 
 # 去掉易混字符 O/0 I/1 L，避免用户手抄出错。
-_ALPHABET = "".join(c for c in (string.ascii_uppercase + string.digits) if c not in "OI0L")
+_ALPHABET = "".join(c for c in (string.ascii_uppercase + string.digits) if c not in "OI01L")
 
 
 def gen_code(prefix: str) -> str:
