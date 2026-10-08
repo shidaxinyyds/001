@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 
 from .engine_result import EngineResult
+from .match_state import MatchPhaseMachine, empty_phase_view
 from recognition.stage import DetectionResult
 from recognition.structural import (
     StructuralDetector,
@@ -157,6 +158,14 @@ ENGINE_MIN_CONF_RELAX = 0.42
 # 只在冷启动且只对手牌行候选生效；稳定手牌一旦建立，正常严格/放宽逻辑接管，不再用此门槛。
 BOOTSTRAP_CONF = 0.40
 
+# 三条门槛的大小关系是**合同**，不是各自调的旋钮：
+#   ENGINE_MIN_CONF(0.50) > ENGINE_MIN_CONF_RELAX(0.42) >= BOOTSTRAP_CONF(0.40)
+# 门槛顺序是「先过严格、过不了才轮到补漏」，所以 RELAX 只在 [RELAX, 0.50) 这段里说话。
+# 把 RELAX 当成「数值越大越松」抬到 ≥ 0.50：不会报错、不会让任何精度测试变红，
+# 它只会把整条补漏通道删掉 —— 产物是「整张牌读不出来」，与需求恰好相反。
+# 现场需要更高召回时用调试页「严格识别门槛」开关（它把整条链路降到 RELAX），
+# 而不是改这张表。见 localtest/test_hand_strip_channel_guard.py。
+
 # ===== 部分识别（partial）兜底：消灭"全有或全无"断崖 =====
 # 实测证据（localtest/_probe_encoding.py）：同一张图，切牌只少 1 张（14→13），
 # 最终结果就从「13 张全对 status=ok」直接变成「count=0 status=no_tiles 完全空白」。
@@ -194,10 +203,19 @@ DIRTY_HEAL_FRAMES = 12
 # 的历史帧会**全部**失配，每个位置只剩最新帧 1 票，低于最低票数被判为
 # 「未识别」→ 手牌数从 13 掉到 0 → 悬浮窗整段空白 → 两帧后才恢复。
 # 这就是用户看到的「一会显示一会不显示」的决定性根因。
-HAND_CONFIRM_FRAMES = 2      # 连续多少帧牌型完全一致才采纳为新稳定手牌
-HAND_BIG_JUMP = 4            # 与稳定手牌差异超过这么多张，要求多确认 1 帧
-HAND_MODE_WINDOW = 8         # 众数兜底窗口：最近多少帧
-HAND_MODE_VOTES = 5          # 众数兜底：窗口内出现这么多次即强制采纳
+#
+# 这三个数是同一条判据的三段，不是三个独立旋钮（历史上它们各说各话，
+# 读代码的人只能靠猜 —— 现在 `_HandStabilizer.observe` 直接引用它们）：
+#   改动在「正常一巡内」（张数差 ≤ HAND_BIG_JUMP，或同张数但只换
+#   ≤ HAND_BIG_JUMP 张牌）→ 首帧即采纳，不等共识帧；
+#   陌生的大改但最近 HAND_MODE_WINDOW 帧里见过第二次 → 也采纳（识别器稳定
+#   漏同一张牌时永远凑不满连续帧，靠这条兜住）；
+#   其余陌生突变必须连续 HAND_CONFIRM_FRAMES 帧一致才采纳 —— 这一档是全部
+#   「确认延迟」的唯一来源，而它盖住的恰好只有「对局里不该发生的改法」。
+HAND_CONFIRM_FRAMES = 2      # 连续多少帧牌型完全一致才采纳陌生的新牌型
+HAND_BIG_JUMP = 4            # 「正常一巡内的改动」上限（摸/打/碰/杠/换牌全部在内）
+HAND_MODE_WINDOW = 8         # 证据窗口：最近多少帧
+HAND_MODE_VOTES = 2          # 窗口内同一陌生牌型出现这么多次即采纳（含本帧）
 
 
 def _hand_diff_count(a: str, b: str) -> int:
@@ -538,22 +556,45 @@ def _counter_to_mpsz(cnt: Counter) -> str:
 MIN_FACE_BRIGHTNESS = 80.0
 
 
-def _face_brightness(image: CVImage, rect) -> float:
-    """牌面中心区域的灰度均值（避开边框与相邻牌的缝隙）。"""
+# 局中连续多少帧读到 0 张才允许硬重置整局状态。
+#
+# 为什么不是 3：按本仓实测的单帧识别耗时 1.2~2.5s，3 帧 = 3.6~7.5s，而重置后
+# warmup 重建还要再 3 帧 —— 于是面板会出现 3~6 秒的「等待牌局开始」空窗，而这
+# 在用户眼里就是「识别莫名其妙的突然坏了」。格网偶发错位一帧就足够凑齐这 3 帧。
+# 5 帧是经验平衡：结算/回大厅的真局尾通常 1~2 帧内就会被 `_is_mahjong_table`
+# 拦下（那条路不依赖本计数），本 fuse 只兜「弹窗盖住手牌但画面仍像牌桌」这一种。
+EMPTY_HAND_RESET_FRAMES = 5
+
+
+def _face_brightness(image: CVImage, rect) -> Optional[float]:
+    """牌面中心区域的灰度均值（避开边框与相邻牌的缝隙）。
+
+    返回 None 表示「这张图里放不下这个框」= **没有意见**，绝不能当成「牌面全黑」。
+
+    为什么这一条必须单独改：旧写法越界时 `return 0.0`，而 0.0 与「真·黑牌面」
+    完全同值，调用方分不清。真机报障实测正是这个形状 —— rows 是整屏坐标
+    （y≈716）而喂进来的图是 hand_roi 条带（高 261），于是 `ih = 261-741 < 0`，
+    **整行每一格都读到 0.0** → 行级自适应判定「这行牌都很暗」→ `use_brightness
+    = False` → 防伪闸门被整体关掉 → 头像、副露区这些非牌格子全部放行（面板上
+    凭空多出的 7z/2p 就是这么来的）。一个越界读数把「误杀真牌」的保险丝换成了
+    「放过假货」，两头都是坑。
+    """
     try:
         x, y, w, h = int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])
         ih_, iw_ = image.shape[:2]
+        if w <= 0 or h <= 0 or x < 0 or y < 0 or x >= iw_ or y >= ih_:
+            return None
         ix = max(0, x + int(w * 0.15))
         iy = max(0, y + int(h * 0.15))
         iw = min(int(w * 0.7), iw_ - ix)
         ih = min(int(h * 0.7), ih_ - iy)
         if iw <= 0 or ih <= 0:
-            return 0.0
+            return None
         patch = image[iy:iy + ih, ix:ix + iw]
         gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY) if patch.ndim == 3 else patch
         return float(gray.mean())
     except Exception:
-        return 0.0
+        return None
 
 
 # 帧差去重最多连续跳过多少帧（设为2，保证最多跳过2帧就强制全量重检，绝不滞后）。
@@ -570,15 +611,24 @@ class _HandStabilizer:
       - 手牌重排 / 整行平移 / 摸牌插入 —— 完全不影响（Counter 不变）
       - 单帧漏识别 1 张    —— 该帧张数不合法，直接不参与共识，稳定值不动
       - 单帧把某张认错     —— 该帧 Counter 与前后都不同，拿不到共识，稳定值不动
-      - 真实摸牌 / 打牌    —— 连续 2 帧给出同一个新 Counter，立即切换
 
-    采纳规则（满足任一即更新稳定手牌）：
-      1) 连续 HAND_CONFIRM_FRAMES 帧给出完全相同的合法牌型；
-      2) 最近 HAND_MODE_WINDOW 帧里同一合法牌型出现 ≥HAND_MODE_VOTES 次
-         （兜底：应对"识别器稳定漏同一张牌"这类永远凑不满连续帧的情况）。
+    采纳通道（满足任一即把稳定手牌换成本帧牌型），按「对局里多常见」排：
+      1) 张数切换 1~HAND_BIG_JUMP 张（摸 13→14、打 14→13、碰 −3、杠 −4）
+         → **首帧即采纳**，一帧确认都不等；
+      2) 同张数且只换了 ≤ HAND_BIG_JUMP 张（换三张、单张被认错后自愈）
+         → 同样首帧即采纳；
+      3) 这个陌生牌型在最近 HAND_MODE_WINDOW 帧里已经出现过
+         HAND_MODE_VOTES 次（含本帧）→ 采纳（识别器稳定漏同一张牌时
+         永远凑不满连续帧，靠这条兜住）；
+      4) 其余陌生突变（同张数、一次改 >HAND_BIG_JUMP 张、窗口内没见过）
+         → 必须连续 HAND_CONFIRM_FRAMES 帧完全一致才采纳。
 
-    大跳变（与当前稳定手牌差异 > HAND_BIG_JUMP 张）额外要求多确认 1 帧，
-    因为正常一巡最多变化 1~2 张，一次差 5 张以上几乎一定是误识别爆发。
+    为什么 4) 不能再往「更快」调：那三条快速通道已经把对局里**所有**常规事件
+    全接住了，卡在 4) 上的只剩「对局里不该发生」的改法 —— 而它的典型画像就是
+    误识别爆发（把整行刷成同一种牌、或牌桌换了却没切到新局）。把它降到 1 帧
+    等于拿「phantom 读数直接上屏」换响应速度，而 phantom 正是用户报的「乱识别
+    不存在的东西」。本文件里能动的延迟只剩「每帧多快跑一次」，不是「这里等几帧」
+    （那条改动已接在跳帧与方向熔断里）。见 localtest/test_hand_response_guard.py。
 
     输出的 mpsz **永不为空**（除非从未识别到过合法手牌）——这正是
     "识别不出来时界面也不要空着"的保证。
@@ -594,6 +644,13 @@ class _HandStabilizer:
         # 最近若干帧的合法牌型（供众数兜底）
         self._recent: deque = deque(maxlen=HAND_MODE_WINDOW)
         self.pending: bool = False
+        # 两个空帧计数器：必须在 __init__ 就立住（`reset()` 早就在写它们，而
+        #   `observe()` 靠 `getattr(..., 0)` 取 —— 属性不在构造时就存在是「只能
+        # 靠默认值兼容」的写法，一旦有人把 getattr 换成直接取属性就报错）。
+        #   `_empty_frames`：读到 0 张的连续帧数（空帧宽限，见 observe 开头）；
+        #   `_empty_streak`：手牌区连不出合法手牌的连续帧数（局末/大厅重置）。
+        self._empty_frames: int = 0
+        self._empty_streak: int = 0
 
     def reset(self) -> None:
         """玩法切换 / 朝向变化时硬重置：旧手牌与新场景无关。"""
@@ -682,31 +739,37 @@ class _HandStabilizer:
             self.pending = False
             return self.stable_mpsz
 
-        # 需要多少帧共识：稳定手牌建立后固定 2 帧共识即采纳
-        need = HAND_CONFIRM_FRAMES
         # 冷启动：还没有任何稳定手牌时
         if not self.stable_mpsz:
             if n not in valid_sizes:
                 return ""
-            # 若识别到合法手牌张数，首帧立即可采信并进入稳定态，杜绝首帧延迟与"等待"提示卡顿
-            if n in valid_sizes or self._streak >= 2:
-                self.stable_mpsz = ordered_mpsz
-                self._stable_key = key
-                self.pending = False
-                return self.stable_mpsz
-            else:
-                self.pending = True
-                return ""
+            # 合法张数 → 首帧立即采信并进入稳定态，杜绝首帧延迟与"等待"提示卡顿。
+            # （旧写法在这里又写了一遍 `n in valid_sizes or self._streak >= 2`：
+            # 上一行已经保证前件为真，那个 `or` 是从不生效的死分支，留着会让人
+            # 以为冷启动也可能要等 2 帧。）
+            self.stable_mpsz = ordered_mpsz
+            self._stable_key = key
+            self.pending = False
+            return self.stable_mpsz
 
-        # 摸牌(13->14)、打牌(14->13)、吃碰杠副露 (diff in 1..4) 或单张/换三张变动 (diff <= 4)：首帧即时响应刷新，杜绝出牌/摸牌后的迟钝与卡顿
+        # 摸牌(13->14)、打牌(14->13)、吃碰杠副露 (diff in 1..HAND_BIG_JUMP) 或
+        # 单张/换三张变动 (diff <= HAND_BIG_JUMP)：首帧即时响应刷新，杜绝出牌/摸牌后的迟钝与卡顿
         hand_len = len(self.stable_mpsz) // 2
-        is_count_move = abs(n - hand_len) in (1, 2, 3, 4) and (n in valid_sizes)
-        is_tile_swap = (n == hand_len and (n in valid_sizes) and _hand_diff_count(key, getattr(self, "_stable_key", "")) <= 4)
+        is_count_move = (0 < abs(n - hand_len) <= HAND_BIG_JUMP
+                         and n in valid_sizes)
+        is_tile_swap = (n == hand_len and n in valid_sizes
+                        and _hand_diff_count(key, self._stable_key)
+                        <= HAND_BIG_JUMP)
         mode_hits = self._recent.count(key)
+        # 四条采纳通道（逐条对上面的类 docstring，改动必须两边一起看）：
+        #   1) is_count_move   2) is_tile_swap   3) 窗口内见过第二次
+        #   4) 连续 HAND_CONFIRM_FRAMES 帧给出同一牌型
         # 注：旧实现的 `self._streak >= 1` 短路使 HAND_CONFIRM_FRAMES=2 共识形同虚设
-        # （任意新牌型首帧即采纳），删除后由"张数切换/换牌/窗口众数"三条快速通道
-        # 保证响应，陌生突变须连续 2 帧一致才采纳，杜绝单帧坏牌型直接上屏。
-        if is_count_move or is_tile_swap or mode_hits >= 2:
+        # （任意新牌型首帧即采纳），删掉后只有上面四条还成立，其中三条盖的都是
+        # 对局里真会发生的事件；剩下要等帧的只有「对局里不该发生」的陌生大改。
+        if (is_count_move or is_tile_swap
+                or mode_hits >= HAND_MODE_VOTES
+                or self._streak >= HAND_CONFIRM_FRAMES):
             self.stable_mpsz = ordered_mpsz
             self._stable_key = key
             self.pending = False
@@ -770,6 +833,9 @@ def _error_result(status: str, message: str) -> "EngineResult":
         "screen": [0, 0],
         "elapsed": 0.0,
         "message": str(message)[:200],
+        # 局况事实层的错误帧出口：没有牌桌读数就只能如实说“暂无局况”。schema 必须
+        # 与正常帧逐键一致，否则悬浮窗在这条路径上读到 null 会把整条局况弄丢。
+        "match_phase": empty_phase_view("画面识别异常，暂无局况"),
         # 错误帧不喂 native：拿不到可靠手牌时让 C++ 侧继续推算只会覆写脏结果。
         "native_ready": False,
     }
@@ -1615,11 +1681,33 @@ class Engine:
         self._orient_override: Optional[int] = None
         # 方向重探熔断计数：已达上限后停止重探，避免无限重型探测闪退。
         self._orient_reprobe_count: int = 0
+        # 本帧是否「因为熔断而没重探」。必须随帧进 diag：否则面板「没变化」与
+        # 「熔断中」在端上看起来一模一样，排查时只能靠猜。
+        self._orient_probe_skipped: bool = False
         # 方向探测/快路径时已算出的检测结果，供 process() 复用，
         # 避免同一帧做两次完整检测。用完即清。
         self._cached_rows: Optional[list] = None
         # 这批缓存 rows 出自哪个检测器（手牌通道与主检测器可以不是同一个）。
         self._cached_rows_src: Optional[str] = None
+        # 本帧手牌通道实际走了哪条路（full / strip / probe_reject / probe_skipped）
+        # + 两套格网各切了几格（-1 = 本帧没试）。「同一帧被两套格网切出不同张数」就
+        # 是靠这两个数看出来的，必须随帧进 diag。
+        self._hand_channel_diag: Dict[str, int] = {}
+        # 下一次真探测到条带时要不要把两套格数打一条日志。开局置 True，每次平台/玩法
+        # 切换重置 True。它不主动多付钱（只在本来就要探测的帧上顺路打日志），所以不
+        # 需要额外一个「本帧要付几次检测」的开关；要看**每帧**对照请拨 `hand_channel_ab`。
+        self._hand_channel_probe_due: bool = True
+        # 当前玩法是否在本平台 supported_modes 里。False = 牌集与平台不匹配，
+        # 面板会整类少一批牌（必须在 diag 可见，否则只会当成识别坏了报障）。
+        self._mode_supported: bool = True
+        # 条带探测的连续不合格计数与停用标。停用后 `_hand_strip` 直接交回整屏，
+        # 不再每帧多付一次「注定不起效」的条带检测；平台/玩法切换时重置。
+        self._strip_reject_streak: int = 0
+        self._strip_disabled: bool = False
+        # `_verify_orientation` 里那次手牌识别的耗时（ms）。它必须单独记账：
+        # rows 走缓存复用时 `_perf_ms["detect"]` 记到的是 0.0ms，而钱其实付在
+        # 方向验证里 —— 前几轮性能排查一直找不到主成本，就是这个盲区害的。
+        self._orient_cost_ms: float = 0.0
         # 本帧的「方向再验证」是否还欠着（几何已归一，但识别没跑）。
         # 每帧在 process 开头由 `_settle_orientation` 重新赋值，绝不跨帧生效：
         # 只有跳帧帧会带着 True 提前 return，下一帧开头立刻被覆盖。
@@ -1662,6 +1750,13 @@ class Engine:
             # 主检测器，代价是单帧多 ~80ms）。关掉 = 回到“手牌也走主检测器”的旧行为，
             # 仅供 A/B 对拍与排障。依据见 get_hand_detector 的注释。
             "hand_grid": True,
+            # 手牌通道格网对照：开着时**每一帧**都额外跑一次底部条带，把两套格网各
+            # 切了几格钉进日志（排「识别缺张」时用）。默认关：常开就是每帧多付一次
+            # 完整识别（实测翻倍）。它**只加钱和日志、不改采信规则**：条带仍然必须
+            # 格数反超整屏且峰值不低才能顶掉整屏读数（拿它采集对比数据不会偷改结果）。
+            # 与 hand_grid 同一档次：排障开关，不接任何 UI；必须列在这里，否则
+            # `set_config` 会把未知 key 静默丢弃，这个开关就永久只能停在默认值。
+            "hand_channel_ab": False,
         }
         # 出牌建议配置（调试页开关，process() 每帧从 mahjong_advice.json reload）。
         # 这里给一份安全默认：显示出牌建议、不过滤进张。即便文件永远不存在，
@@ -1700,12 +1795,33 @@ class Engine:
         # _swap_raw 为本帧探测器对换牌的「真实」判定（未经迟滞），供清池计数使用。
         self._swap_hold_frames: int = 0
         self._swap_raw: bool = False
+        # ── 牌局阶段与事件状态机（局况**事实**层）──────────────────────────────
+        # 与 phase_label/tactical_* 的分工不同：那三个回答「该打哪张」（战术建议），
+        # 这台机器回答「现在轮到谁、刚发生了什么、几家碰杠」——而且它恒有输出，
+        # 不像建议层在 shanten>=2 时返回空串、被显示层整块收起（用户「看不清牌局在
+        # 干嘛」的直接原因）。纯折算，不做任何检测，单帧开销是几十次字典比较。
+        self._phase_machine = MatchPhaseMachine(label_fn=tile_to_chinese)
+        # 立牌基数（未副露、未摸牌时的手牌张数）。与阶段机共用一个值，两处不同源
+        # 就会在杠后各自算出一套基数，阶段与建议开始互相矛盾。
+        self.base_hand_tiles: int = 13
+        self._phase_machine.base_hand = self.base_hand_tiles
+        # 本家手牌差分捕获到的「刚打出的那张」，供状态机播本家出牌；歧义时置 None，
+        # 宁可写成「打出一张牌（牌面待确认）」也不猜。
+        self._hand_diff_discard: Optional[str] = None
+        # 各家副露条目（含本家 bottom）：{seat: [(mpsz, 张数)]}。原有的
+        # `_opponent_melds` 只有 1/2/3 家且存 34 型索引，播不出「你碰了 5万」。
+        self._seat_meld_entries: Dict[int, List[Tuple[str, int]]] = {
+            0: [], 1: [], 2: [], 3: []}
         # 单帧耗时诊断：最近 30 帧滚动窗口，每 60 帧打印一次均值/峰值
         self._proc_ms: deque = deque(maxlen=30)
         self._proc_frames: int = 0
-        # 分阶段耗时滚动窗口（decode/detect/river/advice）：每 20 帧输出一行
+        # 分阶段耗时滚动窗口（decode/detect/orient/river/advice）：每 20 帧输出一行
         # [perf] 并塞进 diag，悬浮窗诊断行直接可见哪一段是瓶颈。
-        self._perf_ms = {k: deque(maxlen=20) for k in ("decode", "detect", "river", "advice")}
+        # orient 必须单独一个键：rows 走缓存复用时 detect 记到 0.0ms，而真机实测
+        # 单帧 568~1345ms 的钱几乎全付在方向验证里那次整屏手牌识别上 —— 旧口径下
+        # 这笔开销不存在于任何一个阶段里，性能排查因此一直找不到主成本。
+        self._perf_ms = {k: deque(maxlen=20)
+                         for k in ("decode", "detect", "orient", "river", "advice")}
 
     def _verify_hand_evidence(self, image: np.ndarray) -> int:
         """从当前画面中获取实体手牌证据张数（兼容 YOLO 检测器与网格切片器）。
@@ -2005,6 +2121,11 @@ class Engine:
         self._stable_shanten = None
         self._transient_drop_streak = 0
         self._empty_hand_streak = 0
+        # 新局/回大厅：局况阶段机与它的输入快照必须一起作废，否则旧局的牌河张数、
+        # 副露基数会跨局生效——表现为新一局第一帧就报「下家 打出 …」这种凭空事件。
+        self._phase_machine.reset()
+        self._hand_diff_discard = None
+        self._seat_meld_entries = {0: [], 1: [], 2: [], 3: []}
         self.trainer = None
         self._river_future = None
 
@@ -2896,6 +3017,15 @@ class Engine:
         防闪职责属于显示层（悬浮窗按**时间**去抖，见 mahjong_overlay 的清空帧门），
         数据层只报事实 —— 让引擎「播旧帧」去掩盖闪烁，等于用错数据换好看的 UI。
         """
+        # 局况阶段机也要收到“本帧不在牌桌上”：离开牌桌持续够长才能播“本局结束”，
+        # 并在下一局把旧局基准全部作废。跳过不喂的话，“结束”永远播不出且旧基准会活到
+        # 新局第一帧（表现为刚开局就报“下家 打出 …”这种凭空事件）。
+        try:
+            match_phase = self._phase_machine.update({
+                "now_ms": int(time.time() * 1000), "status": "waiting", "count": 0,
+            })
+        except Exception:
+            match_phase = empty_phase_view("局况折算异常，不影响识别与建议")
         return EngineResult(
             image=_make_preview(image),
             result=json.dumps({
@@ -2931,6 +3061,7 @@ class Engine:
                 "elapsed": 0.001,
                 "frame_skipped": False,
                 "message": "等待牌局开始",
+                "match_phase": match_phase,
                 "native_ready": native_solver_ready(self.mode),
             }, ensure_ascii=False),
             stage=None,
@@ -2963,15 +3094,21 @@ class Engine:
 
         三门槛机制：
           - 严格门槛 ENGINE_MIN_CONF（0.50）：默认走这条，防白板/伪命中。
-          - 放宽门槛 ENGINE_MIN_CONF_RELAX（0.42）：仅当引擎已建立稳定手牌
+          - 补漏下限 ENGINE_MIN_CONF_RELAX（0.42）：仅当引擎已建立稳定手牌
             （self._stable_hand_mpsz 非空）时才允许。这是"漏 1 张 → 自动补漏"
             的关键：若投票窗口里有 2~4 张牌稳定为 Xm，但第 N 张本来被投票器
             因 0.50 分拒了，会导致手牌数对（13/14 张）但实际少识别了一张。
             放宽门槛只在"补漏"时启用——启动期仍走严格门槛，避免噪声被当真。
+            注意它是**下限**而不是「越大越松」的旋钮：门槛顺序是先过 0.50 才轮到
+            它，所以它只在 [RELAX, 0.50) 这段里说话；把它抬到 ≥ ENGINE_MIN_CONF 等于
+            把整条补漏通道删掉（想给暗光台面降门槛，用下面那个调试页开关）。
           - bootstrap 门槛 BOOTSTRAP_CONF（0.40）：仅冷启动（尚无稳定手牌）
             且本张属于「手牌行候选」时生效，用于打破上述死锁，详见 BOOTSTRAP_CONF。
           - 网格精密识别门槛（0.38）：针对 TencentGridDetector 整排手牌切片，
             因网格几何已严格确定，0.38 以上候选即可放心放行，彻底消灭单张反光漏识。
+
+        调试页「严格识别门槛」关掉时，整条链路一律降到 RELAX（不再要求已建稳定
+        手牌）—— 这是暗光/低画质台面上现场可用的唯一召回逃生口，默认开着。
         """
         if label is None:
             return None
@@ -2983,7 +3120,15 @@ class Engine:
             return None
         if is_grid and conf >= 0.38:
             return label
-        if conf >= ENGINE_MIN_CONF:
+        # 调试页「严格识别门槛」开关（默认开）：开着走严格门槛 0.50；关掉则整条链路
+        # 直接降到 RELAX —— 且**不再要求已建稳定手牌**（旧写法把这条放在最后，条件被
+        # 上面的补漏分支完全包含，等于开关拨了没反应；而本方法的补漏分支只在「差一档
+        # 置信」时才可用，暗光台面上整行都低于严格门槛时它救不了）。
+        # 默认路径（strict=True）与改动前逐字相同，不改变任何既有读数。
+        if self._cfg.get("strict", True):
+            if conf >= ENGINE_MIN_CONF:
+                return label
+        elif conf >= ENGINE_MIN_CONF_RELAX:
             return label
         # 已建立稳定手牌 + 严格门槛不过 + 放宽门槛过 → 允许（补漏）
         if conf >= ENGINE_MIN_CONF_RELAX and self._stable_hand_mpsz:
@@ -2991,10 +3136,6 @@ class Engine:
         # 冷启动 bootstrap：让手牌行候选先立住稳定器，之后正常逻辑接管。
         # 受调试页「冷启动」开关控制；关掉则不走此宽门槛。
         if bootstrap and self._cfg.get("bootstrap", True) and conf >= BOOTSTRAP_CONF:
-            return label
-        # 调试页「严格门槛」开关关掉时，一律放宽到 RELAX 门槛（更易识别出，但更易误识）。
-        # 仅当已建立稳定手牌时才允许（避免启动期噪声被当真）。
-        if (not self._cfg.get("strict", True)) and self._stable_hand_mpsz and conf >= ENGINE_MIN_CONF_RELAX:
             return label
         return None
 
@@ -3266,6 +3407,154 @@ class Engine:
             pass
         return image
 
+    def _hand_strip(self, image: CVImage) -> Tuple[CVImage, int]:
+        """按当前 ROI 配置裁出手牌条带，返回 `(条带, 条带在原图中的 y 偏移)`。
+
+        与 `_apply_hand_roi` 同一套裁切口径（只裁 y，x 全宽），差别只在这里把偏移量
+        交出来：调用方要把条带上算出的框映射回整屏坐标。裁切不可用（太矮、从 0 开
+        头等价于没裁）时原样返回整屏、偏移 0。
+
+        条带被停用（`_strip_disabled`）时也返回整屏：这就是「连续不合格后不再重试」
+        的唯一执行点，判据与计数都在 process 里，这里只读那个结论。
+        """
+        if getattr(self, "_strip_disabled", False):
+            return image, 0
+        try:
+            effective_roi = self._roi
+            if effective_roi is None:
+                p_roi = get_hand_roi(self.platform)
+                effective_roi = (p_roi[0], p_roi[1])
+            ih, _ = image.shape[:2]
+            y0 = max(0, min(ih, int(effective_roi[0] * ih)))
+            y1 = max(y0, min(ih, int(effective_roi[1] * ih)))
+            if y0 > 0 and y1 - y0 >= MIN_ROI_HEIGHT:
+                return np.ascontiguousarray(image[y0:y1, :]), y0
+        except Exception:
+            pass
+        return image, 0
+
+    #: 整屏读数低于这个格数，才值得为兜底再付一次检测去试底部条带（探测地板线）。
+    #: 37 帧已标注 GT 语料实测（build/_ab_channel_gt.py）：整屏读数最低 10 格
+    #: （t1/s_43ce/s_a42d…），而报障截图被切到 4~5 格 —— 8 正落在两者的空档里。
+    #: 于是正常帧一次检测都不多付（实测 eval_base 逐字回到 444/444、手牌 37/37），
+    #: 只有整屏明显被切坏的帧才会去问第二条格网。
+    HAND_CHANNEL_PROBE_FLOOR = 8
+    #: 条带反标的采信下限：格数**严格多于**整屏、峰值置信**不低于**整屏，且自身
+    #: 至少这么多格、至少这么多分。依据同样是那批实测：报障帧 A/B 是条带 8/7 格
+    #: @0.805 反超整屏 4 格 @0.778（该信），而 GT 帧 t5 与报障帧 C 是条带多切出
+    #: 一格却把峰值压低（11 格@0.96 vs 整屏 10 格@1.00、6 格@0.781 vs 5 格@0.808）——
+    #: 那种「多出来的一格」正是幻影牌，只比格数就会把它放进主路径。
+    #: `HAND_STRIP_MIN_CONF` 另一重身份是把「ROI 裁错了」和「牌被挡住了」分开：
+    #: 配歪时条带里根本凑不出一行牌（格数 0~2）。
+    HAND_STRIP_MIN_CELLS = 5
+    HAND_STRIP_MIN_CONF = 0.55
+    #: 连续多少帧「试了条带却没反超」就停用探测。3 是平衡值：少于 3 会把「结算
+    #: 弹窗盖住手牌」这种一两帧的瞬态当成配置错，永久放弃兜底；多于 3 则整屏被
+    #: 切坏的帧要每帧多付一次注定没用的条带检测才肯停。
+    HAND_STRIP_MAX_REJECTS = 3
+
+    def _hand_channel_rows(self, det, image: CVImage,
+                           allow_probe: bool = True,
+                           raw: Optional[list] = None) -> list:
+        """手牌通道唯一入口：**整屏为主，只在整屏被切坏时才试底部条带**。
+
+        产出永远是**整屏坐标**的 rows（条带被采信时把 y0 加回去），这一帧走了哪条路
+        记进 `self._hand_channel_diag`：`chosen` 取 full / strip / probe_reject /
+        probe_skipped，`strip_cells=-1` 表示「本帧没试条带」（与「试了但 0 格」必须
+        区分，否则排障时会把节流的帧当成裁错的帧）。
+
+        为什么主路径是整屏而不是条带（实测，不是猜测）：格网通道是按图像几何铺
+        **等距格网**的切片器，喂整屏与喂 2000x261 条带会切出不同格数、同一格还会
+        改名 —— 报障三帧（2000x899）确实是条带更好（4 格@0.778 → 8 格@0.805）。但
+        同一个分辨率的 37 帧**已标注** GT 语料上方向完全相反：整屏逐张 444/444
+        （100%），条带 389/445（82.5%）且普遍少 1~5 格。把「优先喂条带」当默认就是
+        拿全平台精度基线去换一个机型上的个例（踩过：当时 eval_base 从 36/37 掉到
+        26/37）。所以现在只做**同帧反超**：整屏读数健康就一字不改地用整屏，低于
+        地板线才去问条带，而且条带必须格数更多、峰值不低、不被牌形异常判负才采信。
+
+        代价（实测，不要拿「条带像素少」当免费午餐）：钱花在**格数 x 模板**而不是
+        像素上，所以探测一次条带就是多付一个完整识别。地板线把它限在「整屏已经读出
+        问题」的帧上：GT 语料 37 帧全部不触发探测（整屏最低 10 格），实测逐张回到
+        444/444 且总耗时不变。本改动是**精度修复，不是性能修复**，别把它记成延迟收益
+        （延迟那一刀在跳帧与方向熔断里，见 `_perf_ms["orient"]`）。
+
+        两套格数的差异**不每帧都测**：常开对照等于每帧多付一次完整识别（实测翻倍）。
+        也不在「配置切换后的首帧免费搭车」：那一帧是用户开屏后的第一眼，拿一次多余
+        检测（实测 +0.8~2s）去换一个**不逐帧变**的数是拿启动体感买日志。于是对照改成
+        顺路：只要本帧真的探测了条带，两个格数就都已经在手上，此刻打日志不额外付钱
+        （`_hand_channel_probe_due` 就是把这次机会留给第一条被切坏的帧）。要看**每帧**
+        的两套格数就拨 `hand_channel_ab`（默认关，且必须列进 `_cfg`，否则 `set_config`
+        会把未知 key 静默丢弃，开关永远停在默认值）：它只加钱和日志，**不改采信规则**。
+
+        `allow_probe` 把「本帧愿意为兜底多付几次检测」交给调用方：方向快检要连续试
+        0° 与 180°，两个朝向都就地探测一次会把单帧从 2 次检测变 4 次（实测），所以
+        两路都先只跑整屏；`probe_skipped` 与 `probe_reject` 的差别就是为它留的：
+        前者是「本帧故意没试」，把它当成「ROI 配歪」报障会误人。
+
+        `raw` 是「本帧已经跑过的整屏读数」：方向快检先拿整屏判几何，判过了才发现
+        读数被切坏（格数低于地板线），此时拿同一批 rows 补一次反超比重新跑整屏便宜
+        一个完整识别（实测）：不接这个口子，翻转帧会从 2 次检测变 3 次 —— 那是把
+        延迟修复的账折回到它头上。传了 `raw` 就不再跑整屏，也不会重复记账。
+
+        连续不合格会自动停用探测（见 `_strip_reject_streak` / `_strip_disabled`）：
+        兜底不起效是**配置**问题而不是逐帧问题，每帧重试等于拿一倍延迟去买同一个已知
+        结论。停用后每一帧仍靠整屏读到牌（严禁零检测帧），平台/玩法一切换就重新给机会。
+        """
+        if raw is None:
+            try:
+                raw = det.detect_all_rows(image, classify=True,
+                                          allow_rotation=False)
+            except Exception:
+                traceback.print_exc()
+                raw = []
+        full_cells = max((len(r) for r in raw), default=0)
+        full_top = max([c for r in raw for (_d, _l, c) in r], default=0.0)
+        self._hand_channel_diag = {
+            "chosen": "full", "strip_cells": -1,
+            "full_cells": full_cells, "strip_y0": 0}
+
+        # 要不要为兜底再付一次检测：整屏读数低于地板线，或者排障开关要求常开对照。
+        ab_on = bool(self._cfg.get("hand_channel_ab", False))
+        if not (ab_on or full_cells < self.HAND_CHANNEL_PROBE_FLOOR):
+            return raw
+        strip, y0 = self._hand_strip(image)
+        if y0 <= 0:
+            # 条带不可用：该平台没配 hand_roi，或探测已被停用（`_strip_disabled`）。
+            # 此时整屏就是唯一读数，不重复跑同一张图。
+            return raw
+        if not allow_probe:
+            self._hand_channel_diag["chosen"] = "probe_skipped"
+            self._hand_channel_diag["strip_y0"] = y0
+            return raw
+        try:
+            sraw = det.detect_all_rows(strip, classify=True,
+                                       allow_rotation=False)
+        except Exception:
+            traceback.print_exc()
+            sraw = []
+        strip_cells = max((len(r) for r in sraw), default=0)
+        strip_top = max([c for r in sraw for (_d, _l, c) in r], default=0.0)
+        adopted = (strip_cells >= self.HAND_STRIP_MIN_CELLS
+                   and strip_top >= self.HAND_STRIP_MIN_CONF
+                   and strip_cells > full_cells
+                   and strip_top >= full_top
+                   and not self._row_shape_anomaly(
+                       max(sraw, key=len) if sraw else []))
+        if adopted or ab_on or getattr(self, "_hand_channel_probe_due", False):
+            # 两套格数都已在手上，打这条日志不额外付钱。
+            self._hand_channel_probe_due = False
+            print(f"[engine] 手牌通道格网对照 {image.shape[1]}x{image.shape[0]}: "
+                  f"整屏 {full_cells} 格/{full_top:.2f} vs 条带 {strip_cells} 格/"
+                  f"{strip_top:.2f}（y0={y0}，采信{'条带' if adopted else '整屏'}）")
+        self._hand_channel_diag = {
+            "chosen": "strip" if adopted else "probe_reject",
+            "strip_cells": strip_cells, "full_cells": full_cells, "strip_y0": y0}
+        if not adopted:
+            # 条带没反超（或只在对照里跑了一遍）：读数仍用整屏，一根格也不丢。
+            return raw
+        return [[((d[0], d[1] + y0, d[2], d[3]), l, c)
+                 for (d, l, c) in r] for r in sraw]
+
     def _settle_orientation(self, image: CVImage) -> Tuple[CVImage, bool]:
         """纯几何归一：按已锁方向把图旋到规范朝向，**一帧识别都不跑**。
 
@@ -3355,46 +3644,75 @@ class Engine:
                 return image
 
             det = self.get_hand_detector()
+            rows0: list = []          # 慢路径熔断路要拿它当“本帧尽量留下的结果”，先置空
             if det is not None:
                 try:
                     # 1. 优先快检当前 0° 朝向：手牌行必须在屏幕下半部，且单牌重复不超过4张
                     # 这里用「手牌通道」而不是主检测器：方向已锁定时这段每帧都跑，它顺手
                     # 算出的 rows 正是 process 要直接用的那份。两边不是同一个通道时，
                     # process 会因来源不匹配而重跑一次，等于每帧白付一个检测的钱。
-                    rows0 = det.detect_all_rows(image, classify=True, allow_rotation=False)
+                    # 喂法走统一入口 `_hand_channel_rows`（整屏为主，只在整屏被切坏时
+                    # 才试底部条带，坐标一律回整屏）。本帧先只跑整屏：另一个朝向可能
+                    # 才对，先探条带等于白付一个完整识别（实测翻转帧 2 次变 3 次）。
+                    # 反超的补刀放在方向判据过关之后（见下面那行 `raw=rows0`）。
+                    rows0 = self._hand_channel_rows(det, image, allow_probe=False)
                     n0 = sum(len(r) for r in rows0)
                     at_bottom0 = self._longest_row_at_bottom(rows0, ih)
                     has_hand0 = any(len(r) >= 7 for r in rows0)
                     dup_fail0 = False
+                    shape_fail0 = False
                     if rows0:
                         longest_r = max(rows0, key=len)
                         labels0 = [d[1] for d in longest_r if d[1]]
                         if any(labels0.count(lab) > 4 for lab in set(labels0)):
                             dup_fail0 = True  # 同名牌超过4张必为倒置误判（如万字倒置误分类为2筒）
+                        # 同名牌之外再加一条独立信号：整行牌形集体不对（被转了
+                        # 90°/270° 时牌是「躺下」而不是「重复」，旧判据对此全隐形的）。
+                        # 网格通道同行框等高等宽，这条永远不触发，不会改变现有主路径。
+                        shape_fail0 = self._row_shape_anomaly(longest_r)
 
-                    if at_bottom0 and (has_hand0 or n0 >= 4) and not dup_fail0:
+                    if (at_bottom0 and (has_hand0 or n0 >= 4)
+                            and not dup_fail0 and not shape_fail0):
+                        # 方向已定，本帧不会再为 180° 花钱：读数被切坏（格数低于地板线）
+                        # 就在这里拿 `raw` 补一次条带反超（不重复跑整屏）。不补的话，
+                        # 这批坏读数会被当作 rows 一路缓存给下游，报障帧的缺张永远修不到
+                        # （踩过：只把反超放在默认调用里，方向快检却用 allow_probe=False）。
+                        rows0 = self._hand_channel_rows(det, image, raw=rows0)
                         self._orient = 0
                         self._orient_zerocount = 0
+                        # 方向被本帧证实了 → 重探计数归零。熔断开的是「连续失败」，
+                        # 成功不重置就变成「总共只允许多两次全探测」，用户真的转了手机反而救不回来。
+                        self._orient_reprobe_count = 0
+                        self._orient_probe_skipped = False
                         self._cache_rows(det, rows0)
                         return image
 
                     # 2. 手机反向横屏（Reverse Landscape，如左插充电线）自愈：
                     # 当 0° 下手牌在顶部或同名牌超额时，快速检测 180° 倒转
+                    # `allow_probe=False`：上面已经为「本帧朝向可能不对」跑过整屏了，
+                    # 两条都就地探条带会把翻转帧从 2 次检测变 4 次（实测）。
                     img180 = cv2.rotate(image, cv2.ROTATE_180)
-                    rows180 = det.detect_all_rows(img180, classify=True, allow_rotation=False)
+                    rows180 = self._hand_channel_rows(det, img180, allow_probe=False)
                     n180 = sum(len(r) for r in rows180)
                     at_bottom180 = self._longest_row_at_bottom(rows180, ih)
                     has_hand180 = any(len(r) >= 7 for r in rows180)
                     dup_fail180 = False
+                    shape_fail180 = False
                     if rows180:
                         longest_r180 = max(rows180, key=len)
                         labels180 = [d[1] for d in longest_r180 if d[1]]
                         if any(labels180.count(lab) > 4 for lab in set(labels180)):
                             dup_fail180 = True
+                        shape_fail180 = self._row_shape_anomaly(longest_r180)
 
-                    if at_bottom180 and (has_hand180 or n180 >= 4) and not dup_fail180:
+                    if (at_bottom180 and (has_hand180 or n180 >= 4)
+                            and not dup_fail180 and not shape_fail180):
+                        # 与 0° 那一支同形：方向定了才补反超（拿 raw 不重复跑整屏）。
+                        rows180 = self._hand_channel_rows(det, img180, raw=rows180)
                         self._orient = 180
                         self._orient_zerocount = 0
+                        self._orient_reprobe_count = 0
+                        self._orient_probe_skipped = False
                         self._cache_rows(det, rows180)
                         return img180
                 except Exception:
@@ -3406,6 +3724,29 @@ class Engine:
             # 代价：这类帧会多付一次手牌通道的检测（慢路径缓存的 rows 因来源不同不复用）。
 
             # 3. 慢路径：原方向不对，探测 4 个方向
+            #
+            # 熔断必须也接在这条路上。`MAX_ORIENT_REPROBES` 原来只接在「连续 0 牌
+            # 自愈」（见 `_orient_zerocount` 那处），于是本路径完全不设防：换牌/定缺
+            # 弹窗把手牌行盖住的每一帧，0°+180° 都读不出合格牌行 → 每帧无条件跑一次
+            # 4 方向全探测，单帧从 ~1.2s 变成 ~5-8s。这正是「牌局都变化好久了才显示」
+            # 的长尾，也正是上面注释自己点名的低内存机型 OOM/SIGSEGV 主因。
+            #
+            # 限流只适用于「已有方向锁」的情况：`_orient is None` 是首帧，必须探。
+            if (self._orient is not None
+                    and self._orient_reprobe_count >= MAX_ORIENT_REPROBES):
+                # 已达上限：保持现有方向锁，把本帧勉强读到的 rows 交给下游，绝不再
+                # 全探测。宁可不更新这一帧，也不把整条流水线拖死。
+                # 必须可见：否则面板“没变化”与“熔断了”在端上看起来一模一样。
+                self._orient_probe_skipped = True
+                if rows0:
+                    self._cache_rows(det, rows0)
+                # rows0 为空 = 整屏（以及试过的条带）一个格都没读到。新语义下整屏是
+                # 主路径、本帧已经跑过一次，拿同一张图再跑一遍只会重复同一个 0 读数并
+                # 多付一个完整识别（旧写法补的是「整屏还没跑过」那一刀，现在它本来就
+                # 跑过了）。宁可不缓存也不伪装成“读到了牌”。
+                return image
+            self._orient_reprobe_count += 1
+            self._orient_probe_skipped = False
             rot, image = self._probe_orientation(image)
             self._orient = rot
             self._orient_zerocount = 0
@@ -3413,6 +3754,65 @@ class Engine:
                 print(f"[engine] 方向自检锁定 {rot}°（原图疑似被旋转）")
             return image
         return self._rotate_to(image, self._orient)
+
+    def _empty_hand_fuse(self) -> bool:
+        """连续空手牌是否已经长到该硬重置（只读状态，不改任何东西）。
+
+        三个前置条件缺一不可，每条都是踩过的坑：
+          - `_match_started`：局还没开始就没有「旧局数据残留」可清，不该重置；
+          - `_warmup_left <= 0`：warmup 那几帧本来就是「还不认识画面」的阶段，
+            拿它当「局结束了」的证据是在拿自己的启动噪声当信号（旧写法靠这条
+            把自己撞死：硬重置 + warmup 重建 = 面板空 3~6 秒，就是用户报的
+            「好好的一局突然告诉我等待牌局开始」）；
+          - `>= EMPTY_HAND_RESET_FRAMES`：一帧实测 1.2~2.5s，旧的 3 帧阈值就是
+            3.6~7.5s 的空窗，而格网偶发错位一帧就能凑齐一串触发。
+
+        抽成方法不是为了好看：这条 fuse 写错了不会让任何精度守卫变红（它的产物
+        是「把对的东西清掉」），只能直接对这个判据做断言与变异检验。
+        """
+        return (getattr(self, "_match_started", False)
+                and self._warmup_left <= 0
+                and getattr(self, "_empty_hand_streak", 0) >= EMPTY_HAND_RESET_FRAMES)
+
+    @staticmethod
+    def _row_shape_anomaly(row) -> bool:
+        """一行牌里「牌形集体不对」的判据：多数格的高度偏离本行中位数太远。
+
+        为何需要它：现有的倒置自愈只看「同名牌 >4」。但画面转了 90°/270° 时，
+        牌不是「重复了」而是「躺下了」—— 高宽关系整个反过来，这在那条判据
+        里是完全隐形的（每张牌仍各自不同名）。
+
+        为何对网格通道零误触：网格是按等距格网切片的，同一行的 w/h **逐字相同**，
+        偏离中位数永远为 0 —— 这条判据在那条路上根本不可能触发。它只可能
+        在 YOLO 这种逐张自由出框的通道上说话，所以加在这里不会改变现有网格主路径
+        的任何行为（这正是「不产生副作用」要的可验证形式）。
+
+        取 0.35 而不是更小：手牌牌形本身有连排遮挡、透视、高矮差，低于这个
+        就会把常规牌阵当异常；而要报出「整行不对」，偏离必须是大面积且剧烈的。
+
+        两条信号各测一种坏法，缺一条就有一种错判无人看：
+          (i) 行内高度彼此偏离（遮挡/半张牌混在行里）；
+          (ii) 整行「躺下」（被转了 90°/270°）。只看 (i) 测不到 (ii)：牌一起躺
+               下时行内高度仍然很一致，偏离中位数接近 0。麻将牌是竖长的
+               （w/h ≈ 1/1.35 ≈ 0.74），躺倒后的框普遍宽大于高，于是用 w/h 判。
+        网格通道按 pitch x (pitch*1.35) 切格，w/h 恒为 0.74 —— 两条都在那条路上
+        不可能触发，所以接进 `_verify_orientation` 不改变现有网格主路径的行为。
+        """
+        hs = sorted(float(d[0][3]) for d in row
+                    if len(d[0]) >= 4 and d[0][3] > 0 and d[0][2] > 0)
+        if len(hs) < 6:
+            return False
+        med = hs[len(hs) // 2]
+        if med <= 0:
+            return False
+        bad = sum(1 for h in hs if abs(h - med) / med > 0.35)
+        if bad >= len(hs) * 0.6:
+            return True
+        ars = sorted(float(d[0][2]) / float(d[0][3]) for d in row
+                     if len(d[0]) >= 4 and d[0][3] > 0 and d[0][2] > 0)
+        med_ar = ars[len(ars) // 2]
+        wide = sum(1 for a in ars if a >= 1.05)
+        return med_ar >= 1.05 and wide >= len(ars) * 0.6
 
     def _heuristic_discard_advice(self, hand_mpsz: str, mode: str = "sc_hz", dingque_suit: Optional[int] = None, disc_counts=None, opponent_dingque_suits: Optional[List[int]] = None) -> List[Dict]:
         """启发式最优出牌推演：在任何张数、冷启动或非标手牌下，永远给出明确最优解。"""
@@ -3728,8 +4128,19 @@ class Engine:
                 self._apply_platform_styles(self._detector)
                 # 手牌通道的白名单与玩法牌集是按 (platform, mode) 缓存的，跟着作废。
                 self._hand_bank_key = None
+                # 新配置下两套格网差多少格又变成了一个未知量，重排一次对照。
+                self._hand_channel_probe_due = True
+                # 新配置下条带可能又是好的，重新给一次机会。
+                self._strip_reject_streak = 0
+                self._strip_disabled = False
             avail = available_set(self.mode)
             hsizes = hand_sizes(self.mode)
+            # 玩法是否被当前平台支持。`get_supported_modes` 早就 import 了但从未
+            # 被调用过（一个悬着的意图）：玩法牌集是一道「分类之前」的闸门，
+            # 给广东雀神挂上血流红中（牌集 range(27)+[33]）会把全部字牌在候选
+            # 阶段就挤掉 —— 表现是「识别缺张」，根子在配置而不在识别。
+            # 引擎不擅自改面板选项（那是产品决定），但这个错配必须可见。
+            self._mode_supported = self.mode in get_supported_modes(self.platform)
 
             detector = self.get_detector()
             if detector is None:
@@ -3765,6 +4176,7 @@ class Engine:
             # 复用缓存」的产物逐字相同（坐标系、调用参数、来源类名都不变）。
             if self._orient_verify_pending:
                 self._orient_verify_pending = False
+                _t_orient = time.time()
                 try:
                     # 入参必须是**未经 settle 的原始帧**：`_verify_orientation` 自己
                     # 负责判 0°/180° 并旋转，把已旋过的图递给它等于转两次 —— 实测
@@ -3784,6 +4196,11 @@ class Engine:
                     self._frame_skipper.set_baseline(self._frame_diff_source(image))
                 except Exception:
                     pass
+                # 本帧方向验证的耗时单独记账（含异常路径也要记，否则“验证抱错”
+                # 在 perf 里表现为空白，又是一个盲区）。同时进滚动窗口（均值/峰值）
+                # 与本帧单值（diag.orient_ms）：前者看趋势，后者定位“就是这一帧慢”。
+                self._orient_cost_ms = (time.time() - _t_orient) * 1000.0
+                self._perf_ms["orient"].append(self._orient_cost_ms)
 
             # 取「所有牌行」（含各家牌河），不再只取手牌行。
             # 复用方向验证（上面补做的那次）已经算好的结果，避免同帧重复检测。
@@ -3795,17 +4212,52 @@ class Engine:
                 rows = self._cached_rows
                 self._cached_rows = None
             else:
-                rows = hand_detector.detect_all_rows(image, allow_rotation=False)
+                # 缓存没中也要走同一个入口：两条路的坐标系必须一致（整屏）。
+                # 旧写法在这里直接把 hand_roi 条带喂进去，产出的 rows 是**条带坐标**，
+                # 而缓存那条路产的是整屏坐标 —— 同一个 payload 字段有两种坐标系，
+                # 下游亮度校验与「牌行在画面下半部」的判据全在其中一路静默失效。
+                rows = self._hand_channel_rows(hand_detector, full_for_preview)
                 self._cached_rows = None
             self._perf_ms["detect"].append((time.time() - _t_detect) * 1000.0)
+
+            # 条带探测停用的账在 process 里记（**一帧一次**），不在通道里记：方向快检一帧
+            # 会问两次通道，在通道里累加会把「用户转了一次手机」数成「连续两帧不合
+            # 格」，一次翻转就把兜底永久关掉 —— 那是拿一个配置自适配换了一个新坑。
+            # 只有 `probe_reject`（试了条带却没反超）才是「兜底在这个配置下不起效」的
+            # 证据；`probe_skipped` 是调用方主动不付钱、`strip` 是成功，两者都不计数。
+            # `full` 要拆成两种：条带已停用时它是唯一读数（不是新证据，账冻结到平台/
+            # 玩法切换），否则说明整屏本来就健康，该把连续不合格归零重新给机会。
+            # 开着 `hand_channel_ab`（每帧对照排障）时绝不触发停用：那本就是采数据用的
+            # 常开探测，被熔断掐掉会留下「日志悄悄断供」的坑（踩过方向：拨开了却只
+            # 能拿到前 3 帧）。
+            _ch = (self._hand_channel_diag or {}).get("chosen")
+            _ab = bool(self._cfg.get("hand_channel_ab", False))
+            if _ch == "probe_reject" and not _ab:
+                self._strip_reject_streak += 1
+                if self._strip_reject_streak >= self.HAND_STRIP_MAX_REJECTS:
+                    if not self._strip_disabled:
+                        print(f"[engine] 手牌条带连续 {self._strip_reject_streak} 帧没能"
+                              f"反超整屏，本配置下不再试它（platform={self.platform} "
+                              f"mode={self.mode}）")
+                    self._strip_disabled = True
+            elif _ch == "strip" or _ab or (
+                    _ch in ("full", "probe_skipped") and not self._strip_disabled):
+                self._strip_reject_streak = 0
+                self._strip_disabled = False
 
             # 置信过滤 + 牌形降权（低置信牌直接丢弃，宁可不识别也不臆测）。
             #
             # 牌面亮度校验：先看整行牌面是不是"亮底牌"（绝大多数麻将如此）。
             # 只有确认是亮底牌时才启用单格过滤 —— 暗色主题美术下这条判据
             # 不适用，整帧跳过，绝不至于把真牌全砍光（见 MIN_FACE_BRIGHTNESS）。
-            bright_all = [_face_brightness(image, r)
-                          for row in rows for (r, l, _c) in row if l is not None]
+            #
+            # 必须喂 `full_for_preview`：上面两条路产的都是整屏坐标，拿条带图去查
+            # 整屏框就是「坐标空间不匹配」，旧实现正是栽在这里（越界读数把防伪闸门
+            # 整体关掉）。亮度读数 None = 图里放不下这个框 = 没有意见，不参与均值。
+            bright_all = [b for b in (_face_brightness(full_for_preview, r)
+                                      for row in rows for (r, l, _c) in row
+                                      if l is not None)
+                          if b is not None]
             use_brightness = bool(bright_all) and (
                 sum(bright_all) / len(bright_all) >= MIN_FACE_BRIGHTNESS)
 
@@ -3843,9 +4295,12 @@ class Engine:
                                           bootstrap=(ri == bootstrap_row_idx),
                                           is_grid=(is_grid_det and ri == 0))
                     # 网格识别器切出的手牌只要模板置信度 >= 0.38 即可采信，避免环境暗/阴影被亮度过滤误杀
-                    if (lab is not None and use_brightness and not (is_grid_det and ri == 0 and c >= 0.38)
-                            and _face_brightness(image, r) < MIN_FACE_BRIGHTNESS):
-                        lab = None
+                    # （亮度读数 None 时不过滤：图里放不下这个框不代表牌面是黑的）
+                    if (lab is not None and use_brightness
+                            and not (is_grid_det and ri == 0 and c >= 0.38)):
+                        b = _face_brightness(full_for_preview, r)
+                        if b is not None and b < MIN_FACE_BRIGHTNESS:
+                            lab = None
                     fr.append((r, lab, c))
                 filtered.append(fr)
 
@@ -3917,11 +4372,21 @@ class Engine:
                 diag_dup_reject = False
 
             # ===== 对局结束 / 结算弹窗即时清空 (Instant Settlement Flush) =====
-            # 对局中若手牌区连续 >= 3 帧完全无牌（结算弹窗覆盖、胡牌动画结束、返回大厅），
-            # 立即触发硬重置清空旧手牌、牌河与旧建议，彻底根治“明明不在对局却仍显示手牌”的顽疾！
+            # 对局中若手牌区连续多帧完全无牌（结算弹窗覆盖、胡牌动画结束、返回大厅），
+            # 触发硬重置清空旧手牌、牌河与旧建议，防「明明不在对局却仍显示手牌」。
+            #
+            # 为什么阈值不能停在 3：一帧实测 1.2~2.5s，3 帧就是 3.6~7.5s 的空窗；
+            # 而旧行为在触发时直接 `_reset_game_state()`（连手牌/牌河/建议/方向锁一起
+            # 清）+ warmup 重建 3 帧，面板要空 3~6 秒 —— 用户看到的「莫名其妙的
+            # 「等待牌局开始」」不是识别突然坏了，是自己把自己撞死了：格网偶发错位
+            # 一帧就能凑齐这一串触发。
+            #
+            # 为什么不能干脆去掉：「结算弹窗仍被判为牌桌」这类帧只能靠这条 fuse，
+            # 它是「不打了还显示旧手牌」的唯一兜底（`_is_mahjong_table` 管的是画面
+            # 已经不是牌桌那一路）。所以只改长度和触发条件，不拆机制。
             if curr_raw_n == 0:
                 self._empty_hand_streak = getattr(self, "_empty_hand_streak", 0) + 1
-                if getattr(self, "_match_started", False) and self._empty_hand_streak >= 3:
+                if self._empty_hand_fuse():
                     self._reset_game_state()
                     self._empty_hand_streak = 0
             else:
@@ -4073,8 +4538,12 @@ class Engine:
                         self._opponent_discards = seat_discards
                         bg_seen = bg_discards
                     if bg_meld_entries:
-                        zone_to_seat = {"right": 1, "top": 2, "left": 3}
+                        # bottom 也在表内：本家副露原本被丢掉，导致「你碰了/你杠了」
+                        # 永远播不出，而且杠过之后算不出正确的立牌基数。
+                        zone_to_seat = {"right": 1, "top": 2, "left": 3, "bottom": 0}
                         seat_melds: Dict[int, List[int]] = {1: [], 2: [], 3: []}
+                        seat_entries: Dict[int, List[Tuple[str, int]]] = {
+                            0: [], 1: [], 2: [], 3: []}
                         frame_melds = [0] * 34
                         for _region, md, n_tiles in bg_meld_entries:
                             try:
@@ -4084,9 +4553,13 @@ class Engine:
                             if md and midx in avail:
                                 frame_melds[midx] += n_tiles
                                 seat = zone_to_seat.get(_region)
-                                if seat and midx < 27:
+                                if seat is None:
+                                    continue
+                                seat_entries[seat].append((md, int(n_tiles)))
+                                if midx < 27:
                                     seat_melds[seat].extend([midx] * n_tiles)
                         self._opponent_melds = seat_melds
+                        self._seat_meld_entries = seat_entries
                         for i in range(34):
                             if frame_melds[i] > self._meld_counts_34[i]:
                                 if self._pending_melds_34[i] >= frame_melds[i]:
@@ -4152,6 +4625,11 @@ class Engine:
                         self._inferred_discards[missing_tile] = min(self._inferred_discards[missing_tile] + 1, 4)
                         self._match_started = True
                         break
+                # 给局况阶段机留一份「刚打的是哪张」：只有一型多出来才敢报牌面。
+                # 碰/杠那一次手牌跳变也会走到这里（一次少两张），多型时置 None，
+                # 阶段机只会播「打出一张牌（牌面待确认）」而不是张冠李戴。
+                _cands = [t for t, c in missing_cnt.items() if c > 0]
+                self._hand_diff_discard = _cands[0] if len(_cands) == 1 else None
 
             # ===== 瞬时摸牌感知：手牌张数增加（例如 13->14，玩家刚摸到一张牌）=====
             drawn_from_diff = None
@@ -4171,11 +4649,22 @@ class Engine:
                 self._last_stable_n = curr_n
 
             # ---- 摸牌精确判定 (优先使用检测器独立摸牌检测或多重集差分) ----
+            # 旧口径硬编 (14,11,8,5,2)，同余只在「没有杠」时成立：杠从手里抽走 4 张，
+            # 4 ≢ 0 (mod 3)，杠过一次后摸进的那一张（10）永远不在这堆数里，「摸牌」
+            # 徽标与依赖 is_drawing 的战术层在那一局里再也不会亮。这里按本家副露
+            # 实际扣掉的张数校正基数后再判同余：R=0 时与原集合逐值相同（不改变旧行为），
+            # 只补上杠后的盲区。
+            # R 取阶段机里**已双时确认**的本家副露扣牌数，不直接吃后台扫描的原始快照：
+            # 副露区一帧误读就会把 R 抬高 3，未确认值会当场把奇偶判反。
+            # 注意：上方那两段「瞬时出牌/摸牌感知」写的是牌河差分账本，故意不动：
+            # 碰的那一帧也会呈现为「手牌少两张」，把基数校正放进那里会把副露抽走的牌
+            # 当成弃牌记进牌河（污染记牌器），代价远大于收益。
+            own_removed = self._phase_machine.own_removed()
             is_drawing = False
             drawing_tile = None
             grid_drawn_tile = getattr(detector, "last_drawn_tile", None)
 
-            if curr_n in (14, 11, 8, 5, 2):
+            if curr_n > 0 and (curr_n - (self.base_hand_tiles - own_removed)) % 3 == 1:
                 is_drawing = True
                 if grid_drawn_tile is not None:
                     drawing_tile = grid_drawn_tile
@@ -4451,9 +4940,16 @@ class Engine:
             else:
                 # 尚未形成新的完整合法手牌（摸打瞬间、手指遮挡、动画突变或真离场）
                 in_active_match = getattr(self, "_match_started", False) and bool(self._stable_hand_mpsz)
-                if in_active_match and curr_raw_n > 0:
+                if in_active_match:
                     # 对局中瞬态阻尼保护：摸打出牌瞬间、手指短暂遮挡或动画跳变时，
                     # 连续 1~3 帧维持上一帧稳定决策与手牌，绝不突发闪烁到 "等待开始" 或 "未检测到手牌"！
+                    #
+                    # `curr_raw_n > 0` 这个前置条件必须拆掉：读到 0 张恰恰是最常见的
+                    # 瞬态形状（换牌弹窗整个盖住手牌行、牌河动画闪过），旧行为在这一
+                    # 格上直接掉进下面的 `no_tiles` → 面板立刻报「等待牌局开始」。阻尼
+                    # 本来就是为这个设计的，把主触发情形漏在门外等于装了个不用来的保险丝。
+                    # 超过窗口仍读不出 partial（本帧 raw_labels 为空）就照旧降级 no_tiles，
+                    # 不伪造牌、不把旧手牌永远挂屏。
                     self._transient_drop_streak = getattr(self, "_transient_drop_streak", 0) + 1
                     if self._transient_drop_streak <= 3:
                         status = "ok"
@@ -5247,6 +5743,51 @@ class Engine:
                 danger_flow=top_danger_flow,
             )
 
+            # 局况事实层：把“现在轮到谁/刚刚发生了什么/几家碰杠”折算出来。与上面那
+            # 一层分工不同：战术建议在 shanten>=2 时故意不给话（面板因此整块收起），
+            # 局况恒有输出——用户问的“到什么阶段了”属于后者，不该被前者的空窗遮住。
+            # 只读已算好的账本（牌河分区计数/各家牌面/副露条目），不跑任何检测，
+            # 单帧开销是几十次字典比较，对延迟没有可测影响。
+            try:
+                _rz = getattr(self, "_river_zone_counts", {}) or {}
+                _od = getattr(self, "_opponent_discards", {}) or {}
+                # 本家牌河（bottom）**不喂**：自家出牌已经由手牌张数转移直接得到，
+                # 再喂一份牌河增量会把同一件事播两遍（而且牌河读数比手牌慢一拍）。
+                _seat_river = {1: int(_rz.get("right", 0) or 0),
+                               2: int(_rz.get("top", 0) or 0),
+                               3: int(_rz.get("left", 0) or 0)}
+                _adv0 = advice[0] if (advice and isinstance(advice[0], dict)) else {}
+                _ting = list(_adv0.get("ting_tiles") or [])
+                if not _ting and isinstance(ting_details, list):
+                    _ting = [d.get("tile") for d in ting_details
+                             if isinstance(d, dict) and d.get("tile")]
+                match_phase = self._phase_machine.update({
+                    "now_ms": int(time.time() * 1000),
+                    "status": status,
+                    "count": tile_count,
+                    "drawing_tile": drawing_tile,
+                    "self_discard": getattr(self, "_hand_diff_discard", None),
+                    "swap_phase": bool(is_swap_phase), "dq_phase": bool(is_dq_phase),
+                    "pick_phase": bool(is_pick_phase),
+                    "swap_tiles": list((swap_advice or {}).get("tiles") or [])
+                    if isinstance(swap_advice, dict) else [],
+                    "seat_river": _seat_river,
+                    "seat_river_tiles": {1: _od.get(1) or [], 2: _od.get(2) or [],
+                                         3: _od.get(3) or []},
+                    "seat_melds": getattr(self, "_seat_meld_entries", {}),
+                    "dingque_suit": dingque_suit,
+                    "dingque_name": dingque_name,
+                    "dingque_recommend": rec_suit_name,
+                    "shanten": shanten,
+                    "ting_tiles": _ting,
+                })
+            except Exception as _pe:
+                # 局况折算失败不能拖垮识别：给同 schema 的空视图，异常写进 diag。
+                match_phase = empty_phase_view("局况折算异常，不影响识别与建议")
+                self._phase_error = str(_pe)[:200]
+            else:
+                self._phase_error = None
+
             result = {
                 "mode": self.mode,
                 "mode_name": MODES.get(self.mode, {}).get("name", self.mode),
@@ -5259,6 +5800,7 @@ class Engine:
                 "phase_label": phase_label,
                 "tactical_badge": tactical_badge,
                 "tactical_intent": tactical_intent,
+                "match_phase": match_phase,
                 "dingque": dingque_name,
                 "dingque_suit": dingque_suit,
                 "dingque_phase": is_dq_phase,
@@ -5274,6 +5816,25 @@ class Engine:
                     "stale": diag_stale,
                     "dup_reject": diag_dup_reject,
                     "empty_frames": hand_empty_frames,
+                    # 手牌通道本帧走了哪条路 + 两套格网各切了几格（-1 = 本帧没试）。
+                    # chosen=full 且 strip_cells=-1 是常态（整屏读数健康，一分探条带的
+                    # 钱都没花）；chosen=strip 才说明条带反超了整屏；probe_reject /
+                    # probe_skipped 分别对应「试了没赢」与「本帧不许试」，报障时别把
+                    # 后者当成 ROI 配歪。
+                    "hand_channel": dict(getattr(self, "_hand_channel_diag", {})),
+                    # 玩法/平台牌集错配标记。缺字牌时先看这里，不要先改识别阈值。
+                    "mode_supported": bool(getattr(self, "_mode_supported", True)),
+                    # 条带探测是否已被停用（连续试了却没反超整屏）。停用是「这个配置下
+                    # 兜底不起效」的确证，不记就只会留下“识别好像变差了”的谜题。
+                    "strip_disabled": bool(getattr(self, "_strip_disabled", False)),
+                    # 本帧方向验证耗时（ms）。窗口均值见 diag.perf.orient。
+                    "orient_ms": round(float(getattr(self, "_orient_cost_ms", 0.0)), 1),
+                    # 重型 4 方向全探测是否被熔断拦下。必须可见：静默不探与
+                    # 静默探不动，对使用方来说是两种完全不同的故障。
+                    "orient_probe_skipped": bool(
+                        getattr(self, "_orient_probe_skipped", False)),
+                    "orient_reprobe_count": int(
+                        getattr(self, "_orient_reprobe_count", 0)),
                     # 四区牌河归属计数（"谁打的"展示）。
                     "river_zones": dict(getattr(self, "_river_zone_counts", {})),
                     # 分阶段耗时（ms）：decode/detect/river/advice 各自 avg/max，
@@ -5286,6 +5847,8 @@ class Engine:
                     # B-P4 决策补全的接线体检：advantage/danger_hint/predraw 本该
                     # 在非空 advice 上出现，计数为 0 就说明某一环断开了（而不是“没数据”）。
                     "decisions": getattr(self, "_last_decision_stats", None),
+                    # 局况折算一旦异常，必须可见：否则“没局况”与“没到局”在端上看起来一样。
+                    "phase_error": getattr(self, "_phase_error", None),
                 },
                 "hand": hand_mpsz,
                 "count": tile_count,

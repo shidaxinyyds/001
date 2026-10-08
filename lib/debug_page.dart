@@ -270,6 +270,11 @@ class _DebugPageState extends State<DebugPage> {
             ),
             const SizedBox(height: 16),
             _groupCard(
+              title: '当前牌局',
+              children: [_matchPhaseReadout()],
+            ),
+            const SizedBox(height: 16),
+            _groupCard(
               title: '识别策略',
               children: [
                 _switchRow(
@@ -476,6 +481,123 @@ class _DebugPageState extends State<DebugPage> {
           ],
         ),
       );
+
+  /// 当前牌局读数。悬浮窗是叠在真实牌局上的覆盖层，不放任何常驻局况（只在阶段切换与
+  /// 碰/杠/听牌那一瞬闪一颗 ~2.5s 的小胶囊），明细只在这页展开：轮到谁 / 刚刚发生了什么 /
+  /// 各家牌河确认到几张 / 哪些读数被确认门挡下。数据是悬浮窗每 2s 随帧龄转发的引擎原样
+  /// 输出，这里不再算一遍（端上重算一套必然与引擎漂移）。
+  Widget _matchPhaseReadout() {
+    final Map<String, dynamic> ev = _latency ?? const <String, dynamic>{};
+    final Map<String, dynamic> mp =
+        (ev['match_phase'] as Map?)?.cast<String, dynamic>() ??
+            const <String, dynamic>{};
+    final String phase = mp['phase'] as String? ?? '';
+    final String label = mp['label'] as String? ?? '';
+    final String hint = mp['hint'] as String? ?? '';
+    final String basis = mp['turn_basis'] as String? ?? '';
+    final Map<String, dynamic> hand =
+        (mp['hand'] as Map?)?.cast<String, dynamic>() ?? const <String, dynamic>{};
+    final List<dynamic> melds = (mp['melds'] as List?) ?? const [];
+    final List<dynamic> feed = (mp['feed'] as List?) ?? const [];
+    final Map<String, dynamic> river =
+        (mp['river'] as Map?)?.cast<String, dynamic>() ?? const <String, dynamic>{};
+    final Map<String, dynamic> rejected =
+        (mp['rejected'] as Map?)?.cast<String, dynamic>() ??
+            const <String, dynamic>{};
+    final int? confirmMs = (mp['confirm_ms'] as num?)?.toInt();
+    final int? overMs = (mp['over_ms'] as num?)?.toInt();
+    final int? seq = (mp['seq'] as num?)?.toInt();
+    final int updatedAt = (mp['updated_at_ms'] as num?)?.toInt() ?? 0;
+    final bool stale = updatedAt > 0 &&
+        DateTime.now().millisecondsSinceEpoch - updatedAt > 6000;
+
+    void addLine(List<Widget> out, String text) {
+      out.add(Padding(
+        padding: const EdgeInsets.only(bottom: 3),
+        child: Text(text,
+            style: const TextStyle(
+                fontSize: 11, color: _textSub, height: 1.4)),
+      ));
+    }
+
+    final List<Widget> rows = <Widget>[];
+    if (phase.isEmpty) {
+      addLine(rows, '还没收到局况读数：开启识别后，悬浮窗会每 2 秒往这里补一次。');
+    } else if (phase == 'idle') {
+      addLine(rows, '画面里没牌桌（未开局、结算中，或被弹窗暂时挡住），所以不报阶段。');
+    } else {
+      rows.add(Padding(
+        padding: const EdgeInsets.only(bottom: 4),
+        child: Text('$label${hint.isEmpty ? '' : ' · $hint'}',
+            style: const TextStyle(
+                fontSize: 13, fontWeight: FontWeight.w600, color: _textMain)),
+      ));
+      if (basis.isNotEmpty) addLine(rows, '判定依据：$basis');
+      final int? count = (hand['count'] as num?)?.toInt();
+      final int? base = (hand['base'] as num?)?.toInt();
+      final int? removed = (hand['meld_removed'] as num?)?.toInt();
+      if (count != null && base != null) {
+        addLine(rows, '本家立牌 $count 张 · 应然基数 $base'
+            '（副露扣走 ${removed ?? 0} 张，杠抽走 4 张所以不是 13 的余数）');
+      }
+      // 本家牌河不摆在这一行：自家弃牌是由手牌张数转移直接统计的（再喂一份牌河增量会
+      // 把同一件事播两遍），那个读数恒为 0 —— 印一个 0 在“已确认张数”后面就是假数。
+      final Iterable<MapEntry<String, dynamic>> rivals =
+          river.entries.where((e) => e.key != '本家');
+      if (rivals.isNotEmpty) {
+        addLine(rows, '他家牌河（已确认张数）：'
+            '${rivals.map((e) => '${e.key} ${e.value}').join('、')}'
+            '；本家弃牌按手牌张数转移统计，不计在这一行');
+      }
+      if (melds.isNotEmpty) {
+        addLine(rows, '副露：${melds.join('、')}');
+      }
+      if (feed.isNotEmpty) {
+        final List<dynamic> latest = feed.reversed.take(6).toList();
+        addLine(rows, '最近事件（新到旧）：');
+        for (final dynamic e in latest) {
+          addLine(rows, '  · ${e is Map ? (e['text'] ?? '') : e}');
+        }
+      }
+      final Map<String, dynamic> block = Map<String, dynamic>.from(rejected);
+      final int blockedSum = block.values
+          .whereType<num>()
+          .fold<int>(0, (a, b) => a + b.toInt());
+      addLine(rows, blockedSum == 0
+          ? '读数一路自洽，没有需要挡掉的帧。'
+          : '挡下可疑读数共 $blockedSum 次：'
+              '牌河超上限 ${block['river_over_cap'] ?? 0}、副露组数超限 '
+              '${block['meld_group_cap'] ?? 0}、张数反而变小 ${block['non_monotonic'] ?? 0}、'
+              '单帧事件超量 ${block['event_cap'] ?? 0}、墙钟回拨 ${block['clock_back'] ?? 0}');
+    }
+    if (stale) {
+      addLine(rows, '读数已停止更新（识别已关闭、或悬浮窗已收起）。');
+    }
+    rows.add(const Padding(
+      padding: EdgeInsets.only(top: 2),
+      child: Text(
+          '口径：同一候选牌数需稳定满 60ms 才当真（抗单帧抖动），离开牌桌持续满 400ms '
+          '才报“本局结束”；两个阈值都是时间，不是帧数。',
+          style: TextStyle(fontSize: 10.5, color: _textSub, height: 1.4)),
+    ));
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ...rows,
+          if (seq != null)
+            Align(
+              alignment: Alignment.centerRight,
+              child: Text('局况序号 $seq'
+                  '${confirmMs != null && overMs != null ? ' · 确认 ${confirmMs}ms / 结束 ${overMs}ms' : ''}',
+                  style: const TextStyle(fontSize: 10, color: _textSub)),
+            ),
+        ],
+      ),
+    );
+  }
 
   Widget _groupCard(
           {required String title, required List<Widget> children}) =>

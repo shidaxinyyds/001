@@ -481,6 +481,31 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   List<dynamic> _shownAdvice = const [];
   String _shownBest = '';
 
+  // ── 关键事件瞬时胶囊（开局/碰/杠/听牌/阶段切换/本局结束）───────────────────
+  // 悬浮窗是叠在真实牌局上的覆盖层：这里**不新增任何常驻控件**。这颗胶囊只挂在
+  // Stack 的 Positioned 上（不进 Column、不占布局高度），~2.5s 自动消失，并且用
+  // IgnorePointer 不吃手势（否则它会挡住顶部拖动区）。完整明细走主页调试页。
+  //
+  // 只播“刚刚落定”的事件（draw/discard/discard_other 每一巡都在发生，播了就是刷屏），
+  // 其中 start/swap_in/swap_done/dingque_in/dingque/irregular 是阶段切换：玩家问的
+  // “现在到哪儿了”恰好都在这几个瞬间，用瞬时一句话回答，而不是养一行常驻文字。
+  static const Set<String> _kFlashKinds = {
+    'start', 'pong', 'kong', 'added_kong',
+    'swap_in', 'swap_done', 'dingque_in', 'dingque',
+    'tenpai', 'irregular', 'over',
+  };
+  // 副露种类 → 中文。引擎只会给 pong/kong/added_kong；出现别的值（包括 'unknown'）
+  // 就是接线坏了，宁可退回「副露」也不能替它编一个具体动作 ——
+  // 把碰报成杠会被玩家当场戳穿。
+  static const Map<String, String> _kMeldKindCn = {
+    'pong': '碰',
+    'kong': '杠',
+    'added_kong': '加杠',
+  };
+  Map<String, dynamic>? _eventFlash;
+  Timer? _eventFlashTimer;
+  int _lastFlashAtMs = 0; // 水位：隔帧重发同一份缓存 payload 时不得重复闪
+
   static const double collapsed = 56;
   // 胶囊微缩模式：收起态下在屏幕边缘显示小巧横条，展示听牌/最优打法
   bool _capsuleMode = true;
@@ -636,8 +661,12 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     // shareData 是跨引擎发消息，逐帧发会让主页每帧重建 —— 那正是「识别高峰期
     // 点什么都没反应」的病根（见 home_page 里 _RecognitionStatusView 的局部订阅注释）。
     _latencyReport = Timer.periodic(const Duration(seconds: 2), (Timer t) {
-      FlutterOverlayWindow.shareData(_latency.toShare(java: _javaCounters))
-          .catchError((_) {});
+      // 局况摘要搭同一班车上报（2s 一次，不逐帧）：调试页要能回答“这局到底在
+      // 干嘛、播过哪些事件、脏读被挡了几次”，而那些读数只有悬浮窗引擎里有。
+      final Map<String, dynamic> share =
+          _latency.toShare(java: _javaCounters);
+      share['match_phase'] = _phaseDigestForShare();
+      FlutterOverlayWindow.shareData(share).catchError((_) {});
     });
 
     // 版本徽章：从原生 BuildConfig 读真实版本号（失败静默，徽章不渲染）。
@@ -670,6 +699,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     _licenseRetryTimer?.cancel();
     _signalWatchdog?.cancel();
     _latencyReport?.cancel();
+    _eventFlashTimer?.cancel();
     // 必须关闭 socket 监听：旧实现泄漏 Server，旧 State 继续抢接 Java 短连接丢帧。
     _server?.close();
     _server = null;
@@ -929,6 +959,146 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         selectedMode = m;
       }
     });
+    // 局况关键事件（碰/杠/听牌/换牌完成/结束）闪一颗瞬时胶囊。放在 setState 之后、
+    // 用它自己的 setState：事件到达与面板重建解耦，错一帧也不会抖到建议区。
+    _pulseKeyEvent(json);
+  }
+
+  /// 局况事实层（引擎 `match_phase`）只服务两处：瞬时胶囊与调试页摘要。
+  /// 取不到就返回 null：宁可那一行整块收起，也不能拿上一帧的读数冒充“现在轮到谁”。
+  static Map<String, dynamic>? _phaseOf(Map<String, dynamic>? res) {
+    final mp = res?['match_phase'];
+    return (mp is Map) ? mp.cast<String, dynamic>() : null;
+  }
+
+  /// 从 match_phase.feed 尾部取“刚刚落定的关键事件”，闪一个 ~2.5s 自动消失的
+  /// 极小胶囊。**只用 at_ms 水位判重**：隔帧重发同一份缓存 payload 时，feed 尾
+  /// 还是同一条，不去重会让同一句“对家 杠 5万”反复顶新，看着像播了三遍。
+  void _pulseKeyEvent(Map<String, dynamic>? json) {
+    final mp = _phaseOf(json);
+    if (mp == null) return;
+    final feed = mp['feed'];
+    if (feed is! List || feed.isEmpty) return;
+    final last = feed[feed.length - 1];
+    if (last is! Map) return;
+    final kind = last['kind'] as String? ?? '';
+    final text = (last['text'] as String? ?? '').trim();
+    final at = (last['at_ms'] as num?)?.toInt() ?? 0;
+    if (!_kFlashKinds.contains(kind) || text.isEmpty) return;
+    if (at <= _lastFlashAtMs) return;
+    _lastFlashAtMs = at;
+    // 必须走 setState：只改字段不标脏，胶囊得等下一帧才可能出现 ——
+    // 而“最后一帧恰好就是碰的那一帧”时引擎已经安静下来，这一句就永远不会露脸。
+    if (!mounted) return;
+    setState(() => _eventFlash = Map<String, dynamic>.from(last));
+    _eventFlashTimer?.cancel();
+    _eventFlashTimer = Timer(const Duration(milliseconds: 2500), () {
+      if (mounted) setState(() => _eventFlash = null);
+    });
+  }
+
+  /// 调试页用的局况摘要：只带文本与计数，不带 34 维数组（跨引擎消息要小）。
+  Map<String, dynamic> _phaseDigestForShare() {
+    final mp = _phaseOf(result);
+    if (mp == null) return const {};
+    final feed = (mp['feed'] as List?) ?? const [];
+    final melds = (mp['melds'] as List?) ?? const [];
+    final ev = (mp['evidence'] as Map?)?.cast<String, dynamic>() ?? const {};
+    return {
+      'phase': mp['phase'] ?? '',
+      'label': mp['label'] ?? '',
+      'hint': mp['hint'] ?? '',
+      'turn_basis': mp['turn_basis'] ?? '',
+      'hand': (mp['hand'] as Map?)?.cast<String, dynamic>() ?? const {},
+      'melds': melds
+          .map((m) => m is Map
+              ? '${m['seat_name'] ?? ''} '
+                  '${_kMeldKindCn[m['kind'] as String? ?? ''] ?? '副露'} '
+                  '${m['tile_cn'] ?? ''}'
+              : '')
+          .where((s) => (s as String).trim().isNotEmpty)
+          .toList(),
+      'feed': feed
+          .map((e) => e is Map ? '${e['text'] ?? ''}' : '')
+          .where((s) => (s as String).isNotEmpty)
+          .toList(),
+      'river': ev['river'] ?? const {},
+      'rejected': ev['rejected'] ?? const {},
+      'confirm_ms': ev['confirm_ms'],
+      'over_ms': ev['over_ms'],
+      'seq': mp['seq'],
+      'updated_at_ms': mp['updated_at_ms'],
+    };
+  }
+
+  /// 瞬时胶囊的配色：拿战术条同一族低饱和色，不引入红橙“错误/警告”语义。
+  /// 阶段切换类（start/swap_in/dingque_in/irregular）走青灰系：它们是“现在到哪儿了”
+  /// 的告知，不是故障报警 —— 拿警告色会把正常开局渲染成出错。
+  static const Map<String, Color> _kFlashColor = {
+    'start': Color(0xFF4DB6AC),
+    'pong': Color(0xFF26A69A),
+    'kong': Color(0xFF9CCC65),
+    'added_kong': Color(0xFF9CCC65),
+    'swap_in': Color(0xFF4DD0E1),
+    'swap_done': Color(0xFF4DD0E1),
+    'dingque_in': Color(0xFF7986CB),
+    'dingque': Color(0xFF7986CB),
+    'tenpai': Color(0xFFFFD54F),
+    'irregular': Color(0xFF90A4AE),
+    'over': Color(0xFFB0BEC5),
+  };
+
+  /// 碰/杠/听牌/阶段切换这类“刚刚落定”的事件，用一颗 ~2.5s 自动消失的极小胶囊回个话。
+  /// 它只挂在 Stack 的 Positioned 上：不进 Column、不占布局高度，到时就从树上摘掉；
+  /// IgnorePointer 让它不吃手势，完整局况明细（各家牌河张数、副露一览、被挡下的
+  /// 脏读计数）一律放主页调试页，悬浮窗不新增任何常驻。
+  Widget _eventFlashCapsule() {
+    final Map<String, dynamic>? ev = _eventFlash;
+    final String text = (ev?['text'] as String? ?? '').trim();
+    if (text.isEmpty) return const SizedBox.shrink();
+    final Color c =
+        _kFlashColor[ev?['kind'] as String? ?? ''] ?? const Color(0xFF4DB6AC);
+    return Positioned(
+      left: 8,
+      bottom: 20,
+      child: IgnorePointer(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 140),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1.5),
+            decoration: BoxDecoration(
+              color: const Color(0xF00A1412),
+              borderRadius: BorderRadius.circular(3),
+              border: Border.all(color: c.withAlpha(190), width: 0.6),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 3,
+                  height: 3,
+                  decoration: BoxDecoration(color: c, shape: BoxShape.circle),
+                ),
+                const SizedBox(width: 3),
+                Flexible(
+                  child: Text(
+                    text,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Color(0xFFE0F2F1),
+                      fontSize: 7.5,
+                      fontWeight: FontWeight.w600,
+                      decoration: TextDecoration.none,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   // 授权到期/被停用时的悬浮占位胶囊：不给出任何牌建议。
@@ -1191,10 +1361,16 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             ..['advice'] = []
             ..['best'] = ''
             ..['status'] = 'waiting'
+            // 新局重置后上一局的局况（阶段/副露/实录）不得继续在屏上挂着：
+            // 宁可那一行整块收起，也不能把上一局的“对家 杠 5万”当实时播报。
+            ..['match_phase'] = null
             ..['message'] = '已重置新对局';
         }
         _shownAdvice = const [];
         _shownBest = '';
+        _eventFlash = null;
+        _eventFlashTimer?.cancel();
+        _lastFlashAtMs = 0;
       });
     }
   }
@@ -3024,6 +3200,21 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     return ledgerBacked ? '$u张' : '≤$u张';
   }
 
+  /// 三段文案的唯一来源是引擎战术层；它返回空串就跟着空，那一行整块收起。
+  ///
+  /// 为什么不拿 `match_phase` 往这里补位（曾经补过，按要求撤掉）：战术层在 shanten≥2
+  /// 时故意留白，局况层却是恒有输出的（“候牌中”“轮到你出牌”每帧都在）。拿后者填前者，
+  /// 这一行就从“没建议时收起”变成对局全程常驻 —— 悬浮窗叠在真实牌局上，等于我偷偷
+  /// 给它加了一块常驻面板。局况改由两处回答，都不占布局：阶段切换与关键事件闪一颗
+  /// ~2.5s 的瞬时胶囊（`_eventFlashCapsule`），完整明细在主页调试页「当前牌局」卡。
+  ///
+  /// 本地粗推里不再有 `count % 3 == 2`：杠从手里抽走 4 张，4 ≢ 0 (mod 3)，
+  /// 同余式只在没杠时成立；杠过一次后基数是 9（13-4），摸进一张是 10，
+  /// `10 % 3 == 1` ⇒ 明明轮到你出牌、端上却会永远读成“候牌中”。
+  /// 基数只能由引擎按本家副露扣牌算（`match_phase.hand.base`）。
+  ///
+  /// 下面那段本地粗推只在 payload 压根没带 phase_label 时才会走到（错误帧、隔帧重发的
+  /// 旧缓存）；正常帧一律以引擎文案为准，端上不重算一套。
   String _resolvePhaseLabel(Map<String, dynamic>? res) {
     if (res == null) return '';
     final p = res['phase_label'] as String?;
@@ -3036,7 +3227,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     if (res['dingque_phase'] == true || status == 'dingque') return '定缺选门';
     if (res['pick_phase'] == true || status == 'pick') return '选牌操作中';
     if (status == 'waiting' || status == 'no_tiles' || count == 0) return '';
-    if (isDrawing || count % 3 == 2) {
+    if (isDrawing) {
       if (shanten == 0) return '摸牌决断 · 听牌决胜';
       if (shanten == 1) return '摸牌决断 · 进听冲刺';
       return '';
@@ -3059,7 +3250,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     if (res['dingque_phase'] == true || status == 'dingque') return '定缺抉择';
     if (res['pick_phase'] == true || status == 'pick') return '选牌决断';
     if (status == 'waiting' || status == 'no_tiles' || count == 0) return '';
-    if (isDrawing || count % 3 == 2) {
+    if (isDrawing) {
       if (shanten == 0) return '听牌决胜';
       if (shanten == 1) return '进听冲刺';
       return '';
@@ -3083,7 +3274,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     if (res['dingque_phase'] == true || status == 'dingque') return '正在评估各门手牌厚度，准备打缺牌张最少的一门';
     if (res['pick_phase'] == true || status == 'pick') return '正在识别候选牌张，请在界面弹窗中确认选牌';
     if (status == 'waiting' || status == 'no_tiles' || count == 0) return '';
-    if (isDrawing || count % 3 == 2) {
+    if (isDrawing) {
       if (shanten == 0) {
         return bestCn.isNotEmpty ? '建议切【$bestCn】，锁定听牌胜势，静候胡牌' : '当前已听牌，选择最优叫口锁定胜势';
       }
@@ -4176,6 +4367,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             ),
           ),
           _resizeHandle(),
+          // 瞬时事件胶囊：只在有事件的那 ~2.5s 存在，Positioned 不占布局。
+          if (_eventFlash != null) _eventFlashCapsule(),
           if (_showModeSelector)
             _buildModeSelectorOverlay(),
         ],

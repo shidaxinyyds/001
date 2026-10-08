@@ -433,8 +433,13 @@ def check_overlay(src: str):
             bad.append("L11: 入口里没看到帧龄统计")
         elif gate > feed:
             bad.append("L11: 帧龄统计排在心跳信标之前（Java 心跳帧会被当成画面帧计入）")
-    if "Timer.periodic(const Duration(seconds: 2), (Timer t) {\n      " \
-            "FlutterOverlayWindow.shareData(_latency.toShare(java: _javaCounters))" not in src:
+    # 2s 节流这条断言看的是「同一个回调体内」而不是「紧邻的两行」：班车现在还要搭
+    # 局况摘要（share['match_phase']），拼 payload 与 shareData 之间必然多几行，
+    # 拿整行字面量去比会把这种正当改判成违规。
+    ti = src.find("Timer.periodic(const Duration(seconds: 2), (Timer t) {")
+    tblock = src[ti:ti + 900] if ti >= 0 else ""
+    if ti < 0 or "_latency.toShare(java: _javaCounters)" not in tblock \
+            or "FlutterOverlayWindow.shareData(" not in tblock:
         bad.append("L11: 帧龄上报没有 2s 节流（逐帧 shareData 会让主页每帧重建）")
     if "_latencyReport?.cancel();" not in src:
         bad.append("L11: dispose 没取消上报定时器（关窗后 Timer 泄漏并持续跨引擎发消息）")
@@ -544,8 +549,8 @@ MUTANTS = [
      lambda s: s.replace("      _latency.add(\n          (json['captured_at_ms'] as num?)?.toInt(),",
                          "      _latencyDisabled = (\n          (json['captured_at_ms'] as num?)?.toInt(),")),
     ("L11 上报改成逐帧 shareData", "mahjong_overlay.dart",
-     lambda s: s.replace("Timer.periodic(const Duration(seconds: 2), (Timer t) {\n      FlutterOverlayWindow.shareData(_latency.toShare(java: _javaCounters))",
-                         "Timer.periodic(const Duration(milliseconds: 16), (Timer t) {\n      FlutterOverlayWindow.shareData(_latency.toShare(java: _javaCounters))")),
+     lambda s: s.replace("Timer.periodic(const Duration(seconds: 2), (Timer t) {",
+                         "Timer.periodic(const Duration(milliseconds: 16), (Timer t) {")),
     ("L11 dispose 不取消定时器", "mahjong_overlay.dart",
      lambda s: s.replace("    _latencyReport?.cancel();", "")),
     ("L14 帧龄统计不再排除状态帧", "mahjong_overlay.dart",

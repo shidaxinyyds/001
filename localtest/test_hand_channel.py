@@ -208,28 +208,85 @@ class TestCacheSource(unittest.TestCase):
         self.assertIsNone(eng._cached_rows_src, "来源记空 = 复用门形同虚设")
 
     def test_orientation_fast_path_caches_from_the_hand_channel(self):
-        """方向快检顺手算的 rows 必须出自手牌通道、并标着手牌通道。
+        """方向快检顺手算的 rows 必须出自手牌通道，且缓存里是**整屏坐标**。
 
         这一段每帧都跑。它要是还按主检测器算，process 要么因来源不匹配重跑
         一遍（同帧付两遍检测的钱），要么网格结果根本没被缓存。
+
+        「整屏坐标」有两种成立方式，两条都得验（缺一条就是真事故）：
+          - 整屏为主（默认形状）：读数本来就是整屏坐标，不许被无端平移；
+          - 条带反超（整屏被切坏时）：条带坐标必须加回 y0。少了这一步，下游的
+            「牌行在画面下半部」判据与亮度校验会整条路径静默失效（真机报障里
+            幻影头像就是从这里放进来的）。
         """
         ih, iw = 720, 1280
         labels = [f"{i}m" for i in range(1, 10)] + [f"{i}p" for i in range(1, 6)]
-        row = [((100 + 45 * k, int(ih * 0.82), 40, 90), lb, 0.9)
-               for k, lb in enumerate(labels)]
-        hand = _HandFake()
-        hand.detect_all_rows = lambda image, *a, **k: [row]
-        eng = Engine()
-        eng._detector = YOLODetector()            # 不建真 YOLO，也不走注入接管
-        eng.platform = MAIN_BANK_STYLE
-        eng._hand_detector = hand
-        eng._hand_bank_key = (MAIN_BANK_STYLE, eng.mode)   # 跳过白名单推送
-        eng._orient = 0
+
+        def row_in(image, n=None):
+            """按**被喂的那张图**的几何出行（真实格网也是这个语义：坐标属于它自己）。"""
+            h = int(image.shape[0])
+            labs = labels if n is None else labels[:n]
+            return [((100 + 45 * k, int(h * 0.82), 40, 90), lb, 0.9)
+                    for k, lb in enumerate(labs)]
+
+        def engine_with(full_n=None, strip_n=None):
+            hand = _HandFake()
+            seen = []
+
+            def detect(image, *a, **k):
+                h = int(image.shape[0])
+                seen.append(h)
+                n = full_n if h == ih else strip_n
+                if n == 0:
+                    return []
+                return [row_in(image, n)]
+
+            hand.detect_all_rows = detect
+            eng = Engine()
+            eng._detector = YOLODetector()            # 不建真 YOLO，也不走注入接管
+            eng.platform = MAIN_BANK_STYLE
+            eng._hand_detector = hand
+            eng._hand_bank_key = (MAIN_BANK_STYLE, eng.mode)   # 跳过白名单推送
+            eng._orient = 0
+            return eng, seen
+
+        img = np.zeros((ih, iw, 3), dtype=np.uint8)
+        eng, seen = engine_with()
+        strip, y0 = eng._hand_strip(img)
+        self.assertGreater(y0, 0, "该平台没配 hand_roi：本用例的坐标系对照无意义")
+        self.assertEqual(int(strip.shape[0]), ih - y0)
         with contextlib.redirect_stdout(io.StringIO()):
-            eng._apply_orientation(np.zeros((ih, iw, 3), dtype=np.uint8))
+            eng._apply_orientation(img)
         self.assertEqual(eng._cached_rows_src, "_HandFake",
                          "方向快检不是用手牌通道算的：缓存来源与实际通道不符")
-        self.assertEqual(eng._cached_rows, [row])
+        self.assertEqual(seen, [ih],
+                         "整屏读数健康（14 格）却还去探了条带：每帧多付一个完整识别")
+        self.assertEqual(len(eng._cached_rows), 1)
+        got = eng._cached_rows[0]
+        self.assertEqual([g[1] for g in got], labels, "标签在缓存中被弄丢了")
+        full_row = row_in(img)
+        self.assertEqual([g[0][0] for g in got], [d[0][0] for d in full_row],
+                         "x 不该被通道改动")
+        self.assertEqual([g[0][1] for g in got], [d[0][1] for d in full_row],
+                         "整屏为主时不许无端平移 y：反超制下只有条带才加 y0")
+        self.assertGreater(got[0][0][1], int(strip.shape[0]),
+                           "牌行 y 落在条带空间里：「牌行在画面下半部」会误判")
+
+        # 条带反超那一支：整屏被切成 4 格（低于地板线）、条带切出 14 格且峰值不低。
+        eng2, seen2 = engine_with(full_n=4, strip_n=len(labels))
+        with contextlib.redirect_stdout(io.StringIO()):
+            eng2._apply_orientation(img)
+        self.assertEqual(seen2, [ih, ih - y0],
+                         "整屏被切成 4 格却没试条带：报障帧的缺张就漏在这一步")
+        got2 = eng2._cached_rows[0]
+        strip_row = row_in(strip)
+        self.assertEqual([g[1] for g in got2], labels, "采信后标签在映射中被弄丢了")
+        self.assertEqual([g[0][0] for g in got2], [d[0][0] for d in strip_row],
+                         "x 不该被通道改动：只许在 y 上加回条带偏移")
+        self.assertEqual([g[0][1] for g in got2], [d[0][1] + y0 for d in strip_row],
+                         "rows 没映射回整屏坐标系（少了 y0=%d）" % y0)
+        self.assertGreater(got2[0][0][1], int(strip.shape[0]),
+                           "牌行 y 还在条带空间里：「牌行在画面下半部」会误判")
 
 
 class TestPanelFollowsHandChannel(unittest.TestCase):
