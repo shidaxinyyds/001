@@ -11,6 +11,7 @@ import 'package:auto_vision/channel.dart';
 import 'package:auto_vision/license/license_service.dart';
 import 'package:auto_vision/license/license_status.dart';
 import 'package:auto_vision/overlays/tile_labels.dart';
+import 'package:auto_vision/latency_probe.dart';
 import 'package:auto_vision/server.dart';
 
 // 解析原生层发来的分析结果：前 10('\n') 之前为 JSON，之后为 PNG 预览图字节。
@@ -558,10 +559,37 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   bool _projectionStopped = false;
   Timer? _signalWatchdog;
 
+  // ── 端到端帧龄探针（采集→本侧收到）。只用于诊断，不参与任何牌面展示。
+  final LatencyProbe _latency = LatencyProbe();
+  Timer? _latencyReport;
+
+  // ── Java 采集层在心跳帧里自报的计数（本帧解析+注入开销、降级帧数、发送失败数）。
+  // 只存最近一次。这些数必须跟着上报：本轮为了语义判据改成每帧解析一次 JSON，
+  // 它的真实代价如果不落到界面上，「让开销自己读数」就只是一句注释。
+  Map<String, int> _javaCounters = const <String, int>{};
+
+  /// 心跳帧里自报的计数字段（与 ImageProcessor.withHeartbeatCounters 一一对应）。
+  static const List<String> _kJavaCounterKeys = <String>[
+    'frames', 'proc', 'send_fail', 'parse_fail', 'non_finite', 'stamp_avg_ms',
+  ];
+
+  void _captureJavaCounters(Map<String, dynamic> json) {
+    if (json['java_status'] != true) return;
+    // 只有心跳帧带计数（sendStatus(java_error…) 那一类不带）；缺关键字就整组不更新，
+    // 绝不用 0 去盖掉上一次的真读数。
+    if (json['stamp_avg_ms'] == null) return;
+    final Map<String, int> out = <String, int>{};
+    for (final String k in _kJavaCounterKeys) {
+      final int? v = (json[k] as num?)?.toInt();
+      if (v != null) out[k] = v;
+    }
+    if (out.isNotEmpty) _javaCounters = out;
+  }
+
   // ── 版本徽章：读真实构建版本，取代硬编码 "PRO v1.4.5"（版本漂移误导用户）。
   String _appVersion = '';
 
-  // ── 清空型帧去抖：waiting/no_tiles/错误态等"清空帧"需连续 ≥2 帧或持续 ~400ms
+  // ── 清空型帧去抖：waiting/no_tiles/错误态等"清空帧"需**持续 ≥450ms**
   //    才采纳，ok 帧立即上屏；杜绝引擎瞬态坏帧造成文案闪烁。
   static const Set<String> _kClearStatuses = {
     'waiting', 'no_tiles', 'py_error', 'decode_error', 'animation',
@@ -572,7 +600,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     'engine_ready', 'start_failed', 'java_error', 'projection_stopped',
     'pipeline_stalled', 'stopped',
   };
-  int _pendingClearRun = 0;
   DateTime? _firstPendingClearAt;
   Map<String, dynamic>? _pendingClearJson;
 
@@ -605,6 +632,14 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     _signalWatchdog =
         Timer.periodic(const Duration(milliseconds: 500), _checkSignalLost);
 
+    // 帧龄读数按 2s 上报给主 App 的调试页（与 Java 心跳同频）。刻意不逐帧上报：
+    // shareData 是跨引擎发消息，逐帧发会让主页每帧重建 —— 那正是「识别高峰期
+    // 点什么都没反应」的病根（见 home_page 里 _RecognitionStatusView 的局部订阅注释）。
+    _latencyReport = Timer.periodic(const Duration(seconds: 2), (Timer t) {
+      FlutterOverlayWindow.shareData(_latency.toShare(java: _javaCounters))
+          .catchError((_) {});
+    });
+
     // 版本徽章：从原生 BuildConfig 读真实版本号（失败静默，徽章不渲染）。
     _loadAppVersion();
 
@@ -634,6 +669,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     _licenseExpiryTimer?.cancel();
     _licenseRetryTimer?.cancel();
     _signalWatchdog?.cancel();
+    _latencyReport?.cancel();
     // 必须关闭 socket 监听：旧实现泄漏 Server，旧 State 继续抢接 Java 短连接丢帧。
     _server?.close();
     _server = null;
@@ -780,6 +816,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     // 空 hand/advice 覆盖当前画面数据（旧行为会让心跳把建议清空闪现）。
     if (status is String && _kPipelineStatuses.contains(status)) {
       _lastPipelineAt = DateTime.now();
+      _captureJavaCounters(json);
       if (_signalLost && mounted) setState(() => _signalLost = false);
       if (status == 'projection_stopped' || status == 'stopped' || status == 'start_failed') {
         if (!_projectionStopped && mounted) {
@@ -790,10 +827,23 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       }
       return;
     }
+    // 端到端帧龄（采集→本侧收到）：只有这里能同时拿到两端时钟。统计与上屏解耦
+    // ——即便本帧因去抖被暂存，它的帧龄仍是真实链路样本，不该因为没上屏就丢掉。
+    // 同时带上 Java 分段耗时，否则「慢在哪一段」只能靠猜。
+    //
+    // java_status 帧（采集层心跳/报错）不参与样本，也不计入 dropped：它们根本不带
+    // 采集时刻，混进来只会把「缺时间戳」的计数刷满，让真正的降级帧看不出来。
+    // 判据用产出方随身携带的显式字段，而不在此枚举 status 字符串（枚举会漏）。
+    if (json['java_status'] != true) {
+      _latency.add(
+          (json['captured_at_ms'] as num?)?.toInt(),
+          DateTime.now().millisecondsSinceEpoch,
+          encodeMs: (json['encode_ms'] as num?)?.toInt(),
+          engineMs: (json['engine_ms'] as num?)?.toInt());
+    }
     final isClear = status is String && _kClearStatuses.contains(status);
     if (!isClear) {
       // ok/partial/dingque/swap/pick 等有数据帧：前沿立即应用，并打断待确认的清空帧
-      _pendingClearRun = 0;
       _firstPendingClearAt = null;
       _pendingClearJson = null;
       _lastFrameAt = DateTime.now();
@@ -813,10 +863,12 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       }
       return;
     }
-    // 清空帧去抖：
-    // 若当前屏幕正在显示有效手牌与出牌建议，瞬态单帧或短动画（如摸打动画、手指划过）
-    // 绝不能瞬间抹平手牌与建议跳回"等待中"；必须持续 ≥4 帧且持续 ≥450ms 确凿无手牌才清空。
-    _pendingClearRun++;
+    // 清空帧去抖：**纯时间门**（自第一个清空帧起持续 ≥450ms）。
+    // 旧写法是「≥ 4 帧 且 ≥450ms」的帧数×时间双门 —— 帧数门把"多久"隐含成
+    // "多少个 15ms 采集周期"，而单帧实测已到 400ms+（引擎侧 p50 415ms），
+    // 4 帧就是 ≈1.66s：画面早离开牌桌了，面板还死播上一局的手牌与建议。
+    // 只有时间门是与帧率无关的物理量：瞬态遮挡（<450ms）依旧被挡住，
+    // 真离开牌桌则在 450ms（或 _scheduleClearCommit 的 460ms 兜底）内清空。
     _firstPendingClearAt ??= DateTime.now();
     final showingGood = result != null &&
         !_kClearStatuses.contains(result?['status'] as String? ?? '') &&
@@ -825,8 +877,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final sustained = DateTime.now()
             .difference(_firstPendingClearAt!)
             .inMilliseconds >= 450;
-    if (!showingGood || (_pendingClearRun >= 4 && sustained)) {
-      _pendingClearRun = 0;
+    if (!showingGood || sustained) {
       _firstPendingClearAt = null;
       _pendingClearJson = null;
       _lastFrameAt = DateTime.now();
@@ -850,7 +901,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       _lastFrameAt = DateTime.now();
       _pendingJson = _pendingClearJson;
       _pendingClearJson = null;
-      _pendingClearRun = 0;
       _firstPendingClearAt = null;
       _applyPendingResult();
     });

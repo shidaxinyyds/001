@@ -33,34 +33,57 @@ public class SecurityGuard {
     private static volatile boolean sCompromised = false;
     private static volatile String sCompromiseReason = "";
 
-    // 节流采样计数器：避免高频采帧每帧做开销较大的文件扫描
-    private static long sLastDeepScanTime = 0;
+    // 节流采样计数器：避免高频采帧每帧做开销较大的文件扫描。
+    // volatile：心跳线程写（runScheduledDeepScan）、主线程也可能写（启动闸门），
+    // 非 volatile 时两边会各自看自己的副本，节流形同虚设（多线程重复深扫）。
+    private static volatile long sLastDeepScanTime = 0;
     private static final long DEEP_SCAN_INTERVAL_MS = 8000; // 8秒深扫一次
+
+    // 设备指纹与卡密核验的过路缓存（仅为了把 binder IPC + SHA-256 + 正则从
+    // 每帧热路径上拿掉，见 verifyLicenseThrottled）。
+    private static volatile String sDeviceIdCache = null;
+    private static volatile long sLicenseOkAt = 0;
+    private static final long LICENSE_OK_TTL_MS = 2000; // 好结果缓存 2s；坏结果不缓存
 
     /**
      * 快速检查：轻量级主路径调用（开销小于 0.05ms）
+     *
+     * 必须在采集线程上便宜：旧写法在这里顺带做「周期性深层检测」，于是每 8 秒
+     * 有一帧要在采集线程里逐行读 /proc/self/maps + 对 27042/27043 各做一次
+     * socket.connect（15ms 超时）—— 最坏直接卡住流水线几十到几百毫秒，
+     * 表现为周期性钝卡。现在深扫由心跳线程调 runScheduledDeepScan()，
+     * 本方法只读内存标志位 + Debug.isDebuggerConnected()。
+     * 代价：靠深扫发现的注入，熔断最多迟一个心跳周期（2s）+1 帧生效。
      */
     public static boolean isSafe(Context context) {
         if (sCompromised) {
             return false;
         }
 
-        // 1. 快速调试器检测
+        // 快速调试器检测（内存读，无 IO）
         if (Debug.isDebuggerConnected() || Debug.waitingForDebugger()) {
             punishAndMitigate(context, "Debug.isDebuggerConnected detected");
             return false;
         }
 
-        // 2. 周期性深层检测
-        long now = System.currentTimeMillis();
-        if (now - sLastDeepScanTime > DEEP_SCAN_INTERVAL_MS) {
-            sLastDeepScanTime = now;
-            if (!performDeepScan(context)) {
-                return false;
-            }
-        }
-
         return true;
+    }
+
+    /**
+     * 按节流推进一次深层安全扫描（给独立心跳线程用）。
+     * 到间隔才扫；扫描失败已在 performDeepScan 内部触发 punishAndMitigate，
+     * 下一帧的 isSafe() 就会拒识别。
+     */
+    public static void runScheduledDeepScan(Context context) {
+        if (sCompromised) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (now - sLastDeepScanTime <= DEEP_SCAN_INTERVAL_MS) {
+            return;
+        }
+        sLastDeepScanTime = now;
+        performDeepScan(context);
     }
 
     /**
@@ -141,6 +164,36 @@ public class SecurityGuard {
             TimedLog.e(TAG, "verifyLicense exception: " + t.getMessage());
             return false;
         }
+    }
+
+    /**
+     * 卡密核验的节流版：只给采帧热路径用。
+     *
+     * 旧行为是每帧跑一次 `verifyLicense`：一次 SharedPreferences 读 + 一次
+     * Settings.Secure 的 binder IPC + 一次 SHA-256 + 一次 `split("\\|")` 正则，
+     * 全在采集线程上。现改成：① deviceId 本身按进程内不变，缓存；
+     * ② 「通过」结果缓存 2s（TTL）；「不通过」绝不缓存 —— 下一次调用仍真核验，
+     * 保证过期/被拉黑能立即反映。
+     * 代价：授权自然到期的硬拒最多迟 2s（而本方法对到期已有 300s 宽限）。
+     * 启动闸门（MainActivity.startProcessing / verifyLicenseNative）必须继续用
+     * 强校验的 `verifyLicense`，不接受缓存。
+     */
+    public static boolean verifyLicenseThrottled(Context context) {
+        if (sCompromised) {
+            return false;
+        }
+        long now = System.currentTimeMillis();
+        if (sLicenseOkAt != 0 && now - sLicenseOkAt < LICENSE_OK_TTL_MS) {
+            return true;
+        }
+        boolean ok = verifyLicense(context);
+        // 只缓存好结果；sCompromised 在真核验中被置位时也不缓存（下一调即回 false）。
+        if (ok && !sCompromised) {
+            sLicenseOkAt = now;
+        } else {
+            sLicenseOkAt = 0;
+        }
+        return ok;
     }
 
     /**
@@ -260,8 +313,26 @@ public class SecurityGuard {
 
     /**
      * 设备硬件指纹生成（与 MainActivity 保持严格一致）
+     *
+     * 进程内缓存：ANDROID_ID 与 Build.* 在进程生命周期内不会变，而它原本
+     * 每帧被 `verifyLicense` 重算一次（binder IPC + SHA-256）。缓存不影响判定：
+     * 比对的是「token 里写的设备」与「本机设备」，两者都取自同一份缓存。
+     * 拉黑（sec_tamper_locked）不写回这里，仍由 verifyLicense 每调现读，
+     * 保证用户手动清除拉黑态后能立即生效。
      */
     public static String computeDeviceId(Context context) {
+        String cached = sDeviceIdCache;
+        if (cached != null && !cached.isEmpty()) {
+            return cached;
+        }
+        String id = computeDeviceIdUncached(context);
+        if (id != null && !id.isEmpty()) {
+            sDeviceIdCache = id;
+        }
+        return id;
+    }
+
+    private static String computeDeviceIdUncached(Context context) {
         try {
             String androidId = Settings.Secure.getString(
                     context.getContentResolver(), Settings.Secure.ANDROID_ID);

@@ -162,7 +162,11 @@ public class NetworkClient {
      */
     public static String statusJson(String status, String message) {
         StringBuilder sb = new StringBuilder();
-        sb.append("{\"hand\":\"\",\"count\":0,\"status\":\"").append(status)
+        // java_status:true 是显式的「本帧来自 Java 采集层，不是识别结果」标记。
+        // 悬浮窗据此把状态帧排除在端到端帧龄样本之外 —— 它没有 captured_at_ms，
+        // 混进去只会污染分位数。为什么不靠枚举 status 字符串：枚举必然漏（`security_alert`
+        // 就漏过一次），而标记由产出方随身携带，新增状态帧自动生效。
+        sb.append("{\"java_status\":true,\"hand\":\"\",\"count\":0,\"status\":\"").append(status)
           .append("\",\"shanten\":null,\"advice\":[],\"commentary\":null,\"tiles\":[],")
           .append("\"top_score\":0.0,\"screen\":[0,0],\"elapsed\":0.0");
         if (message != null && !message.isEmpty()) {

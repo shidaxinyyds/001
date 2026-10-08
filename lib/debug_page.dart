@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'package:auto_vision/config_store.dart';
 import 'package:auto_vision/theme/app_tokens.dart';
 
@@ -27,6 +30,12 @@ class _DebugPageState extends State<DebugPage> {
   bool _applying = false;
 
   int _fortuneIndex = 0;
+
+  // ── 实时链路读数（悬浮窗按 2s 上报的端到端帧龄）。
+  // 只存最近一次上报，不自己算分位数 —— 分位数只能在收到帧的那一侧算（见
+  // LatencyProbe 的口径说明），本页重复计算就是两处同一个数字开始漂。
+  Map<String, dynamic>? _latency;
+  StreamSubscription<dynamic>? _latencySub;
 
   /// 实战运势与攻防心法（去伪存真：杜绝无计算依据的伪百分比指标，专注实战牌势与心理心流调节）。
   /// 参悟心法：结合牌势推演与心理建设，助牌手保持最高期望决策。
@@ -98,6 +107,22 @@ class _DebugPageState extends State<DebugPage> {
   void initState() {
     super.initState();
     _loadAndApply();
+    // overlayListener 是广播流，主页已有几路局部订阅，再开一路不冲突。
+    // 只接 latency 帧：其余类型（status/roi/reset_match）由主页负责，这里插手
+    // 会变成两个页面各自维护一份识别状态。
+    _latencySub = FlutterOverlayWindow.overlayListener.listen((event) {
+      if (!mounted) return;
+      if (event is Map && event['type'] == 'latency') {
+        setState(() => _latency = Map<String, dynamic>.from(event));
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _latencySub?.cancel();
+    _latencySub = null;
+    super.dispose();
   }
 
   Future<void> _loadAndApply() async {
@@ -240,6 +265,11 @@ class _DebugPageState extends State<DebugPage> {
           children: [
             _buildFortuneCard(),
             _groupCard(
+              title: '实时链路',
+              children: [_latencyReadout()],
+            ),
+            const SizedBox(height: 16),
+            _groupCard(
               title: '识别策略',
               children: [
                 _switchRow(
@@ -293,9 +323,9 @@ class _DebugPageState extends State<DebugPage> {
               children: [
                 _switchRow(
                   title: '防封号',
-                  desc: '开启后截屏节奏在 350–550ms 间随机抖动，并让建议稍作'
-                      '人类式延迟显示，避免固定节奏被识别为机械/外挂。'
-                      '只改变采集与展示节奏，不影响识别准确率',
+                  desc: '开启后采帧间隔从 15ms 改为在 80–120ms 间随机抖动'
+                      '（静止巡检档 80–100ms），避免固定节奏被识别为机械/外挂。'
+                      '只改变采帧节奏，不影响识别准确率与建议内容',
                   value: _cfg.antiBan,
                   onChanged: (v) => _update(_cfg.copyWith(antiBan: v)),
                 ),
@@ -336,6 +366,116 @@ class _DebugPageState extends State<DebugPage> {
       ),
     );
   }
+
+  /// 实时链路读数。这张卡的唯一职责是把「端到端到底多少毫秒」变成可核对的数字。
+  /// 无数据/已过时都如实说明，绝不印一个 0ms 冒充「很快」。
+  Widget _latencyReadout() {
+    final Map<String, dynamic>? ev = _latency;
+    final int n = (ev?['n'] as num?)?.toInt() ?? 0;
+    final int dropped = (ev?['dropped'] as num?)?.toInt() ?? 0;
+    final int? p50 = (ev?['p50_ms'] as num?)?.toInt();
+    final int? p95 = (ev?['p95_ms'] as num?)?.toInt();
+    final int? maxMs = (ev?['max_ms'] as num?)?.toInt();
+    final int? enc = (ev?['encode_p50_ms'] as num?)?.toInt();
+    final int? eng = (ev?['engine_p50_ms'] as num?)?.toInt();
+    final int sampledAt = (ev?['sampled_at'] as num?)?.toInt() ?? 0;
+    final bool stale = sampledAt > 0 &&
+        DateTime.now().millisecondsSinceEpoch - sampledAt > 6000;
+
+    String ms(int? v) => v == null ? '—' : '$v';
+
+    // 采集层心跳自报的计数（由悬浮窗随帧龄一起转发）。这一行的职责是让上面那组
+    // 帧龄「可对账」：dropped 说的「有多少结果帧没带时间戳」应当能被 parse_fail +
+    // non_finite + 发送失败解释；对不上就说明链路里还有第三种没被识别的丢帧原因。
+    final Map<String, dynamic> java =
+        (ev?['java'] as Map?)?.cast<String, dynamic>() ??
+            const <String, dynamic>{};
+    int ji(String k) => (java[k] as num?)?.toInt() ?? 0;
+
+    final List<String> notes = <String>[];
+    if (n == 0) {
+      notes.add('暂无读数：开始识别后这里跟着每一帧变化');
+    } else {
+      notes.add('近 $n 帧样本');
+      if (enc != null || eng != null) {
+        notes.add('其中整屏编码约 ${ms(enc)}ms、识别往返约 ${ms(eng)}ms（同为典型值）');
+      }
+      if (dropped > 0) {
+        notes.add('$dropped 帧因缺采集时间戳或墙钟回拨被丢弃，未计入');
+      }
+    }
+    if (stale) {
+      notes.add('读数已停止更新（识别可能已停止或悬浮窗已关闭）');
+    }
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              _latencyStat('典型', ms(p50), 'ms', true),
+              _latencyStat('偶发', ms(p95), 'ms', false),
+              _latencyStat('最差', ms(maxMs), 'ms', false),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(notes.join('；'),
+              style: const TextStyle(
+                  fontSize: 11, color: _textSub, height: 1.4)),
+          if (java.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+                '采集侧：本帧解析+注入均值 ${ji('stamp_avg_ms')}ms，'
+                '未带时间戳的帧 ${ji('parse_fail') + ji('non_finite')}（解析失败 ${ji('parse_fail')}、'
+                '数值非法 ${ji('non_finite')}），累计采集 ${ji('frames')} 帧、已处理 ${ji('proc')} 帧、'
+                '发送失败 ${ji('send_fail')} 次',
+                style: const TextStyle(
+                    fontSize: 11, color: _textSub, height: 1.4)),
+          ],
+          const SizedBox(height: 4),
+          const Text(
+              '口径：从系统截屏到悬浮窗收到结果，不含 Flutter 上屏那一段'
+              '（有数据帧前沿 0ms 上屏，尾部合并窗口≤36ms）。',
+              style: TextStyle(
+                  fontSize: 10.5, color: _textSub, height: 1.4)),
+        ],
+      ),
+    );
+  }
+
+  Widget _latencyStat(
+          String label, String value, String unit, bool emphasize) =>
+      Expanded(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(label,
+                style: const TextStyle(fontSize: 11, color: _textSub)),
+            const SizedBox(height: 2),
+            RichText(
+              text: TextSpan(
+                children: <TextSpan>[
+                  TextSpan(
+                      text: value,
+                      style: TextStyle(
+                          fontSize: emphasize ? 22 : 16,
+                          fontWeight: FontWeight.w700,
+                          color: emphasize ? _kAccent : _textMain)),
+                  TextSpan(
+                      text: ' $unit',
+                      style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500,
+                          color: _textSub)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
 
   Widget _groupCard(
           {required String title, required List<Widget> children}) =>

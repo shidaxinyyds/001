@@ -81,7 +81,12 @@ public class MainActivity extends FlutterActivity {
 
       Runnable toRun = null;
       if (call.method.equals("startProcessing")) {
-        // 多层纵深防御：环境安全扫描 + 卡密有效性双重核验
+        // 多层纵深防御：环境安全扫描 + 卡密有效性双重核验。
+        // 这里必须显式做一次完整深扫：旧行为里它由 isSafe() 顺带触发（同样在主
+        // 线程，成本一致），而现在周期性深扫已移到心跳线程（不能堵采集线程），
+        // 不在启动闸门补回来，「开识别」这一环的门会比改前更弱。
+        // 扫到异常会置 sCompromised，紧接着的 isSafe() 就拦下启动。
+        SecurityGuard.performDeepScan(getApplicationContext());
         if (!SecurityGuard.isSafe(getApplicationContext())) {
           TimedLog.e(TAG, "startProcessing blocked by SecurityGuard: " + SecurityGuard.getCompromiseReason());
           result.error("SECURITY_VIOLATION", "检测到非法调试、Hook或运行环境异常，已拒绝启动", null);

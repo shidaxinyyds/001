@@ -457,7 +457,20 @@ class YOLODetector(Detector):
         return out
 
     def detect_all_rows(self, image: CVImage, classify: bool = True, allow_rotation: bool = False, allow_retry: bool = False, **kwargs) -> List[List[Tuple[Rect, Optional[str], float]]]:
-        """扫描全图，检出手牌行与牌河各行。"""
+        """扫描全图，检出手牌行与牌河各行。
+
+        `classify=False` 表示「只要几何，不要牌面」：跳过模板精修与补槽判读。
+        这个参数过去只是签名里有、函数体从不读 —— 于是两个明确声明「不需要标签」
+        的调用方（`Engine._verify_hand_evidence` 拿张数判牌桌、
+        `Engine._probe_orientation` 阶段 A 的几何筛选）每帧都照付全套模板匹配：
+        jj 平台实测 997.8ms/帧，占该帧总耗时 56.6%（`build/live_diag_before.txt`）。
+        `recognition/structural.py` 的同名参数一直是真跳过的（173ms → 17ms），
+        本次把 YOLO 通道对齐到同一语义。
+
+        跳过的是「在 YOLO 框之上做的模板精修」，YOLO 自带的类别标签与几何过滤
+        （牌高筛选 / 无标签框剔除 / 牌河分行）一律保留，所以返回的行列结构与
+        精修路径同源，只有补槽（仅在步进异常时新增槽位）不再发生。
+        """
         if image is None or image.size == 0 or not self.is_available:
             return []
 
@@ -509,7 +522,7 @@ class YOLODetector(Detector):
         if len(labelled) >= 2:
             hand_tiles = labelled
 
-        if hand_tiles:
+        if hand_tiles and classify:
             k = len(hand_tiles)
             has_drawn = False
             # 摸牌判定

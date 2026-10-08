@@ -43,6 +43,8 @@ PY = [sys.executable, "-X", "utf8"]
 MUTABLE = {
     "test_mode_gate_guard.py",
     "test_skip_frame_guard.py",
+    "test_non_table_honesty_guard.py",
+    "test_hot_path_contracts_guard.py",
     "test_det_ledger.py",
     "test_bank_hygiene.py",
     "test_structural_decide.py",
@@ -50,6 +52,10 @@ MUTABLE = {
     "test_bank_selection.py",
     "test_skip_probe_guard.py",
     "test_parallel_classify_guard.py",
+    # YOLO 通道 honor classify=False（否则牌桌实证每帧白付 ~1s）。
+    "test_classify_contract_guard.py",
+    # 端到端延迟可测 + 语义判据（P1-e/B4/B5）：这类改动失效时不会有任何精度测试变红。
+    "test_latency_contract_guard.py",
 }
 
 # 每条判绿的标记：unittest 系用 Ran/OK；脚本系用它自己打印的成功行。

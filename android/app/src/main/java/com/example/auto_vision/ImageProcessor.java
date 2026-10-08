@@ -39,22 +39,27 @@ public class ImageProcessor {
     // 推给 Python 引擎（set_roi），引擎只识别 [top,bottom] 带内。
     // 默认整屏（0..1）不退化。用静态字段，因为引擎实例在 startStream 里重建，
     // 但 ROI 是用户偏好，应跨重建保留。
-    private static float roiTop = 0f;
-    private static float roiBottom = 1f;
-    private static boolean roiDirty = true;
+    // volatile（同下方 cfgDumpFrames 那条注释讲的同一类缺陷）：setRoi 在主线程（平台通道）
+    // 写、采集线程读。非 volatile 时采集线程可以长期读到旧的 roiDirty=false，用户拖完
+    // ROI 引擎永远收不到 set_roi；也可能读到 roiDirty=true 却配着旧的边界值（撕裂对）。
+    // 值字段一并 volatile：写序为 top→bottom→dirty，采集侧见 dirty=true 即建立
+    // happens-before，两个值一起可见。
+    private static volatile float roiTop = 0f;
+    private static volatile float roiBottom = 1f;
+    private static volatile boolean roiDirty = true;
 
     // ===== 手动方向覆盖（悬浮窗「旋转」按钮）=====
     // 经 MainActivity 的 setOrient 通道写入；下一帧处理前推给 Python 引擎
     // （set_orient），引擎按指定角度旋转后再识别。默认 -1 = 未设置（走自动探测）。
-    private static int orientOverride = -1;
-    private static boolean orientDirty = false;
+    private static volatile int orientOverride = -1;
+    private static volatile boolean orientDirty = false;
 
     // ===== 防封号 / 防平台检测（调试页开关，经 setConfig 写入，采集循环读取）=====
     // anti_ban：截屏节奏随机抖动（350–550ms）+ 建议延迟显示，避免固定节奏的 bot 特征。
     // anti_detect：仅在目标麻将 App 前台时采帧，切回本 App/桌面自动暂停。
     // 两者默认关闭，打开才改变采集行为；缺权限/缺 Context 时自动降级为常开。
-    private static boolean cfgAntiBan = false;
-    private static boolean cfgAntiDetect = false;
+    private static volatile boolean cfgAntiBan = false;
+    private static volatile boolean cfgAntiDetect = false;
     // 采集存帧（风格库自举）：开启后把引擎看到的原始帧（encoded JPEG）落盘到
     // app 外部 files/frames/，供后续 harvest→cluster→标注重建模板库。默认关闭。
     // 清空旧帧走显式 clear_frames 信号（仅用户手动拨开开关时由调试页发送），
@@ -78,7 +83,18 @@ public class ImageProcessor {
     // 「已达上限」只提示一次的标志（与 framesDumped 一样跨线程，volatile 保证可见）。
     private static volatile boolean sLimitLogged = false;
     // 前台检测需要 Context，在 prepare() 里缓存（用 ApplicationContext，避免持有 Activity）。
-    private static Context sContext = null;
+    private static volatile Context sContext = null;
+    // 「解析结果 + 注入时间戳」开销的累计值（本次改动新增的那一笔代价自己读数）。
+    // 采集线程写、心跳线程读；volatile long 同时解决可见性与 32 位 ARM 上的撕裂写。
+    // 语义是「本轮识别（start() 以来）的均值」，因此 start() 里会清零。
+    private static volatile long sStampMsSum = 0;
+    private static volatile long sStampFrames = 0;
+    // 结果 JSON 解析失败的累计次数。解析失败意味着本帧没有时间戳也不走 native，
+    // 必须可观测；但绝不能每帧刷一条日志（旧写法会形成 logcat 风暴，反过来拖慢热路径）。
+    private static volatile long sParseFailures = 0;
+    // 结果含 NaN/Infinity 而退回原始出帧的累计次数（与 parse_fail 分开计：两者降级方向
+    // 一致但成因不同，混在一个数里就没法判断该修 Python 的序列化还是修结果字段）。
+    private static volatile long sNonFiniteFrames = 0;
     private static final Random sRng = new Random();
 
     public static void setRoi(float top, float bottom) {
@@ -99,8 +115,8 @@ public class ImageProcessor {
         orientDirty = true;
     }
 
-    private static int dingqueOverride = -1;
-    private static boolean dingqueDirty = false;
+    private static volatile int dingqueOverride = -1;
+    private static volatile boolean dingqueDirty = false;
 
     public static void setDingque(int suit) {
         if (suit >= 0 && suit <= 2) {
@@ -127,10 +143,10 @@ public class ImageProcessor {
 
     // 调试页开关：经 MainActivity 的 setConfig 通道写入，下一帧处理前推给 Python 引擎。
     // 用独立布尔而非 Map，避免额外的 import 与 Chaquopy 类型转换摩擦。
-    private static boolean cfgAutoOrient = true;
-    private static boolean cfgBootstrap = true;
-    private static boolean cfgStrict = true;
-    private static boolean configDirty = false;
+    private static volatile boolean cfgAutoOrient = true;
+    private static volatile boolean cfgBootstrap = true;
+    private static volatile boolean cfgStrict = true;
+    private static volatile boolean configDirty = false;
 
     public static void setConfig(String key, boolean value) {
         if (key == null) return;
@@ -178,9 +194,15 @@ public class ImageProcessor {
     // 此前所有故障（收不到画面/Python异常/发送失败）都只进 logcat，
     // 用户在界面上看到的就是"没有任何反应"。现在每 2 秒发一次心跳
     // 状态帧到悬浮窗，任何一环断掉都能在界面上直接看到断在哪里。
-    private long framesAcquired = 0;
-    private long framesProcessed = 0;
-    private long sendFailures = 0;
+    // volatile：三个计数都由采集线程自增、由 heartbeat 线程读取汇报。
+    // ① 可见性：非 volatile 时心跳可以长期读到旧值，健康度面板上的 frames/proc/send_fail
+    //    与实际脱节（排查卡帧时这是假线索）；
+    // ② 原子性：32 位 ARM 上 long 写非原子，会读到高低位撕裂的值 —— 与本文件
+    //    framesDumped（static volatile long）当初立规矩的同一理由。
+    // 自增仍只在采集线程发生，所以不存在丢更新，不需要 AtomicInteger。
+    private volatile long framesAcquired = 0;
+    private volatile long framesProcessed = 0;
+    private volatile long sendFailures = 0;
     private long lastHeartbeatAt = 0;
 
     public ImageProcessor(Supplier<Image> callback) {
@@ -286,11 +308,23 @@ public class ImageProcessor {
     public void start() {
         timer = new Timer();
         lastCaptureTickAt = System.currentTimeMillis();
+        // 开销均值按「本轮识别」统计：不清零就会把上一轮的噪声算进新一轮的读数里。
+        sStampMsSum = 0;
+        sStampFrames = 0;
+        sParseFailures = 0;
+        sNonFiniteFrames = 0;
         // 真固定 2s 心跳：无论采集循环是否在跑，每 2s 必发一帧状态；
         // 采集线程自己卡死（超 6s 没路过）时改报 pipeline_stalled。
         heartbeatTimer = new Timer("heartbeat", true);
         heartbeatTimer.schedule(new TimerTask() {
             public void run() {
+                // 深层安全巡检放在本线程（独立于采集循环），而不是像旧写法那样
+                // 嵌在 SecurityGuard.isSafe() 里由采集线程顺带跑：那意味着每 8 秒
+                // 必有一帧要在采集线程里逐行读 /proc/self/maps + 两次
+                // socket.connect(15ms)，把实时性周期性让给安全扫描。
+                // 扫到攻击会置 sCompromised，下一帧 isSafe()/verifyLicenseThrottled()
+                // 立即拒识别（熔断最多迟一个心跳周期 2s + 1 帧生效）。
+                SecurityGuard.runScheduledDeepScan(sContext);
                 long silent = System.currentTimeMillis() - lastCaptureTickAt;
                 if (silent >= 6000) {
                     sendHeartbeatJson("pipeline_stalled",
@@ -335,8 +369,9 @@ public class ImageProcessor {
 
     // 下一帧采集间隔：
     // 静止态（连续跳帧 >= 3）：80~100ms 巡检，快速唤醒；
-    // 活跃态（有摸牌/出牌动作）：25ms 毫秒级极速跟帧，保证摸打建议瞬时呈现；
-    // 防封号开启：在此基础上叠加轻微拟人抖动。
+    // 活跃态：15ms 极速跟帧（旧注释写的 25ms 与代码不符；另有一处 UI 文案
+    // 写「350–550ms 随机抖动」也与防封号分支的 80–120ms 不符，两边均已按实际修）。
+    // 防封号开启：在此基础上叠加拟人抖动。
     private long captureDelayMs() {
         boolean isIdle = (consecutiveSkips >= 3);
         if (isIdle) {
@@ -571,13 +606,23 @@ public class ImageProcessor {
     }
 
     public void processCapturedImage(Image image) {
-        // 运行时多层纵深安全巡检：一旦检测到非法 Hook/调试注入或凭证失效，主动熔断流水线
-        if (!SecurityGuard.isSafe(sContext) || !SecurityGuard.verifyLicense(sContext)) {
+        // 端到端延迟测量的**原点**。System.currentTimeMillis() 与悬浮窗侧
+        // DateTime.now().millisecondsSinceEpoch 都是设备 epoch 墙钟（同一时钟源，
+        // 与时区无关），所以两个进程的数字可以直接相减得到帧龄，不需要任何
+        // 跨进程时钟同步协议。帧龄只有在采集侧打点才可能算出来 —— Python 的
+        // _proc_ms 只覆盖引擎一段，且只进 logcat，界面上永远读不到端到端。
+        final long capturedAt = System.currentTimeMillis();
+        // 运行时多层纵深安全巡检：一旦检测到非法 Hook/调试注入或凭证失效，主动熔断流水线。
+        // 卡密核验走节流版：旧写法每帧做一次 binder IPC + SHA-256 + 正则（见 SecurityGuard
+        // .verifyLicenseThrottled）；好结果缓存 2s，坏结果不缓存，所以过期/拉黑仍立即生效。
+        if (!SecurityGuard.isSafe(sContext) || !SecurityGuard.verifyLicenseThrottled(sContext)) {
             sendStatus(NetworkClient.statusJson("security_alert", "安全防护已触发：未授权运行或检测到非法调试/篡改环境"));
             return;
         }
 
+        final long tEncode0 = System.currentTimeMillis();
         byte[] encoded = ImageEncoder.encodeImageToByteArray(image);
+        final long encodeMs = System.currentTimeMillis() - tEncode0;
         if (encoded == null || encoded.length == 0) {
             sendStatus(NetworkClient.statusJson("java_error", "帧编码失败（Bitmap为空）"));
             return;
@@ -663,6 +708,7 @@ public class ImageProcessor {
         }
 
         PyObject engineResult;
+        final long tEngine0 = System.currentTimeMillis();
         try {
             engineResult = engine.callAttr("process_bytes", encoded);
         } catch (Throwable t) {
@@ -670,6 +716,7 @@ public class ImageProcessor {
             sendStatus(NetworkClient.statusJson("java_error", "识别调用失败: " + t));
             return;
         }
+        final long engineMs = System.currentTimeMillis() - tEngine0;
         if (engineResult == null) {
             // Python 端现在保证连异常都返回错误结果（见 engine.py），
             // 走到这里说明链路有未预期的断点，上报而不是静默丢帧。
@@ -677,114 +724,80 @@ public class ImageProcessor {
             return;
         }
 
-        byte[] bytes;
-        // native 是否接管由 Python 侧按玩法能力下发（modes.native_solver_ready）。
-        // 旧写法是 mode.startsWith("sc")，而这里的 mode 取自 pendingMode —— 它在
-        // 本帧开头推给 engine 后就立刻被置 null，所以恒为兜底值 "sc"：等于对**全部
-        // 玩法**（含带红中/白板鬼牌的血流红中、贵阳捉鸡、杭州百搭）都用川麻口径
-        // 覆写 Python 的 shanten/advice/hand，且 parseMpszToTiles 会把手牌里所有
-        // 字牌静默丢弃。用子串判据与下面 frame_skipped 的巡检同一套写法，避免为
-        // 取一个布尔位把整帧 JSON 再解析一遍。
+        // 结果串**只解析一次**：一次拿到 native_ready / frame_skipped 两个布尔，
+        // 并就地注入端到端时间戳（见 capturedAt 那条注释）。
+        // 为什么不再用子串判据（旧写法）：
+        //     pyJsonStr.contains("\"native_ready\": true")
+        //     pyJsonStr.contains("\"frame_skipped\": true")
+        // 那是把「序列化格式」当成语义契约，有两种真实失效方式：
+        //   1) 有人把 json.dumps 改成分隔符紧凑形式（separators=(',',':')，正是压
+        //      payload 体积的常规手段）→ 文本变成 "native_ready":true，子串永不命中：
+        //      native 全线静默不接管、静默帧不再降频采集，而**没有任何精度测试会变红**；
+        //   2) 任意文本字段（message/commentary）里出现同样的字面串 → 误接管，于是给
+        //      带鬼牌的玩法用川麻口径覆写了 Python 已经算对的答案。
+        // 读 JSON 里的布尔是与序列化格式无关的唯一口径。
+        final long tStamp0 = System.currentTimeMillis();
         String pyJsonStr = pythonResultString(engineResult);
-        boolean nativeReady = NativeEngine.isAvailable() && pyJsonStr.contains("\"native_ready\": true");
-        if (nativeReady) {
+        org.json.JSONObject pyObj = null;
+        try {
+            final String trimmed = pyJsonStr.trim();
+            if (trimmed.startsWith("{")) {
+                pyObj = new org.json.JSONObject(trimmed);
+            }
+        } catch (Throwable t) {
+            noteParseFailure(t);
+        }
+        // Python 的 json.dumps 默认 allow_nan=True，会写出 `NaN`/`Infinity` 这种**非标准**
+        // JSON 字面量；org.json 把它们读成 Double.NaN 还是字符串 "NaN" 取决于 Android
+        // 版本，而 JSONObject.toString() 又会把它们写成非法字面量或带引号的 "NaN"。
+        // 本轮起**每一帧**都要过一遍重序列化（不只 native 帧），所以这种帧必须退回
+        // 「原样转发 Python 出帧」：宁可本帧没有时间戳，也不把语义改了的结果上屏
+        // （数字变字符串会让 Dart 侧的 `as num` 直接抛异常，整帧建议消失）。
+        if (pyObj != null && hasNonFiniteValue(pyObj)) {
+            noteNonFiniteFrame();
+            pyObj = null;
+        }
+
+        byte[] bytes;
+        boolean frameSkipped = false;
+        if (pyObj == null) {
+            // 降级：这一帧没有时间戳、不走 native，但**绝不丢帧** —— 面板跟帧比多一个
+            // 观测字段重要得多；统计侧会因缺键自动跳过该帧，不污染分位数。
+            bytes = engineResult.callAttr("to_bytes").toJava(byte[].class);
+        } else {
+            frameSkipped = pyObj.optBoolean("frame_skipped", false);
             try {
-                if (!pyJsonStr.isEmpty() && pyJsonStr.startsWith("{")) {
-                    org.json.JSONObject pyObj = new org.json.JSONObject(pyJsonStr);
-                    String handStr = pyObj.optString("hand", "");
-                    int dqSuit = pyObj.isNull("dingque_suit") ? -1 : pyObj.optInt("dingque_suit", -1);
-                    boolean isSwap = pyObj.optBoolean("swap_phase", false);
-                    boolean isDq = pyObj.optBoolean("dingque_phase", false);
-                    String pyStatus = pyObj.optString("status", "");
-                    boolean isTable = !"waiting".equals(pyStatus) || !handStr.isEmpty();
-
-                    int[] handTiles = parseMpszToTiles(handStr);
-                    // MPSZ 是定长两字符一码，native 只认 m/p/s：一旦解出来的张数
-                    // 对不上串长，说明手牌里混进了 native 表达不了的牌（字牌/鬼牌）
-                    // 或识别串残缺。这种帧绝不接管 —— 少喂一张牌算出的向听是错的，
-                    // 而它的结果会覆写 Python 已经算对的正确答案。
-                    boolean handMappable = handTiles.length * 2 == handStr.length();
-                    if (!handMappable) {
-                        TimedLog.e(TAG, "手牌含 native 无法映射的牌张，本帧回退 Python: " + handStr);
-                    }
-
-                    org.json.JSONArray opDqArr = pyObj.optJSONArray("opponents_dingque");
-                    if (opDqArr != null) {
-                        for (int i = 0; i < opDqArr.length(); ++i) {
-                            int s = opDqArr.optInt(i, -1);
-                            if (s >= 0 && s <= 2) {
-                                NativeEngine.setOpponentDingque(i + 1, s);
-                            }
-                        }
-                    }
-
-                    String nativeJsonStr = handMappable
-                            ? NativeEngine.evaluate(handTiles, dqSuit, isSwap, isDq, isTable)
-                            : null;
-                    if (nativeJsonStr != null && !nativeJsonStr.isEmpty() && nativeJsonStr.startsWith("{")) {
-                        org.json.JSONObject nativeObj = new org.json.JSONObject(nativeJsonStr);
-                        pyObj.put("native_active", true);
-                        pyObj.put("state", nativeObj.optString("state", "playing"));
-                        pyObj.put("status", nativeObj.optString("status", pyStatus));
-                        pyObj.put("shanten", nativeObj.optInt("shanten", 0));
-                        pyObj.put("remaining", nativeObj.optInt("remaining", 108));
-                        if (nativeObj.has("remaining_matrix")) {
-                            pyObj.put("remaining_matrix", nativeObj.optJSONObject("remaining_matrix"));
-                        }
-                        if (nativeObj.has("mood")) {
-                            pyObj.put("mood", nativeObj.optJSONObject("mood"));
-                        }
-                        if (nativeObj.has("win_equity")) {
-                            pyObj.put("win_equity", nativeObj.optDouble("win_equity", 0.5));
-                        }
-                        if (nativeObj.has("ev_gauge")) {
-                            pyObj.put("ev_gauge", nativeObj.optJSONObject("ev_gauge"));
-                        }
-                        if (nativeObj.has("hand_ranges")) {
-                            pyObj.put("hand_ranges", nativeObj.optJSONArray("hand_ranges"));
-                        }
-                        if (nativeObj.has("danger_flow")) {
-                            pyObj.put("danger_flow", nativeObj.optJSONObject("danger_flow"));
-                        }
-                        pyObj.put("inferred_discard", nativeObj.optInt("inferred_discard", -1));
-
-                        org.json.JSONArray nativeAdvice = nativeObj.optJSONArray("advice");
-                        if (nativeAdvice != null) {
-                            pyObj.put("advice", nativeAdvice);
-                            pyObj.put("best", nativeObj.optString("best", ""));
-                        }
-                        if (nativeObj.has("hand")) {
-                            pyObj.put("hand", nativeObj.optString("hand", ""));
-                            pyObj.put("count", nativeObj.optInt("count", 0));
-                        }
-
-                        String finalPayload = pyObj.toString() + "\n";
-                        bytes = finalPayload.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-                    } else {
-                        bytes = engineResult.callAttr("to_bytes").toJava(byte[].class);
-                    }
-                } else {
-                    bytes = engineResult.callAttr("to_bytes").toJava(byte[].class);
+                // native 是否接管由 Python 侧按玩法能力下发（modes.native_solver_ready）。
+                // 旧写法是 mode.startsWith("sc")，而这里的 mode 取自 pendingMode —— 它在
+                // 本帧开头推给 engine 后就立刻被置 null，所以恒为兜底值 "sc"：等于对**全部
+                // 玩法**（含带红中/白板鬼牌的血流红中、贵阳捉鸡、杭州百搭）都用川麻口径
+                // 覆写 Python 的 shanten/advice/hand，且 parseMpszToTiles 会把手牌里所有
+                // 字牌静默丢弃。
+                if (NativeEngine.isAvailable() && pyObj.optBoolean("native_ready", false)) {
+                    applyNativeSolver(pyObj);
                 }
+                // 时间戳在 native 覆写之后注入：两条出帧路径带同一组键。
+                pyObj.put("captured_at_ms", capturedAt);
+                pyObj.put("encode_ms", encodeMs);
+                pyObj.put("engine_ms", engineMs);
+                bytes = (pyObj.toString() + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8);
             } catch (Throwable t) {
+                // pyObj 可能已被 native 改到一半（put 了几个键），半覆写的结果比「不接管」
+                // 更糟：C++ 的部分状态会和 Python 的部分状态拼成一帧两边都不成立的建议。
+                // 所以这里必须回退到 Python 的原始出帧（不带时间戳，但语义完整）。
                 TimedLog.e(TAG, "NativeEngine integration failed, fallback to python: " + t);
                 bytes = engineResult.callAttr("to_bytes").toJava(byte[].class);
             }
-        } else {
-            bytes = engineResult.callAttr("to_bytes").toJava(byte[].class);
         }
 
-        // 提取是否跳帧状态，动态更新巡检降频周期（复用上面已取出的结果串，
-        // 不再向 Python 多要一次 get("result")；结果缺失时归零重算）。
-        try {
-            if (pyJsonStr.contains("\"frame_skipped\": true")) {
-                consecutiveSkips++;
-            } else {
-                consecutiveSkips = 0;
-            }
-        } catch (Throwable ignore) {
+        // 动态更新巡检降频周期：静默帧（frame_skipped）累计到阈值后把采集间隔从活跃档
+        // 抬到巡检档，省电也降低平台侧的持续截图特征。
+        if (frameSkipped) {
+            consecutiveSkips++;
+        } else {
             consecutiveSkips = 0;
         }
+        stampCost(System.currentTimeMillis() - tStamp0);
 
         if (client.send(bytes)) {
             framesProcessed++;
@@ -796,6 +809,84 @@ public class ImageProcessor {
         }
     }
 
+    /**
+     * native(C++) 求解器接管本帧：就地改写 pyObj。
+     *
+     * 不接管的情形都原样返回，pyObj 保持 Python 口径：玩法没有 native 求解器
+     * （调用方按 native_ready 判）、手牌里混进 native 表达不了的牌、native 没给出结果。
+     * 中途抛异常由调用方回退到 Python 原始出帧（半覆写的对象不可信）。
+     */
+    private static void applyNativeSolver(org.json.JSONObject pyObj)
+            throws org.json.JSONException {
+        String handStr = pyObj.optString("hand", "");
+        int dqSuit = pyObj.isNull("dingque_suit") ? -1 : pyObj.optInt("dingque_suit", -1);
+        boolean isSwap = pyObj.optBoolean("swap_phase", false);
+        boolean isDq = pyObj.optBoolean("dingque_phase", false);
+        String pyStatus = pyObj.optString("status", "");
+        boolean isTable = !"waiting".equals(pyStatus) || !handStr.isEmpty();
+
+        int[] handTiles = parseMpszToTiles(handStr);
+        // MPSZ 是定长两字符一码，native 只认 m/p/s：一旦解出来的张数
+        // 对不上串长，说明手牌里混进了 native 表达不了的牌（字牌/鬼牌）
+        // 或识别串残缺。这种帧绝不接管 —— 少喂一张牌算出的向听是错的，
+        // 而它的结果会覆写 Python 已经算对的正确答案。
+        boolean handMappable = handTiles.length * 2 == handStr.length();
+        if (!handMappable) {
+            TimedLog.e(TAG, "手牌含 native 无法映射的牌张，本帧回退 Python: " + handStr);
+            return;
+        }
+
+        org.json.JSONArray opDqArr = pyObj.optJSONArray("opponents_dingque");
+        if (opDqArr != null) {
+            for (int i = 0; i < opDqArr.length(); ++i) {
+                int s = opDqArr.optInt(i, -1);
+                if (s >= 0 && s <= 2) {
+                    NativeEngine.setOpponentDingque(i + 1, s);
+                }
+            }
+        }
+
+        String nativeJsonStr = NativeEngine.evaluate(handTiles, dqSuit, isSwap, isDq, isTable);
+        if (nativeJsonStr == null || nativeJsonStr.isEmpty() || !nativeJsonStr.startsWith("{")) {
+            return;
+        }
+        org.json.JSONObject nativeObj = new org.json.JSONObject(nativeJsonStr);
+        pyObj.put("native_active", true);
+        pyObj.put("state", nativeObj.optString("state", "playing"));
+        pyObj.put("status", nativeObj.optString("status", pyStatus));
+        pyObj.put("shanten", nativeObj.optInt("shanten", 0));
+        pyObj.put("remaining", nativeObj.optInt("remaining", 108));
+        if (nativeObj.has("remaining_matrix")) {
+            pyObj.put("remaining_matrix", nativeObj.optJSONObject("remaining_matrix"));
+        }
+        if (nativeObj.has("mood")) {
+            pyObj.put("mood", nativeObj.optJSONObject("mood"));
+        }
+        if (nativeObj.has("win_equity")) {
+            pyObj.put("win_equity", nativeObj.optDouble("win_equity", 0.5));
+        }
+        if (nativeObj.has("ev_gauge")) {
+            pyObj.put("ev_gauge", nativeObj.optJSONObject("ev_gauge"));
+        }
+        if (nativeObj.has("hand_ranges")) {
+            pyObj.put("hand_ranges", nativeObj.optJSONArray("hand_ranges"));
+        }
+        if (nativeObj.has("danger_flow")) {
+            pyObj.put("danger_flow", nativeObj.optJSONObject("danger_flow"));
+        }
+        pyObj.put("inferred_discard", nativeObj.optInt("inferred_discard", -1));
+
+        org.json.JSONArray nativeAdvice = nativeObj.optJSONArray("advice");
+        if (nativeAdvice != null) {
+            pyObj.put("advice", nativeAdvice);
+            pyObj.put("best", nativeObj.optString("best", ""));
+        }
+        if (nativeObj.has("hand")) {
+            pyObj.put("hand", nativeObj.optString("hand", ""));
+            pyObj.put("count", nativeObj.optInt("count", 0));
+        }
+    }
+
     // ===== 心跳与状态上报 =====
 
     private void heartbeat(String status) {
@@ -804,25 +895,89 @@ public class ImageProcessor {
             return;
         }
         lastHeartbeatAt = now;
-        String json = NetworkClient.statusJson(status, null);
-        // 注入采集/处理/发送计数，界面能区分"画面断了"和"识别断了"。
-        // send_fail 取异步 writer 线程累计的真实 socket 失败数（send() 已改非阻塞入队）。
-        json = json.substring(0, json.length() - 1)
-                + ",\"frames\":" + framesAcquired
-                + ",\"proc\":" + framesProcessed
-                + ",\"send_fail\":" + client.getSendErrors() + "}";
-        sendStatus(json);
+        sendStatus(withHeartbeatCounters(NetworkClient.statusJson(status, null)));
     }
 
     // 固定心跳 Timer 专用：不受 lastHeartbeatAt 节流（它本身就是 2s 节奏），
     // 带同样的采集计数，悬浮窗据此区分"画面静止"与"链路死亡"。
     private void sendHeartbeatJson(String status, String message) {
-        String json = NetworkClient.statusJson(status, message);
-        json = json.substring(0, json.length() - 1)
+        sendStatus(withHeartbeatCounters(NetworkClient.statusJson(status, message)));
+    }
+
+    /**
+     * 心跳帧统一附加采集/处理/发送计数，界面能区分"画面断了"和"识别断了"。
+     * send_fail 取异步 writer 线程累计的真实 socket 失败数（send() 已改非阻塞入队）。
+     * stamp_avg_ms 是「解析结果 + 注入时间戳」这一笔的真实开销均值：本轮为了
+     * 告别子串判据而改成每帧解析一次 JSON，这笔代价不该靠拍脑袋宣称很小，
+     * 而是让它在真机上自己读数。parse_fail = JSON 解析失败的帧数，non_finite =
+     * 因含 NaN/Infinity 而退回原始出帧的帧数；两者都是「本帧没有时间戳」的已知来源，
+     * 所以悬浮窗侧帧龄样本的缺口可以直接被这两个数解释，不需要猜。
+     *
+     * statusJson 产出必以 '}' 结尾，去尾拼接合法；不满足该假设时**原样返回**而不是
+     * 抛 StringIndexOutOfBounds —— 心跳也在 send_error 路径上被调用，一个拼接异常
+     * 会把整帧处理连带打断（可观测性设施绝不能反过来伤到主链路）。
+     */
+    private String withHeartbeatCounters(String json) {
+        if (json == null || json.length() < 2 || !json.endsWith("}")) {
+            TimedLog.e(TAG, "心跳拼接跳过：statusJson 产出不是完整对象");
+            return json;
+        }
+        long n = sStampFrames;
+        long avg = n > 0 ? sStampMsSum / n : 0;
+        return json.substring(0, json.length() - 1)
                 + ",\"frames\":" + framesAcquired
                 + ",\"proc\":" + framesProcessed
-                + ",\"send_fail\":" + client.getSendErrors() + "}";
-        sendStatus(json);
+                + ",\"send_fail\":" + client.getSendErrors()
+                + ",\"parse_fail\":" + sParseFailures
+                + ",\"non_finite\":" + sNonFiniteFrames
+                + ",\"stamp_avg_ms\":" + avg + "}";
+    }
+
+    /**
+     * 解析失败只落第一次与之后每 300 次一行日志，真实次数走心跳计数。
+     * 什么情形会走到这里：Python 输出了非法 JSON（典型是 json.dumps 默认允许的
+     * NaN/Infinity），或结果串被截断。降级方向是「原样转发 Python 出帧」，
+     * 不拿半解析的结果上屏。
+     */
+    private void noteParseFailure(Throwable t) {
+        final long n = sParseFailures + 1;
+        sParseFailures = n;
+        if (n == 1 || n % 300 == 0) {
+            TimedLog.e(TAG, "解析 python 结果 JSON 失败（累计 " + n
+                    + " 次），本帧原样转发: " + t);
+        }
+    }
+
+    /**
+     * 结果含 NaN/Infinity 的帧计数（节流日志，理由同上）。这类帧不走重序列化，
+     * 因而既不注入时间戳也不让 native 接管 —— 必须能从心跳读数里看到它在不在发生。
+     */
+    private void noteNonFiniteFrame() {
+        final long n = sNonFiniteFrames + 1;
+        sNonFiniteFrames = n;
+        if (n == 1 || n % 300 == 0) {
+            TimedLog.e(TAG, "python 结果含 NaN/Infinity（累计 " + n
+                    + " 次），本帧不走重序列化，原样转发");
+        }
+    }
+
+    /**
+     * 累计「解析 + 时间戳注入」开销。只有采集线程写（busy CAS 保证单飞），
+     * 心跳线程读 → 两个字段必须 volatile：long 的非原子写会撕裂，普通字段
+     * 还会让心跳线程长期读到旧值。
+     *
+     * 唯一的写-写重叠窗口是 restart 竞态（旧 Timer 上最后一帧还在飞、新 Timer
+     * 已开跑）：那最坏只丢一次统计自增（一个均值样本），不丢牌面数据也不影响
+     * 建议内容，因此不值得为此上 AtomicLong。
+     */
+    private static void stampCost(long ms) {
+        if (ms < 0 || ms > 60_000) {
+            // 墙钟回拨（NTP 校时/用户改时间）会让差值变负或荒谬，直接丢弃这一样本，
+            // 绝不把噪声写进统计 —— 一个假的均值比没有均值更坏。
+            return;
+        }
+        sStampMsSum = sStampMsSum + ms;
+        sStampFrames = sStampFrames + 1;
     }
 
     private void sendStatus(String json) {
@@ -831,6 +986,43 @@ public class ImageProcessor {
         } catch (Throwable t) {
             TimedLog.e(TAG, "sendStatus failed: " + t);
         }
+    }
+
+    /**
+     * 结果里是否含 NaN/Infinity（含嵌套对象与数组）。见调用处注释。
+     * 递归不设深度上限：载荷由我们自己生成，嵌套不超过三层，而一次递归扫描的
+     * 开销远小于刚刚那次 JSON 解析；反过来若中途放弃，就等于把没扫到的分支
+     * 默认判为安全 —— 那是比漏判更坏的口径。
+     */
+    private static boolean hasNonFiniteValue(Object v) {
+        if (v instanceof Number) {
+            double d = ((Number) v).doubleValue();
+            return Double.isNaN(d) || Double.isInfinite(d);
+        }
+        if (v instanceof String) {
+            // org.json 在部分 Android 版本上把非标准字面量读成字符串，这三种是它的全部产出。
+            String s = (String) v;
+            return s.equals("NaN") || s.equals("Infinity") || s.equals("-Infinity");
+        }
+        if (v instanceof org.json.JSONObject) {
+            org.json.JSONObject o = (org.json.JSONObject) v;
+            java.util.Iterator<String> it = o.keys();
+            while (it.hasNext()) {
+                if (hasNonFiniteValue(o.opt(it.next()))) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (v instanceof org.json.JSONArray) {
+            org.json.JSONArray a = (org.json.JSONArray) v;
+            for (int i = 0; i < a.length(); ++i) {
+                if (hasNonFiniteValue(a.opt(i))) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /** 取 Python 结果里的 result 字段（JSON 串）；任何异常都退化成空串，即不走 native。 */

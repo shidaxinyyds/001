@@ -4,6 +4,158 @@
 
 ## [未发布]
 
+### 牌桌实证不再付全套模板匹配的钱：`classify` 参数契约修复（YOLO 通道）+ Java 跨线程可见性
+
+用户报「悬浮窗响应与画面更新严重滞后」。直播口径（同一引擎连喂 91 帧真实帧）+ cProfile
+解剖出的元凶不是稳定器、不是网络，而是一句被签名骗过去的调用：
+`YOLODetector.detect_all_rows(image, classify=...)` **收下 `classify` 却从不读它**。
+两个明确声明「只要几何、不要牌面」的调用方 —— `Engine._verify_hand_evidence`
+（只数张数用来判牌桌）与 `Engine._probe_orientation` 阶段 A（几何筛选）——
+每帧（jj 平台 14/14 帧）照付全套模板精修与补槽：该段实测 **997.8ms/帧，占整帧 56.6%**
+（`build/live_diag_before.txt`；cProfile 里 `matchTemplate` 49255 次 / 9.701s，
+而 YOLO forward 只 0.710s —— 钱花在模板库不在网络）。`recognition/structural.py`
+的同名参数一直是真跳过的（173ms → 17ms），本次把 YOLO 通道对齐到同一语义。
+
+- **改法**（`recognition/yolo_detector.py`）：`if hand_tiles:` → `if hand_tiles and classify:`。
+  跳过的只有「在 YOLO 框之上做的模板精修/补槽」，YOLO 自带类别标签、牌高筛选、
+  无标签框剔除、牌河分行全部保留 ⇒ 行列结构与精修路径同源。
+  引擎侧无需改动：`_probe_orientation` 锁定方向后本来就会用 `classify=True` 重跑一次
+  并 `_cache_rows`（`engine.py:3154-3164`），`last_drawn_tile` 的消费点在其之后。
+- **保真**：同进程 old→new→old 三趟跑同一条 91 帧流，逐字段比
+  `hand/count/status/drawing_tile/phase_label` ⇒ **不一致 0/91**，对 GT 不符三趟同为 3。
+  两轮独立复现（`build/ab_classify_all.txt`、`build/ab_classify_replicate.txt`）结论一致。
+- **收益只声称机制覆盖的那一段**：jj 单帧 p50 在同轮对照里 **−52%（1732.7 → 830.4ms，
+  暖机后的 old 作基准）**；其余平台降幅与 old 自身漂移（74~96ms）同量级，**不声称有收益**。
+  本轮同时撤回两处早先结论：① 拿冷启第一趟 `old#1` 当基准会伪造出两位数降幅
+  （queshen 出现过 4518ms 的冷页第一趟），故 weile −26.7%、tencent −13.9% 撤回；
+  ② 「稳定器换局要 5 帧才追上 ≈5 秒滞后」是比对口径 bug（GT 里 `?` 未标注格
+  使全等比对必然失败）造成的假阳性，用正确口径重跑后换局第 1 帧即追上真值。
+- **测量环境警告**：本机 PC 已被内存挤压污染（可用 <1GB），**同一份代码、同一夹具**的
+  手牌行中位耗时三次跑出 273.7 / 859.6 / 1273.8ms（`build/channels_tuyou_20261007.txt`、
+  `build/channels_tuyou_now.txt`）。⇒ PC 绝对值一律不可当验收数字，只有同进程相对比较可用；
+  端到端验收必须在真机做。
+- **Java 跨线程可见性**（`ImageProcessor.java`）：`roiTop/roiBottom/roiDirty`、
+  `orientOverride/orientDirty`、`dingqueOverride/dingqueDirty`、`cfgAntiBan/cfgAntiDetect`、
+  `cfgAutoOrient/cfgBootstrap/cfgStrict/configDirty`、`sContext` 全部补 `volatile`，
+  `framesAcquired/framesProcessed/sendFailures` 三个 long 同样补（32 位 ARM 上 long 写非原子）。
+  这类缺陷本文件早先已经因 `cfgDumpFrames` 立过规矩（注释就写着「非 volatile 时开关不生效」），
+  但只修了当时那 3 个 —— 现在把同一族的补齐。**未编译验证**（本机无 Android 工具链）。
+- **新守卫**：`localtest/test_classify_contract_guard.py`（5 用例 + `--mutate` 变异对照：
+  把 `classify` 重新无视掉必须变红），已登记 `run_all_guards.MUTABLE`。
+  全量回归 **28 条全绿 / 0 红**（`build/guards_all.txt`）。
+  配套诊断工具入库：`localtest/diag_live.py`（直播口径分阶段耗时 + GT 滞后）、
+  `localtest/ab_classify_fix.py`（同进程三趟 A/B）。
+
+### 滞后的三个体感放大器（B1/B2/B3）：非牌桌帧不再播旧牌局、清空去抖改纯时间门、安全扫描移出采集线程
+
+用户取向：**保精度，改「不卡顿」的定义** —— 不做会拿手牌准确率换延时的条件精修，
+而是把「面板播旧数据 / 帧数门在慢帧下膨胀成秒级 / 周期性钝卡」这三个能直接看见的
+放大器拆掉。
+
+- **B1 引擎不再回放上一帧牌局**（`engine/engine.py`）：旧写法在非牌桌**首帧**走
+  `_build_skip_result(image, self._frame_skipper.cached)` —— 那份缓存带着上一局的
+  `hand/advice/discards`，而画面已经是大厅/结算/聊天，面板就在播旧牌局（「画面 14 张
+  手牌、面板还写着上一局 5 张」即此）。现在非牌桌帧不分首帧/后续，一律走新提取的
+  `_build_waiting_result(image)`（`status=waiting`、`hand=''`、`frame_skipped=false`）。
+  游戏态硬重置仍只在 `_non_table_frames >= 2/3` 发生（一次手指划过不能清掉整局牌河账本）。
+  **防闪职责移到显示层**：数据层不该用错数据换好看的 UI。
+  行为变化需记录：旧写法下「局中连续第 2 帧非牌桌」会 fall-through 再跑一次识别（在
+  非牌桌画面上识别，本身就是在赌错牌），现在不再跑 —— 顺带省下这些帧的完整识别开销。
+- **B2 悬浮窗清空去抖改纯时间门**（`lib/overlays/mahjong_overlay.dart`）：旧判据是
+  「≥4 帧 且 ≥450ms」的帧数×时间双门。帧数门把「多久」隐含成「多少个 15ms 采集周期」，
+  而单帧实测 p50 415ms ⇒ 4 帧≈**1.66s**，面板会长时间死播上一局。现在只按时间：
+  瞬态遮挡（<450ms）依旧被挡住，真离开牌桌在 450ms（或已有的 460ms 看门狗）内清空。
+  `_pendingClearRun` 字段整个删除。
+- **B3 安全巡检移出采集热路径**（`SecurityGuard.java` + `ImageProcessor.java` +
+  `MainActivity.java`）：`isSafe()` 不再内嵌周期性深扫（旧写法每 8 秒必有一帧在采集
+  线程里逐行读 `/proc/self/maps` + 两次 `socket.connect(15ms)`，表现为周期性钝卡）；
+  深扫改由 **2s 心跳线程**调 `runScheduledDeepScan()` 推进。卡密核验新增节流版
+  `verifyLicenseThrottled()`（设备指纹进程内缓存 + 「通过」结果缓存 2s，**坏结果不
+  缓存**，所以过期/拉黑仍立即生效），采集热路径改用节流版。
+  **启动闸门不减一分**：`startProcessing` 现在显式做一次 `performDeepScan`（旧行为里
+  它由 `isSafe()` 顺带触发，同样在主线程，成本一致）。
+  代价（必须说清）：靠深扫发现的注入，熔断最多迟一个心跳周期（2s）+1 帧生效；
+  授权自然到期的硬拒最多迟 2s（方法本身已有 300s 宽限）。
+- **新守卫两个**（均为「改回坏写法必红」，已登记 `run_all_guards.MUTABLE`）：
+  - `localtest/test_non_table_honesty_guard.py`：4 主用例（非牌桌首帧不得出现缓存牌、
+    待机出口字段齐全、首帧不得硬重置游戏态、源码契约）+ 2 变异对照；
+    旧行为根本无人守（`test_skip_frame_guard.py` 里搜不到这条路径），所以本守卫是填空白。
+  - `localtest/test_hot_path_contracts_guard.py`：4 主用例 + 1 变异对照（11 个坏写法全部
+    被拦住）。锁 Dart 时间门/`waiting` 仍在清空集合里/前沿 0ms 上屏，以及 Java 侧
+    「深扫不在 isSafe 里但有人接盘」「热路径用节流核验」「跨线程字段全 volatile」。
+    为什么用源码契约：这两处在 Dart/Java，本机的回归只能跑 Python，而它们的失效方式
+    全是「某天有人把门加回帧数 / 把深扫塞回采集线程」，这类回归不会让任何精度测试变红。
+- **未验证项（如实标注）**：Dart/Java 两处**都没编译验证**（本机既无 dart 也无 Android
+  工具链，`Get-Command dart` 为空）；B3 的真实收益（省掉多少毫秒/帧）需真机 logcat，
+  PC 无法量 binder/SharedPreferences；B1/B2 的体感效果（面板是否不再播旧牌、闪烁是否
+  回来）需真机目测 —— 守卫只能锁代码形态，锁不了观感。待修未动：B4（整屏 JPEG 未用
+  ROI 重载，需先协调 Python `set_roi` 语义避免双裁）、B5（`native_ready` 子串判据）。
+
+### 把延迟从「读不出来」变成「读得出来并可分解」（P1-e），并把两个靠文本巧合成立的判据换成语义判据（B5）；B4 经实测判定为不该做
+
+上一条目留下的两个待补项。**这一轮的失效方式不会让任何精度测试变红**（native 静默不
+接管、延迟静默读不出来、面板照常显示一张牌也没变的假数字），所以三处都配了源码级守卫。
+
+- **P1-e 端到端可测**（`ImageProcessor.java` + `lib/latency_probe.dart` +
+  `mahjong_overlay.dart` + `debug_page.dart`）：采集入口打 `capturedAt` 原点，出帧注入
+  `captured_at_ms`/`encode_ms`/`engine_ms`（三键一起注入才有「慢在哪一段」的分解能力），
+  悬浮窗侧用本地接收时刻相减得帧龄。能直接相减的理由：Android 上 Java 的
+  `System.currentTimeMillis()` 与 Dart 的 `DateTime.now().millisecondsSinceEpoch` 同为设备
+  epoch 墙钟、与时区无关，不需要跨进程同步协议（也因此只能量同一台设备的两个进程）。
+  注入点在 native 覆写**之外的统一出口** —— 否则非川麻玩法（用户实际在玩的血流红中正是
+  这类，`native_ready=false`）一帧读数都没有。探针窗口有界（120 帧）、丢弃负值与墙钟
+  回拨样本、无样本返回 null（UI 显示「—」而不是假的 0ms）。上报按 **2s 节流**：
+  逐帧 `shareData` 会让主页每帧重建，那正是上一轮定位到的「高峰期点什么都没反应」病根。
+  调试页新增「实时链路」卡：典型/偶发/最差三分位 + 编码段/识别段 + 采集侧自报计数，
+  与 `dropped` 摆在一起可对账（而不是只能看着）。
+- **B5 子串判据改语义判据**（`ImageProcessor.java`）：旧写法
+  `pyJsonStr.contains("\"native_ready\": true")` / `contains("\"frame_skipped\": true")`
+  把**序列化格式**当契约。两种真实失效方式：① 有人把 `json.dumps` 改紧凑分隔符
+  （`separators=(',',':')`，正是压 payload 的常规手段）→ 文本变成 `"native_ready":true`，
+  子串永不命中 ⇒ native 全线静默不接管 + 静默帧不再降频采集，**而没有任何精度测试会
+  变红**；② 任意文本字段（`message`/`commentary`）含同样字面串 ⇒ 误接管，给带鬼牌的
+  玩法用川麻口径覆写了 Python 已算对的答案。现改为每帧解析一次 JSON + `optBoolean`。
+- **B4 判定为不该做**（`ImageEncoder.java`）：ROI 重载早就存在，但热路径**必须**用整屏
+  入口。Java 的 `roiTop/roiBottom` 只表示用户拖的「手牌识别区域」，经 `set_roi` 交 Python
+  在整屏图上裁；牌河/副露/对家/牌桌校验另用一套整屏几何 —— 编码阶段就裁 = 两套坐标叠加
+  ⇒ 牌河漏框与手牌错位。而实测收益只有 **4ms**（1080x2400 q80：编码 7.8→6.4ms、
+  解码 13.1→10.2ms、398KB→278KB）⇒ 拿 4ms 换坐标系错位不值。因此本项**不实施**，改为
+  用守卫把「热路径必须整屏编码」在两侧（Encoder 与 Processor）钉死，只做无风险等价优化：
+  JPEG 质量收敛到 `DEFAULT_QUALITY` 单一口径、`ByteArrayOutputStream` 预置容量（默认 32
+  字节起步写满一帧要翻倍扩容 ≈14 次）。
+- **本轮改动自己引入的三处风险（发现即补）**：
+  ① 旧版只有 native 帧会走 `JSONObject` 重序列化，现在**每帧**都走；而 Python
+    `json.dumps(allow_nan=True)` 会写 `NaN`/`Infinity` 这种非标准 JSON，org.json 读成
+    `Double.NaN` 还是字符串 `"NaN"` 取决于 Android 版本，写回时要么变非法字面量（Dart
+    `jsonDecode` 抛 ⇒ 整帧丢），要么数字变字符串（渲染处 `as num` 抛 ⇒ 建议消失）。
+    新增 `hasNonFiniteValue()` 递归拦截，这类帧退回「原样转发 Python」并计入心跳 `non_finite`。
+  ② 为了告别子串判据新增的每帧解析，代价不靠宣称：`stamp_avg_ms` 进心跳、进调试页读数。
+    解析失败日志**首次 + 每 300 次**节流（`TimedLog` 本身无节流，一个持续输出非法 JSON
+    的玩法会形成 logcat 风暴反过来拖慢热路径），真实次数走 `parse_fail`。
+  ③ 采集层状态帧新增显式 `java_status:true` 标记（`NetworkClient.statusJson`），悬浮窗据此
+    把它排除在帧龄样本之外。不靠枚举 status 字符串：枚举必然漏（`security_alert` 就漏过
+    一次），而漏掉的每帧都会把 `dropped` 刷满，让真正的降级帧看不出来。主页的 shareData
+    处理是 `type ==` 串联过滤，新增的 `latency` 帧不会被当成 status 帧喂快照。
+    `withHeartbeatCounters` 还补了「不以 `}` 结尾就原样返回」：心跳也在 send_error 路径上，
+    一个拼接异常会把整帧处理打断（可观测设施不得反过来伤主链路）。
+- **文案与注释的事实更正**：调试页「截屏节奏在 350–550ms 间随机抖动，并让建议稍作
+  人类式延迟显示」与代码不符（`anti_ban` 在 Python 侧只存档，真实行为只有采帧节奏
+  抖动：活跃 15ms / 防封号 80–120ms / 静止 80–100ms），改为如实描述且明说「只改变采帧
+  节奏，不影响识别准确率与建议内容」；`captureDelayMs()` 上方注释的「25ms」同步修正。
+- **新守卫**：`localtest/test_latency_contract_guard.py`（4 用例 + 21 条变异对照，已登记
+  `run_all_guards.MUTABLE`）。除契约断言外还带一层 Java 括号/圆括号配对静态扫描（剥
+  字符串与注释后计数）—— 本机无 javac，SearchReplace 造成的大括号错位是最现实的
+  编译失败方式。全量回归 **31 条全绿 / 0 红**（`build/guards_all.txt`），变异检验
+  **13 条全绿 / 0 红**（`build/guards_mut.txt`）。
+- **仍未达标与未验证（如实）**：① **300ms 硬指标仍未达到** —— 修后引擎段 p50 415.4ms
+  （其中手牌通道 359.5ms 占 86%），且这还不含 Java 编码/`imdecode`/TCP/渲染，手机端更慢；
+  唯一数量级杠杆（降低识别精度档位）已被用户「保精度」取向否决。本轮把「不卡顿」的
+  定义补到四条：不播旧数据、清空及时、无周期性钝卡、**延迟可被读出并可分解**。
+  ② Java/Dart 均未编译验证（本机无 javac、无 Android SDK、`android/local.properties` 里的
+  `flutter.sdk=D:\flutter\flutter` 路径不存在）—— 只能靠 CI 的 `flutter analyze` +
+  `flutter build apk` 兜编译，而这需要提交。③ 面板体感与真机 `stamp_avg_ms`/`encode_ms`
+  读数需真机确认。
+
 ### 手牌识别提速（耗时侧）：逐枚打分并行 + 并批，并把准确率拆成「通道 / 面板」两条口径的现行数字
 
 本条目补的是 b1~b11 期间一直只活在会话里、没进 CHANGELOG 的账：GT 从 7 帧 91 张

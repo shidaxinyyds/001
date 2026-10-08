@@ -2887,6 +2887,55 @@ class Engine:
             pass
         return out
 
+    def _build_waiting_result(self, image: CVImage) -> EngineResult:
+        """非牌桌帧的统一出口：逐字报告「当前画面不是牌桌」，不带任何上一局内容。
+
+        这里绝不复用 `_frame_skipper.cached`：那份缓存是**上一次真的识别过牌桌**时
+        的 payload，画面已经切回大厅/结算/聊天时还把它发上屏，面板就在播旧牌局
+        （用户看到的「画面 14 张手牌、面板还写着上一局 5 张」即此）。瞬态遮挡的
+        防闪职责属于显示层（悬浮窗按**时间**去抖，见 mahjong_overlay 的清空帧门），
+        数据层只报事实 —— 让引擎「播旧帧」去掩盖闪烁，等于用错数据换好看的 UI。
+        """
+        return EngineResult(
+            image=_make_preview(image),
+            result=json.dumps({
+                "mode": self.mode,
+                "mode_name": MODES.get(self.mode, {}).get("name", self.mode),
+                "platform": self.platform,
+                "platform_name": get_platform(self.platform).get("name", self.platform),
+                "knowledge_doctrine": "【待机推演】等待牌局开始…",
+                "phase_label": "",
+                "tactical_badge": "",
+                "tactical_intent": "",
+                "dingque": None,
+                "dingque_suit": None,
+                "hand": "",
+                "count": 0,
+                "status": "waiting",
+                "shanten": None,
+                "advice": [],
+                "best": "",
+                "commentary": None,
+                "discards": "",
+                "discard_count": 0,
+                "remaining": get_mode(self.mode).get("wall", 108),
+                "dead": 0,
+                "remaining_matrix": {},
+                "tile_ledger": None,
+                "ting_chance": None,
+                "is_drawing": False,
+                "drawing_tile": None,
+                "tiles": [],
+                "top_score": 0.0,
+                "screen": [int(image.shape[1]), int(image.shape[0])],
+                "elapsed": 0.001,
+                "frame_skipped": False,
+                "message": "等待牌局开始",
+                "native_ready": native_solver_ready(self.mode),
+            }, ensure_ascii=False),
+            stage=None,
+        )
+
     def _build_skip_result(self, image: CVImage, prev_payload: str) -> EngineResult:
         """画面无变化时复用上一帧结果，但保持 EngineResult 的合约。"""
         try:
@@ -3618,48 +3667,11 @@ class Engine:
                 need_reset = (self._non_table_frames >= 2) if not getattr(self, "_match_started", False) else (self._non_table_frames >= 3)
                 if need_reset:
                     self._reset_game_state()
-                    return EngineResult(
-                        image=_make_preview(image),
-                        result=json.dumps({
-                            "mode": self.mode,
-                            "mode_name": MODES.get(self.mode, {}).get("name", self.mode),
-                            "platform": self.platform,
-                            "platform_name": get_platform(self.platform).get("name", self.platform),
-                            "knowledge_doctrine": "【待机推演】等待牌局开始…",
-                            "phase_label": "",
-                            "tactical_badge": "",
-                            "tactical_intent": "",
-                            "dingque": None,
-                            "dingque_suit": None,
-                            "hand": "",
-                            "count": 0,
-                            "status": "waiting",
-                            "shanten": None,
-                            "advice": [],
-                            "best": "",
-                            "commentary": None,
-                            "discards": "",
-                            "discard_count": 0,
-                            "remaining": get_mode(self.mode).get("wall", 108),
-                            "dead": 0,
-                            "remaining_matrix": {},
-                            "tile_ledger": None,
-                            "ting_chance": None,
-                            "is_drawing": False,
-                            "drawing_tile": None,
-                            "tiles": [],
-                            "top_score": 0.0,
-                            "screen": [int(image.shape[1]), int(image.shape[0])],
-                            "elapsed": 0.001,
-                            "frame_skipped": False,
-                            "message": "等待牌局开始",
-                            "native_ready": native_solver_ready(self.mode),
-                        }, ensure_ascii=False),
-                        stage=None,
-                    )
-                # 仅在非牌桌首帧（瞬态遮挡）短平滑过渡，若连续 >=2 帧非桌布一律不再吐出旧对局缓存
-                if self._non_table_frames <= 1 and self._frame_skipper.cached is not None:
-                    return self._build_skip_result(image, self._frame_skipper.cached)
+                # 非牌桌帧不分「首帧/后续」：一律只报待机。旧写法在首帧拿
+                # `_build_skip_result(cached)` 回放上一帧牌局来「平滑过渡」，
+                # 在单帧 400ms+ 的真机节奏下等于把旧牌局多播一整帧，且画面
+                # 已经不是牌桌 —— 播的是错数据，不是过渡（防闪交给显示层）。
+                return self._build_waiting_result(image)
             else:
                 self._non_table_frames = 0
 
