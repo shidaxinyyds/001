@@ -253,6 +253,249 @@ def _prefilter_core(entry):
     return tuple(out)
 
 
+# ============================================================================
+# 开局特殊阶段的「跨平台几何」判据（定缺三色盘 / 金色换牌按钮）
+# ----------------------------------------------------------------------------
+# 为什么不能沿用原来那套固定取区：原实现的四条定缺判据与换牌窗口全部是在
+# 41 帧**腾讯**真机上量的，把「色盘在 y40%~75%、万→条→筒 从左到右、按钮在
+# y74%~88%」当成了物理规律。它们只是腾讯那一家的 UI 排版。57 帧实测
+# （`localtest/probe_phase_layout.py` 逐帧量到的圆盘/金色域，评分台
+# `localtest/eval_phase_layout.py`）：
+#   途游定缺三盘   中心 y≈0.66，横向顺序 筒(蓝)→条(绿)→万(红)，节距 0.117
+#   蜀山定缺三盘   中心 y≈0.62~0.65，顺序 万(红)→条(绿)→筒(蓝)，节距 0.088~0.108
+#   JJ   定缺三盘  中心 y≈0.63~0.65，顺序 条(绿)→万(红)→筒(金)，节距 0.135~0.14
+#   腾讯定缺三盘   中心 y≈0.62，    顺序 万→条→筒，节距 0.10
+#   JJ   换牌按钮  中心 (0.611, 0.646)，宽高比 2.84，填充率 0.812，高/屏高 0.091
+#   途游确定按钮    中心 (0.511, 0.679)，宽高比 3.14，填充率 0.878，高/屏高 0.092
+#   腾讯换牌按钮    中心 (0.687, 0.760)，宽高比 2.12~2.21，填充率 0.47~0.50，高/屏高 0.065
+# 也就是说：**花色顺序会被平台任意排列，按钮位置能差出 0.11 屏高**。任何一条
+# 「按顺序找三个色块」或「只看某一条低带」的判据都必然在别家平台上漏判。
+#
+# 换成与排版无关的两条不变量：
+#   定缺 = 屏幕中下部存在**一行三个**同尺寸、颜色互不相同、横向共线的饱和圆盘；
+#   换牌 = 屏幕中部存在一个**扁圆金按钮**（宽高比/填充率/绝对高度三项指纹同时成立）。
+# 原有的腾讯判据一条不删：新几何只是**追加**的通路，实测 57 帧上双方都是 0 误报，
+# 删旧值等于拿已知的腾讯真机帧去赌一个没量过的分辨率。
+# ============================================================================
+
+# 圆盘（定缺色盘）指纹：外接框边长占屏宽的比例区间。下界 0.030 是蜀山那颗
+# 被文字压扁的红盘实测宽 0.033 顶出来的，再抬就把真盘切掉。
+_PHASE_DISC_W = (0.030, 0.130)
+_PHASE_DISC_ASPECT = (0.65, 1.45)
+_PHASE_DISC_HULL_FILL = 0.58
+_PHASE_DISC_MIN_AREA = 300          # 2000x899 基准像素，跨分辨率按面积比缩放
+# 三盘行允许的中心纵带（占屏高）。上界 0.80 挡的是手牌行里的宝牌/徽章，
+# 下界 0.50 挡的是顶部头像与网络延迟胶囊。
+_PHASE_DISC_ROW_Y = (0.50, 0.80)
+_PHASE_DISC_TRIPLE_GAP = (0.055, 0.18)   # 相邻两盘中心距 / 屏宽
+_PHASE_DISC_ROW_SPAN = 0.45              # 三盘首尾总跨幅 / 屏宽
+# 只找到两盘时的加严条件：必须是「居中那一排被挡住一个」，不是「桌面上随便
+# 两个圆形色块」。实测腾讯 s_d0bf 帧（万盘被悬浮窗挡住）两盘中点 0.555、
+# 节距 0.102、纵向差 0.002；而雀神/蜀山局中帧的误配两盘中点 0.725/0.738。
+_PHASE_DISC_PAIR_GAP = (0.08, 0.13)
+_PHASE_DISC_PAIR_DY = 0.020
+_PHASE_DISC_PAIR_MID = (0.40, 0.62)
+
+# 金色确认按钮指纹（四项同时成立才算，缺一项就会被局中动作按钮或侧栏徽章顶替）
+_PHASE_BTN_AR = (1.7, 3.6)          # 外接框宽高比
+_PHASE_BTN_FILL = (0.42, 0.95)      # 连通域面积 / 外接框面积
+_PHASE_BTN_H = (0.055, 0.130)       # 外接框高 / 屏高
+_PHASE_BTN_AREA = 1.5e-3            # 连通域面积 / 全屏面积
+_PHASE_BTN_X = (0.35, 0.85)         # 中心横坐标（按钮恒在桌面中线偏右，不贴边）
+_PHASE_BTN_Y = (0.42, 0.88)         # 下界即取区上沿（取区已裁掉顶部状态栏），上界不伸进手牌行
+
+_PHASE_HUES = ("red", "green", "gold", "blue")
+
+# 扫盘取区：只扫「桌面下半部、手牌行之上」这条带。实测四个平台的定缺盘行在
+# y 0.62~0.66、换牌/确定按钮在 y 0.646~0.760，都落在 [0.42, 0.90] 里。
+_PHASE_SCAN_Y = (0.42, 0.90)
+_PHASE_SCAN_MAX_W = 900
+
+
+def _phase_view(image_bgr: np.ndarray):
+    """裁出开局 modal 带并等比缩小，返回 (hsv, 子图宽, 子图高, 带顶边占屏高, 缩放系数)。
+
+    为什么必须裁+缩：这两条判据每帧都要跑。全分辨率整屏扫实测 discs 82ms +
+    golds 27ms = 109ms/帧（PC），会把 128.7ms 的引擎单价直接推过 300ms 预算。
+    裁到实测带并缩到 900px 宽后像素量只剩约 6%。
+
+    缩放只改「有多少像素」，不改判据：调用方一律把子图里的像素量乘回
+    `1/scale` 再用全屏比例比大小，所以常量表里的数字仍是「占屏宽/屏高」，
+    与分辨率、与这条带的高低都无关。
+    """
+    ih, iw = image_bgr.shape[:2]
+    if ih <= 0 or iw <= 0:
+        return None, 0, 0, 0.0, 1.0
+    y0 = int(ih * _PHASE_SCAN_Y[0])
+    y1 = int(ih * _PHASE_SCAN_Y[1])
+    band = image_bgr[y0:y1]
+    if band.shape[0] < 20 or band.shape[1] < 20:
+        return None, 0, 0, 0.0, 1.0
+    scale = min(1.0, _PHASE_SCAN_MAX_W / float(iw))
+    if scale < 1.0:
+        band = cv2.resize(band, (max(1, int(iw * scale)),
+                                 max(1, int(band.shape[0] * scale))),
+                          interpolation=cv2.INTER_AREA)
+    return (cv2.cvtColor(band, cv2.COLOR_BGR2HSV), band.shape[1], band.shape[0],
+            y0 / float(ih), scale)
+
+
+def _phase_hue_mask(hsv: np.ndarray, hue: str) -> np.ndarray:
+    """取某一色相的高饱和掩膜。红色跨 0°，必须拆成两段或起来。"""
+    h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    if hue == "red":
+        return (((h <= 10) | (h >= 170)) & (s >= 100) & (v >= 100)).astype(np.uint8) * 255
+    if hue == "green":
+        return ((h >= 35) & (h <= 85) & (s >= 80) & (v >= 80)).astype(np.uint8) * 255
+    if hue == "gold":
+        return ((h >= 8) & (h <= 32) & (s >= 75) & (v >= 90)).astype(np.uint8) * 255
+    if hue == "blue":
+        return ((h >= 95) & (h <= 130) & (s >= 100) & (v >= 100)).astype(np.uint8) * 255
+    return np.zeros(hsv.shape[:2], np.uint8)
+
+
+def _find_phase_discs(image_bgr: np.ndarray) -> List[Dict[str, float]]:
+    """在开局 modal 带里找「定缺色盘」候选：单色、近圆、尺寸落在按屏宽归一的窗口内。
+
+    返回按 x 排序、同色重叠去重后的候选（每项含归一化中心 x/y、归一化宽 w）。
+    所有阈值都以「占屏宽/屏高的比例」表达，换分辨率不需要重标。
+    """
+    hsv, _sw, _sh, y_off, scale = _phase_view(image_bgr)
+    if hsv is None:
+        return []
+    ih, iw = image_bgr.shape[:2]
+    inv = 1.0 / scale                      # 子图像素 -> 全屏像素
+    lo_w, hi_w = _PHASE_DISC_W
+    px_lo, px_hi = iw * lo_w * scale, iw * hi_w * scale
+    min_area = _PHASE_DISC_MIN_AREA * (iw * ih) / float(2000 * 899) * scale * scale
+    out: List[Dict[str, float]] = []
+    for hue in _PHASE_HUES:
+        cnts, _ = cv2.findContours(_phase_hue_mask(hsv, hue),
+                                   cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for c in cnts:
+            area = cv2.contourArea(c)
+            if area < min_area:
+                continue
+            x, y, bw, bh = cv2.boundingRect(c)
+            if bw <= 0 or bh <= 0:
+                continue
+            if not (px_lo <= bw <= px_hi and px_lo <= bh <= px_hi):
+                continue
+            if not (_PHASE_DISC_ASPECT[0] <= bw / float(bh) <= _PHASE_DISC_ASPECT[1]):
+                continue
+            if cv2.contourArea(cv2.convexHull(c)) / float(bw * bh) < _PHASE_DISC_HULL_FILL:
+                continue
+            out.append({"hue": hue,
+                        "x": (x + bw / 2.0) * inv / iw,
+                        "y": y_off + (y + bh / 2.0) * inv / ih,
+                        "w": bw * inv / float(iw),
+                        "area": area * inv * inv})
+    # 同色、横向几乎重合的盘只留面积最大者：一个盘上的高光会裂成两三个轮廓，
+    # 不去重就会把「两个盘」数成「三个盘」，凭空凑出一次定缺命中。
+    keep: List[Dict[str, float]] = []
+    for d in sorted(out, key=lambda t: -t["area"]):
+        if any(d["hue"] == k["hue"] and abs(d["x"] - k["x"]) < 0.02 for k in keep):
+            continue
+        keep.append(d)
+    return sorted(keep, key=lambda t: t["x"])
+
+
+def _phase_disc_row(discs: List[Dict[str, float]],
+                    gap: Tuple[float, float],
+                    dy_tol: float) -> List[Dict[str, float]]:
+    """在圆盘候选里找最长的一条「横向、共线、颜色互不相同」的串。
+
+    只按「相邻两盘的间距 + 纵向差」串接，**完全不问颜色顺序** —— 各平台把
+    万/条/筒摆在哪个位置是它自己的排版决定，不是牌局事实。
+    """
+    discs = sorted(discs, key=lambda t: t["x"])
+    n = len(discs)
+    best: List[Dict[str, float]] = []
+
+    def walk(cur: List[Dict[str, float]], used: Set[str], start: int) -> None:
+        nonlocal best
+        if len(cur) > len(best):
+            best = list(cur)
+        if len(cur) >= len(_PHASE_HUES):
+            return
+        for j in range(start + 1, n):
+            d = discs[j]
+            if d["hue"] in used:
+                continue
+            dx = d["x"] - cur[-1]["x"]
+            if not (gap[0] <= dx <= gap[1]):
+                continue
+            if abs(d["y"] - cur[-1]["y"]) > dy_tol:
+                continue
+            cur.append(d)
+            walk(cur, used | {d["hue"]}, j)
+            cur.pop()
+
+    for i in range(n):
+        walk([discs[i]], {discs[i]["hue"]}, i)
+    return best
+
+
+def _phase_disc_row_in_band(row: List[Dict[str, float]]) -> bool:
+    """串接出来的盘行是否真的落在「桌面中下部那条 modal 带」里。"""
+    if len(row) >= 3:
+        ys = [d["y"] for d in row]
+        span = row[-1]["x"] - row[0]["x"]
+        return (_PHASE_DISC_ROW_Y[0] <= sum(ys) / len(ys) <= _PHASE_DISC_ROW_Y[1]
+                and span <= _PHASE_DISC_ROW_SPAN)
+    if len(row) == 2:
+        dy = abs(row[1]["y"] - row[0]["y"])
+        mid = (row[0]["x"] + row[1]["x"]) / 2.0
+        y = (row[0]["y"] + row[1]["y"]) / 2.0
+        return (dy <= _PHASE_DISC_PAIR_DY
+                and _PHASE_DISC_PAIR_GAP[0] <= row[1]["x"] - row[0]["x"] <= _PHASE_DISC_PAIR_GAP[1]
+                and _PHASE_DISC_PAIR_MID[0] <= mid <= _PHASE_DISC_PAIR_MID[1]
+                and _PHASE_DISC_ROW_Y[0] <= y <= _PHASE_DISC_ROW_Y[1])
+    return False
+
+
+def _find_phase_gold_buttons(image_bgr: np.ndarray) -> List[Dict[str, float]]:
+    """在开局 modal 带里找「金色确认按钮」，返回通过四项形状指纹的那些。
+
+    为什么不能只看「这一带有金色」：局中的杠/碰/胡动作按钮、右侧徽章、悬浮窗
+    自己的橙色按钮都是金色，占比门槛分不开（旧实现就是靠把取区缩到一条低带
+    来躲，代价是别家平台的按钮根本不在那条带上）。这里改用形状：确认按钮是
+    一个**扁而实的圆角块**，动作按钮接近正圆（宽高比≈1），侧栏徽章又细又高，
+    沙滩那类背景则一整片糊到带边（宽高比 15+）。
+    """
+    hsv, _sw, _sh, y_off, scale = _phase_view(image_bgr)
+    if hsv is None:
+        return []
+    ih, iw = image_bgr.shape[:2]
+    inv = 1.0 / scale
+    gold = ((hsv[:, :, 0] >= 14) & (hsv[:, :, 0] <= 35)
+            & (hsv[:, :, 1] >= 120) & (hsv[:, :, 2] >= 150)).astype(np.uint8) * 255
+    n_lab, _lab, st, cen = cv2.connectedComponentsWithStats(gold, 8)
+    out: List[Dict[str, float]] = []
+    min_area = _PHASE_BTN_AREA * iw * ih * scale * scale
+    for i in range(1, n_lab):
+        area = float(st[i, cv2.CC_STAT_AREA])
+        bw = float(st[i, cv2.CC_STAT_WIDTH])
+        bh = float(st[i, cv2.CC_STAT_HEIGHT])
+        if area <= 0 or bw <= 0 or bh <= 0 or area < min_area:
+            continue
+        ar = bw / bh
+        if not (_PHASE_BTN_AR[0] <= ar <= _PHASE_BTN_AR[1]):
+            continue
+        if not (_PHASE_BTN_FILL[0] <= area / (bw * bh) <= _PHASE_BTN_FILL[1]):
+            continue
+        if not (_PHASE_BTN_H[0] <= bh * inv / ih <= _PHASE_BTN_H[1]):
+            continue
+        cx = cen[i][0] * inv / iw
+        cy = y_off + cen[i][1] * inv / ih
+        if not (_PHASE_BTN_X[0] <= cx <= _PHASE_BTN_X[1]):
+            continue
+        if not (_PHASE_BTN_Y[0] <= cy <= _PHASE_BTN_Y[1]):
+            continue
+        out.append({"x": cx, "y": cy, "ar": ar, "area": area * inv * inv})
+    return out
+
+
 class TencentGridDetector(Detector):
     # 类属性兜底：没调用过 set_platform_styles 时（比如牌河探针、离线单测直接
     # new 实例）语义等于“不放开字牌”，与历史行为一致。
@@ -1053,9 +1296,24 @@ class TencentGridDetector(Detector):
         return lbl, sc
 
     def is_dingque_phase(self, image_bgr: np.ndarray) -> bool:
-        """精准检测腾讯欢乐麻将『定缺中..』选门阶段（中央出现万/条/筒三大色盘按钮）"""
+        """检测「定缺选门」阶段（屏幕上出现万/条/筒三个大色盘供玩家选一个）。
+
+        两条通路，任一成立即命中：
+          1) 跨平台几何通路（新）：整屏找「一行三个同尺寸、异色、共线的圆盘」。
+             不预设花色左右顺序、不预设绝对 y 带 —— 各家平台把三个盘摆在
+             y≈0.62~0.66、顺序任意排列（实测见 `_PHASE_DISC_W` 上方那段）。
+          2) 腾讯专用通路（旧）：固定取区 + 四条颜色顺序判据。实测新通路已能
+             覆盖 9/9 腾讯定缺帧，但旧通路不删：新几何是在 57 帧上标的，拿一个
+             没量过的分辨率去赌「新的一定包含旧的」不值得。
+        """
         if image_bgr is None or image_bgr.size == 0:
             return False
+        # --- 1) 跨平台几何 ---
+        discs = _find_phase_discs(image_bgr)
+        if discs and _phase_disc_row_in_band(
+                _phase_disc_row(discs, _PHASE_DISC_TRIPLE_GAP, 0.035)):
+            return True
+        # --- 2) 腾讯旧取区 ---
         ih, iw = image_bgr.shape[:2]
         # 定缺选门色盘按钮位于中央区域 (y: 40%~75%, x: 25%~75%)
         sub = image_bgr[int(ih * 0.40):int(ih * 0.75), int(iw * 0.25):int(iw * 0.75)]
@@ -1215,6 +1473,11 @@ class TencentGridDetector(Detector):
         """
         if image_bgr is None or image_bgr.size == 0:
             return False
+        # 跨平台通路：整屏找「扁而实的金色确认按钮」。途游的「确定(2)」在 y≈0.68、
+        # JJ 的「换牌」在 y≈0.65，都不在腾讯那条 y74%~88% 低带里（实测见
+        # `_PHASE_BTN_AR` 上方），只看低带就必然漏这两家。
+        if _find_phase_gold_buttons(image_bgr):
+            return True
         ih, iw = image_bgr.shape[:2]
         # 换牌按钮专属低带：紧贴手牌行上方；杠/碰/胡动作按钮在牌河中带（y≈0.68），在窗外
         gold_zone = image_bgr[int(ih * 0.74):int(ih * 0.88), int(iw * 0.64):int(iw * 0.78)]

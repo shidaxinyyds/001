@@ -1917,10 +1917,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               Flexible(
                 child: Text(
                   _projectionStopped
-                      ? '采集已停止，请重新开始识别'
+                      ? '推演流已挂起 · 待命'
                       : (signalLost
-                          ? '信号中断，等待画面…'
-                          : (result?['status'] == 'waiting' ? '等待对局…' : '实时分析…')),
+                          ? '捕获流等待中 · 待命'
+                          : (result?['status'] == 'waiting' ? '对局接入中 · 待命' : '实时推演流进行中')),
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     color: signalLost ? Colors.white24 : Colors.white38,
@@ -2359,11 +2359,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
               ),
               child: Row(
                 children: [
-                  const Icon(Icons.warning_amber_rounded, color: Color(0xFFFFB74D), size: 12),
+                  const Icon(Icons.info_outline_rounded, color: Color(0xFFFFB74D), size: 12),
                   const SizedBox(width: 4),
                   Expanded(
                     child: Text(
-                      '手牌仅 $count 张：若被悬浮窗压住，请上移避免遮挡！',
+                      '手牌感应 $count 张 · 请避免视窗遮挡牌面',
                       style: const TextStyle(
                         color: Color(0xFFFFD54F),
                         fontSize: 8.5,
@@ -3270,21 +3270,21 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final isDrawing = res['is_drawing'] == true;
     final shanten = res['shanten'] as int?;
     final bestCn = best.isNotEmpty ? tileToChinese(best) : '';
-    if (res['swap_phase'] == true || status == 'swap') return '准备评估手牌换出三张同门牌，优化起手结构';
-    if (res['dingque_phase'] == true || status == 'dingque') return '正在评估各门手牌厚度，准备打缺牌张最少的一门';
-    if (res['pick_phase'] == true || status == 'pick') return '正在识别候选牌张，请在界面弹窗中确认选牌';
+    if (res['swap_phase'] == true || status == 'swap') return '换三张博弈：优选同门弱牌置换';
+    if (res['dingque_phase'] == true || status == 'dingque') return '定缺决断：规避冲突锁定极小门';
+    if (res['pick_phase'] == true || status == 'pick') return '候选牌张捕获：等待选定牌张';
     if (status == 'waiting' || status == 'no_tiles' || count == 0) return '';
     if (isDrawing) {
       if (shanten == 0) {
-        return bestCn.isNotEmpty ? '建议切【$bestCn】，锁定听牌胜势，静候胡牌' : '当前已听牌，选择最优叫口锁定胜势';
+        return bestCn.isNotEmpty ? '推荐切【$bestCn】· 锁定最优叫口' : '已入听 · 锁定最优和牌路径';
       }
       if (shanten == 1) {
-        return bestCn.isNotEmpty ? '建议切【$bestCn】，拆解孤牌全力冲刺听牌' : '全力冲刺听牌，保留核心好搭';
+        return bestCn.isNotEmpty ? '推荐切【$bestCn】· 拆搭冲刺下叫' : '一向听 · 拆解孤弱冲刺听牌';
       }
       return '';
     } else {
-      if (shanten == 0) return '当前已下叫听牌！阵型稳固，静候胡牌张';
-      if (shanten == 1) return '等待下轮摸牌，一摸关键张即刻下叫冲刺';
+      if (shanten == 0) return '已听牌 · 待和或防守巡检';
+      if (shanten == 1) return '一向听 · 进张通道推演中';
       return '';
     }
   }
@@ -3615,17 +3615,15 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       }
       final String hint;
       if (status == 'waiting' || (!inMatch && count == 0)) {
-        hint = '等待牌局开始（进入游戏后自动识别）';
+        hint = '等待对局接入 · 实时感知待命';
       } else if (status == 'animation' ||
           status == 'py_error' ||
           status == 'decode_error') {
-        // 瞬态帧（动画突变 / 解码失败 / 引擎异常）：绝不把识别抖动归咎于用户遮挡，
-        // 保持中性「识别中」，消除「不需要时却持续显示错误信息」的观感。
-        hint = '画面识别中，请稍候…';
+        hint = '画面帧流同步中…';
       } else if (count > 0) {
-        hint = '手牌识别中，正在推演建议…';
+        hint = '手牌解析中 · 决策核推演中…';
       } else {
-        hint = '未检测到有效手牌，正在重新对齐…';
+        hint = '检索有效手牌中 · 边缘自适应对齐';
       }
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,

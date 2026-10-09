@@ -163,9 +163,9 @@ class _DeviceInfoCardState extends State<DeviceInfoCard>
           AppTokens.s16, AppTokens.s12, AppTokens.s12, AppTokens.s12),
       decoration: BoxDecoration(
         color: AppTokens.surface,
-        borderRadius: AppTokens.radius16,
-        border: Border.all(color: _kBorder, width: 1.0),
-        boxShadow: AppTokens.soft,
+        borderRadius: BorderRadius.circular(AppTokens.r14),
+        border: Border.all(color: _kBorder, width: 0.9),
+        boxShadow: AppTokens.card,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -175,7 +175,7 @@ class _DeviceInfoCardState extends State<DeviceInfoCard>
               const Icon(Icons.memory_rounded, size: 16, color: _kAccent),
               const SizedBox(width: 6),
               const Text(
-                '设备信息',
+                '硬件遥测与运行环境',
                 style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w700,
@@ -189,7 +189,7 @@ class _DeviceInfoCardState extends State<DeviceInfoCard>
                   '更新于 ${_hhmm(_updatedAt!)}',
                   style: TextStyle(
                     fontSize: 10.5,
-                    color: AppTokens.faint.withAlpha(204), // alpha 0.8（3.13 兼容）
+                    color: AppTokens.faint.withAlpha(204), // alpha 0.8
                   ),
                 ),
               IconButton(
@@ -210,11 +210,11 @@ class _DeviceInfoCardState extends State<DeviceInfoCard>
               ),
             ],
           ),
-          const SizedBox(height: 2),
-          _row(Icons.phone_android_rounded, '系统', _os),
-          _row(Icons.devices_other_rounded, '机型', _brandModel),
-          _row(Icons.wifi_rounded, '网络', _network),
-          _row(Icons.monitor_rounded, '屏幕', '$_screen · $_dpi'),
+          const SizedBox(height: 4),
+          _row(Icons.phone_android_rounded, '系统内核', _os),
+          _row(Icons.devices_other_rounded, '机型规格', _brandModel),
+          _row(Icons.wifi_rounded, '网络链路', _network),
+          _row(Icons.monitor_rounded, '屏幕配置', '$_screen · $_dpi'),
           _overlayRow(),
         ],
       ),
@@ -224,14 +224,14 @@ class _DeviceInfoCardState extends State<DeviceInfoCard>
   Widget _row(IconData icon, String label, String value,
       {Color? valueColor}) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4.5),
+      padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, size: 15, color: AppTokens.muted),
+          Icon(icon, size: 14.5, color: AppTokens.muted),
           const SizedBox(width: 8),
           SizedBox(
-            width: 40,
+            width: 54,
             child: Text(
               label,
               style: const TextStyle(fontSize: 12, color: _kTextMuted),
@@ -259,14 +259,14 @@ class _DeviceInfoCardState extends State<DeviceInfoCard>
   Widget _overlayRow() {
     final bool? g = _overlayGranted;
     final String text =
-        g == null ? '检测中…' : (g ? '已授权' : '未授权');
+        g == null ? '检测中…' : (g ? '● 已就绪' : '○ 需授权');
     final Color color = g == null
         ? _kTextMuted
         : (g ? AppTokens.successDark : AppTokens.danger);
     final IconData icon = g == null
         ? Icons.shield_outlined
         : (g ? Icons.verified_user_rounded : Icons.gpp_maybe_rounded);
-    return _row(icon, '悬浮窗', text, valueColor: color);
+    return _row(icon, '悬浮权限', text, valueColor: color);
   }
 
   static String _hhmm(DateTime t) {

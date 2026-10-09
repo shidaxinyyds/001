@@ -634,12 +634,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       SnackBar(
         content: Row(
           children: [
-            const Icon(Icons.check_circle_rounded, color: Colors.white, size: 18),
+            const Icon(Icons.verified_user_rounded, color: Colors.white, size: 18),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                '对局信息已确认（$platLabel · $idDisplay），可开启悬浮窗',
-                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                '配置已锁定（$platLabel · $idDisplay）· 推演就绪',
+                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
               ),
             ),
           ],
@@ -661,32 +661,63 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         backgroundColor: AppTokens.surface,
         elevation: 0,
         scrolledUnderElevation: 0,
-        titleSpacing: 20,
+        titleSpacing: 18,
         systemOverlayStyle: SystemUiOverlayStyle.dark,
         title: Row(
           children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
+              decoration: BoxDecoration(
+                color: AppTokens.ink,
+                borderRadius: BorderRadius.circular(AppTokens.r6),
+              ),
+              child: const Text(
+                'ACE',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  color: Colors.white,
+                  letterSpacing: 1.0,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
             const Text(
-              "Ace Mahjong",
+              'MAHJONG',
               style: TextStyle(
-                fontSize: 19,
-                fontWeight: FontWeight.w700,
-                color: _kTextMain,
-                letterSpacing: -0.3,
+                fontSize: 16,
+                fontWeight: FontWeight.w800,
+                color: AppTokens.ink,
+                letterSpacing: 0.6,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+              decoration: BoxDecoration(
+                color: AppTokens.brandContainer,
+                borderRadius: BorderRadius.circular(AppTokens.r6),
+                border: Border.all(color: AppTokens.brand.withAlpha(60), width: 0.6),
+              ),
+              child: const Text(
+                'PRO',
+                style: TextStyle(
+                  fontSize: 9.5,
+                  fontWeight: FontWeight.w800,
+                  color: AppTokens.brandDark,
+                  letterSpacing: 0.5,
+                ),
               ),
             ),
             const Spacer(),
             AnimatedContainer(
-              duration: const Duration(milliseconds: 260),
-              curve: Curves.easeOut,
-              padding: const EdgeInsets.symmetric(
-                  horizontal: AppTokens.s12, vertical: 5),
+              duration: const Duration(milliseconds: 240),
+              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4.5),
               decoration: BoxDecoration(
                 color: isProcessing ? AppTokens.successBg : AppTokens.pillBg,
-                borderRadius: BorderRadius.circular(AppTokens.rPill),
+                borderRadius: BorderRadius.circular(AppTokens.r8),
                 border: Border.all(
-                  color: isProcessing
-                      ? AppTokens.successBorder
-                      : AppTokens.border,
+                  color: isProcessing ? AppTokens.successBorder : AppTokens.border,
                   width: 0.8,
                 ),
               ),
@@ -694,25 +725,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   AnimatedContainer(
-                    duration: const Duration(milliseconds: 260),
-                    width: 7,
-                    height: 7,
+                    duration: const Duration(milliseconds: 240),
+                    width: 6,
+                    height: 6,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      color: isProcessing
-                          ? AppTokens.success
-                          : AppTokens.faint,
+                      color: isProcessing ? AppTokens.success : AppTokens.faint,
                     ),
                   ),
-                  const SizedBox(width: 6),
+                  const SizedBox(width: 5),
                   Text(
-                    isProcessing ? "识别中" : "待命",
+                    isProcessing ? '推演中' : '待命',
                     style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: isProcessing
-                          ? AppTokens.successDark
-                          : AppTokens.muted,
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w700,
+                      color: isProcessing ? AppTokens.successDark : AppTokens.muted,
+                      letterSpacing: 0.2,
                     ),
                   ),
                 ],
@@ -873,8 +901,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        '请先在对局信息处点击【确定】确认平台与ID，再开启悬浮窗',
-                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                        '请先在上方锁定对局配置，再启动推演引擎',
+                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
                       ),
                     ),
                   ],
@@ -920,7 +948,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  // 游戏平台预设快速切换栏（大尺寸卡片，舒适美观，视野开阔）
+  // 接入平台快速切换栏（工业仪表紧凑卡片）
   Widget _buildPlatformSelector() {
     final curPlatform = selectedPlatform ?? GamePlatform.defaultPlatform;
     final platInfo = GamePlatform.info(curPlatform);
@@ -933,18 +961,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           behavior: HitTestBehavior.opaque,
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 180),
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8.5),
             decoration: BoxDecoration(
               color: sel ? AppTokens.brandContainer : AppTokens.surface,
               borderRadius: BorderRadius.circular(AppTokens.r10),
               border: Border.all(
                 color: sel ? AppTokens.brand : AppTokens.border,
-                width: sel ? 1.5 : 0.8,
+                width: sel ? 1.2 : 0.8,
               ),
               boxShadow: sel
                   ? const [
                       BoxShadow(
-                        color: Color(0x150F766E),
+                        color: Color(0x120D9488),
                         blurRadius: 4,
                         offset: Offset(0, 1.5),
                       ),
@@ -955,9 +983,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 if (sel) ...[
-                  const Icon(Icons.check_circle_rounded,
-                      size: 14, color: AppTokens.brandDark),
-                  const SizedBox(width: 4),
+                  Container(
+                    width: 5,
+                    height: 5,
+                    decoration: const BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: AppTokens.brandDark,
+                    ),
+                  ),
+                  const SizedBox(width: 5),
                 ],
                 Flexible(
                   child: Text(
@@ -967,7 +1001,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     style: TextStyle(
                       fontSize: 12.5,
                       fontWeight: sel ? FontWeight.bold : FontWeight.w500,
-                      color: sel ? AppTokens.brandDark : AppTokens.ink,
+                      color: sel ? AppTokens.brandDark : AppTokens.ink2,
                     ),
                   ),
                 ),
@@ -987,27 +1021,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         color: AppTokens.surface,
         borderRadius: BorderRadius.circular(AppTokens.r14),
         border: Border.all(color: AppTokens.border, width: 0.9),
-        boxShadow: const [
-          BoxShadow(
-            color: Color(0x06000000),
-            blurRadius: 5,
-            offset: Offset(0, 2),
-          ),
-        ],
+        boxShadow: AppTokens.card,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              const Icon(Icons.devices_rounded, size: 17, color: AppTokens.brand),
+              const Icon(Icons.hub_rounded, size: 16, color: AppTokens.brand),
               const SizedBox(width: 7),
               const Text(
-                '游戏平台预设',
+                '接入平台',
                 style: TextStyle(
-                  fontSize: 14,
+                  fontSize: 13.5,
                   fontWeight: FontWeight.bold,
                   color: AppTokens.ink,
+                  letterSpacing: 0.2,
                 ),
               ),
               const Spacer(),
@@ -1017,13 +1046,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
                   decoration: BoxDecoration(
                     color: AppTokens.brandContainer,
-                    borderRadius: BorderRadius.circular(AppTokens.r8),
+                    borderRadius: BorderRadius.circular(AppTokens.r6),
+                    border: Border.all(
+                      color: AppTokens.brand.withAlpha(60),
+                      width: 0.6,
+                    ),
                   ),
                   child: Text(
                     platInfo.badge,
                     style: const TextStyle(
-                      fontSize: 10.5,
-                      fontWeight: FontWeight.bold,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
                       color: AppTokens.brandDark,
                     ),
                   ),
@@ -1031,7 +1064,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ],
           ),
           const SizedBox(height: 10),
-          // 平台大卡片 2 列排布，大按键、不截断、极易点击
+          // 平台大卡片 2 列排布，精整利落
           for (int i = 0; i < pList.length; i += 2) ...[
             if (i > 0) const SizedBox(height: 7),
             Row(
@@ -1045,35 +1078,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   const Spacer(),
                 ],
               ],
-            ),
-          ],
-          if (platInfo != null) ...[
-            const SizedBox(height: 10),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-              decoration: BoxDecoration(
-                color: AppTokens.pillBg,
-                borderRadius: BorderRadius.circular(AppTokens.r8),
-                border: Border.all(
-                    color: AppTokens.border.withAlpha(80), width: 0.5),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.crop_free_rounded,
-                      size: 14, color: AppTokens.brand),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      platInfo.subtitle,
-                      style: const TextStyle(
-                        fontSize: 11,
-                        color: AppTokens.ink2,
-                        height: 1.25,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
             ),
           ],
         ],
@@ -1107,15 +1111,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         children: [
           Row(
             children: [
-              const Icon(Icons.assignment_outlined,
-                  size: 17, color: AppTokens.brand),
+              const Icon(Icons.tune_rounded, size: 16, color: AppTokens.brand),
               const SizedBox(width: 7),
               const Text(
-                '对局信息',
+                '终端配置',
                 style: TextStyle(
-                  fontSize: 14,
+                  fontSize: 13.5,
                   fontWeight: FontWeight.bold,
                   color: AppTokens.ink,
+                  letterSpacing: 0.2,
                 ),
               ),
               const Spacer(),
@@ -1125,13 +1129,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
                 decoration: BoxDecoration(
                   color: AppTokens.brandContainer,
-                  borderRadius: BorderRadius.circular(AppTokens.r8),
+                  borderRadius: BorderRadius.circular(AppTokens.r6),
+                  border: Border.all(
+                    color: AppTokens.brand.withAlpha(60),
+                    width: 0.6,
+                  ),
                 ),
                 child: Text(
                   pInfo != null ? pInfo.name : cur,
                   style: const TextStyle(
-                    fontSize: 10.5,
-                    fontWeight: FontWeight.bold,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
                     color: AppTokens.brandDark,
                   ),
                 ),
@@ -1141,18 +1149,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           const SizedBox(height: 12),
           _buildFieldRow(label: '游戏平台', field: _buildPlatformField()),
           if (_platformNotice.isNotEmpty) ...[
-            const SizedBox(height: 5),
+            const SizedBox(height: 4),
             _buildNotice(_platformNotice),
           ],
-          const SizedBox(height: 10),
-          _buildFieldRow(label: '游戏ID', field: _buildGameIdField()),
+          const SizedBox(height: 9),
+          _buildFieldRow(label: '对局ID', field: _buildGameIdField()),
           if (_gameIdNotice.isNotEmpty) ...[
-            const SizedBox(height: 5),
+            const SizedBox(height: 4),
             _buildNotice(_gameIdNotice),
           ],
-          const SizedBox(height: 12),
+          const SizedBox(height: 11),
           _buildConfirmButton(),
-          const SizedBox(height: 12),
+          const SizedBox(height: 11),
           Row(
             children: [
               Expanded(child: _buildOddsToggleCard('mood')),
@@ -1161,11 +1169,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ],
           ),
           if (_showMoodOdds) ...[
-            const SizedBox(height: 10),
+            const SizedBox(height: 9),
             const _OddsResultView(tab: 'mood'),
           ],
           if (_showTileOdds) ...[
-            const SizedBox(height: 10),
+            const SizedBox(height: 9),
             const _OddsResultView(tab: 'tile'),
           ],
         ],
@@ -1177,41 +1185,43 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Widget _buildConfirmButton() {
     return SizedBox(
       width: double.infinity,
-      height: 40,
+      height: 38,
       child: _isConfigConfirmed
           ? OutlinedButton.icon(
               onPressed: _confirmMatchConfig,
-              icon: const Icon(Icons.check_circle_rounded,
-                  size: 16, color: AppTokens.brandDark),
+              icon: const Icon(Icons.verified_user_rounded,
+                  size: 15, color: AppTokens.brandDark),
               label: const Text(
-                '已确定平台与游戏ID · 点击可重新确定',
+                '对局配置已锁定 · 就绪',
                 style: TextStyle(
                   fontSize: 12.5,
-                  fontWeight: FontWeight.w600,
+                  fontWeight: FontWeight.w700,
                   color: AppTokens.brandDark,
+                  letterSpacing: 0.3,
                 ),
               ),
               style: OutlinedButton.styleFrom(
                 backgroundColor: AppTokens.brandContainer,
                 side: BorderSide(
-                  color: AppTokens.brand.withAlpha(140),
+                  color: AppTokens.brand.withAlpha(120),
                   width: 1,
                 ),
                 shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(AppTokens.r10),
+                  borderRadius: BorderRadius.circular(AppTokens.r8),
                 ),
               ),
             )
           : FilledButton.icon(
               onPressed: _confirmMatchConfig,
-              icon: const Icon(Icons.check_rounded, size: 17, color: Colors.white),
+              icon: const Icon(Icons.lock_outline_rounded,
+                  size: 15, color: Colors.white),
               label: const Text(
-                '确 定（保存对局信息）',
+                '锁 定 对 局 配 置',
                 style: TextStyle(
-                  fontSize: 13.5,
-                  fontWeight: FontWeight.bold,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
                   color: Colors.white,
-                  letterSpacing: 0.5,
+                  letterSpacing: 0.6,
                 ),
               ),
               style: FilledButton.styleFrom(
@@ -1219,7 +1229,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 foregroundColor: Colors.white,
                 elevation: 0,
                 shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(AppTokens.r10),
+                  borderRadius: BorderRadius.circular(AppTokens.r8),
                 ),
               ),
             ),
@@ -1286,7 +1296,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       onChanged: _onPlatformQueryChanged,
       onSubmitted: _onPlatformQuerySubmitted,
       style: const TextStyle(fontSize: 13, color: _kTextMain),
-      decoration: _fieldDecoration('请输入游戏平台'),
+      decoration: _fieldDecoration('选择或搜索平台'),
     );
   }
 
@@ -1302,7 +1312,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9_\-]')),
         LengthLimitingTextInputFormatter(SessionStore.maxLen),
       ],
-      decoration: _fieldDecoration('请输入游戏ID'),
+      decoration: _fieldDecoration('对局/玩家ID (选填)'),
     );
   }
 
@@ -1378,13 +1388,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Icon(
-                  mood ? Icons.auto_awesome_rounded : Icons.percent_rounded,
+                  mood ? Icons.auto_awesome_rounded : Icons.analytics_outlined,
                   size: 15,
                   color: active ? AppTokens.brandDark : AppTokens.muted,
                 ),
                 const SizedBox(width: 5),
                 Text(
-                  mood ? '运势概率' : '好牌概率',
+                  mood ? '气运推演' : '进张期望',
                   style: TextStyle(
                     fontSize: 12.5,
                     fontWeight: active ? FontWeight.bold : FontWeight.w500,
@@ -1528,32 +1538,38 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
-  // 核心主操作按钮
+  // 核心主操作按钮（高可靠工业操作键）
   Widget _buildActionButton(bool canStart, String mode) {
     Color btnColor;
     String btnText;
+    IconData btnIcon;
 
     if (isProcessing) {
       btnColor = AppTokens.danger;
-      btnText = '停止悬浮窗';
+      btnText = '停止推演引擎';
+      btnIcon = Icons.stop_circle_outlined;
     } else if (_overlayBusy) {
-      btnColor = _kAccent.withAlpha(179); // alpha 0.7（CI 锁 Flutter 3.13，禁用 withValues）
-      btnText = '开启中…';
+      btnColor = _kAccent.withAlpha(179); // alpha 0.7（CI 锁 Flutter 3.13）
+      btnText = '引擎接入中…';
+      btnIcon = Icons.hourglass_top_rounded;
     } else if (canStart) {
       if (!_isConfigConfirmed) {
-        btnColor = const Color(0xFF0D9488).withAlpha(190);
-        btnText = '开启悬浮窗（请先在上方点击确定）';
+        btnColor = AppTokens.brandDark.withAlpha(200);
+        btnText = '启动实时推演 (待锁定配置)';
+        btnIcon = Icons.lock_outline_rounded;
       } else {
         btnColor = _kAccent;
-        btnText = '开启悬浮窗';
+        btnText = '启动实时推演引擎';
+        btnIcon = Icons.sensors_rounded;
       }
     } else {
       btnColor = AppTokens.borderStrong;
-      btnText = mode.isEmpty ? '请先选择上方玩法' : '开启悬浮窗';
+      btnText = mode.isEmpty ? '请选择上方玩法' : '启动实时推演';
+      btnIcon = Icons.play_arrow_rounded;
     }
 
     return SizedBox(
-      height: 50,
+      height: 48,
       child: FilledButton(
         onPressed:
             (isProcessing || canStart) && !_overlayBusy ? _toggleProcessing : null,
@@ -1563,17 +1579,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           foregroundColor: Colors.white,
           elevation: 0,
           shape: RoundedRectangleBorder(
-            borderRadius: AppTokens.radius12,
+            borderRadius: AppTokens.radius10,
           ),
         ),
-        child: Text(
-          btnText,
-          style: const TextStyle(
-            fontSize: 16,
-            fontWeight: FontWeight.w600,
-            color: Colors.white,
-            letterSpacing: 0.5,
-          ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(btnIcon, size: 18, color: Colors.white),
+            const SizedBox(width: 8),
+            Text(
+              btnText,
+              style: const TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w700,
+                color: Colors.white,
+                letterSpacing: 0.5,
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -1596,22 +1619,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return Center(
       key: const ValueKey<String>('idle'),
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 6),
+        padding: const EdgeInsets.symmetric(vertical: 5),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
-              Icons.check_circle_outline_rounded,
+              Icons.radar_rounded,
               size: 13,
-              color: AppTokens.faint.withAlpha(166), // alpha 0.65（3.13 兼容）
+              color: AppTokens.brand.withAlpha(180),
             ),
-            const SizedBox(width: 5),
-            Text(
-              '支持主流麻将玩法 · 开启后悬浮窗自动跟随推演',
+            const SizedBox(width: 6),
+            const Text(
+              '视觉感知核待命 · 本地推理流就绪',
               style: TextStyle(
                 fontSize: 11.5,
-                color: AppTokens.faint.withAlpha(204), // alpha 0.8（3.13 兼容）
-                letterSpacing: 0.2,
+                fontWeight: FontWeight.w500,
+                color: AppTokens.muted,
+                letterSpacing: 0.3,
               ),
             ),
           ],
@@ -1678,45 +1702,39 @@ class _RecognitionStatusViewState extends State<_RecognitionStatusView> {
       case 'ok':
         final String sh = _recogShanten == null
             ? ''
-            : (_recogShanten == 0 ? '（听牌）' : '（$_recogShanten 向听）');
-        return '✓ 已识别 $_recogCount 张$sh\n$_recogHand';
+            : (_recogShanten == 0 ? ' [ 听牌 ]' : ' [ ${_recogShanten}向听 ]');
+        return '锁定有效手牌 $_recogCount 张$sh\n$_recogHand';
       case 'incomplete':
-        return '识别到 $_recogCount 张，需 13/14 张才完整\n（确认牌面完整、没有被遮挡）';
+        return '手牌解析中 (已捕获 $_recogCount/14 张)';
       case 'no_tiles':
-        return '未识别到牌面\n${_diagHint()}';
+        return '等待对局画面 · 未捕获有效手牌\n${_diagHint()}';
       case 'engine_ready':
-        return '识别引擎已就绪，等待画面…\n（若一直停在这里，说明采集不到屏幕画面）';
+        return '推演内核就绪 · 捕获流等待中';
       case 'no_frames':
-        return '已授权录屏，但未采集到画面\n'
-            '（切到牌局稍等几秒；屏幕完全静止时也属正常；\n'
-            '若持续如此说明录屏会话已失效，请"停止识别"后重新开始）';
+        return '画面流暂无变化 · 录屏捕获中';
       case 'projection_stopped':
-        return '录屏会话被系统结束\n（锁屏/状态栏停止共享/被其它录屏抢占）\n请重新点"开始识别"';
+        return '捕获会话已断开 · 请重新启动';
       case 'send_error':
-        return '识别结果发送失败\n（悬浮窗数据链路断开，请停止后重新开始）';
+        return '数据链路通信异常';
       case 'py_error':
       case 'decode_error':
       case 'java_error':
       case 'capture_error':
       case 'start_failed':
-        return '识别链路异常\n$_recogMessage';
+        return '推理引擎异常: $_recogMessage';
       default:
-        return '正在等待第一帧识别结果…';
+        return '感知传感器初始化中…';
     }
   }
 
-  // 识别不出牌时，把"匹配分/分辨率"摆出来，一眼能区分
-  // 是没截到屏、屏幕里没牌，还是牌面样式跟模板不匹配
+  // 仪表遥测诊断读数
   String _diagHint() {
-    final String scr = _recogScreen.isEmpty ? '未知' : _recogScreen;
+    final String scr = _recogScreen.isEmpty ? '—' : _recogScreen;
     final String score = _recogTopScore.toStringAsFixed(2);
     if (_recogScreen.isEmpty) {
-      return '（还没收到第一帧，确认已授权录屏并打开牌局）';
+      return '帧缓冲就绪 · 等待画面注入';
     }
-    if (_recogTopScore < 0.20) {
-      return '屏幕 $scr｜匹配分 $score\n屏幕里没找到牌，确认已打开牌局且手牌可见';
-    }
-    return '屏幕 $scr｜匹配分 $score\n有牌但匹配分偏低：本 App 的牌面样式与内置模板差异较大';
+    return '画面分辨率 $scr · 匹配置信度 $score';
   }
 
   @override

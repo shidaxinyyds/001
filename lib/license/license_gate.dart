@@ -279,16 +279,15 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
     final bool isRefused = status == LicenseStatus.refused;
     final String prompt;
     if (isLocked) {
-      prompt = '输错次数过多，安全冷却保护中（剩余 $remLock 秒）';
+      prompt = '安全防护模式已生效 · 冷却剩余 ${remLock}s';
     } else if (isExpired) {
-      prompt = '卡密授权已到期，请输入新卡密激活';
+      prompt = '授权凭证已到期 · 请输入有效卡密';
     } else if (isRefused) {
-      prompt = st?.message ?? '授权校验未通过，请重新输入卡密激活';
+      prompt = st?.message ?? '凭证核验未通过 · 请输入有效卡密';
     } else {
-      prompt = '输入卡密开始使用（一卡绑一台设备）';
+      prompt = '请输入授权卡密完成本机硬件指纹绑定';
     }
     return Scaffold(
-      // 明亮商务底：极淡的品牌青向下过渡到近白，营造高级感而不喧宾夺主。
       backgroundColor: AppTokens.bg,
       body: SafeArea(
         child: DecoratedBox(
@@ -309,7 +308,7 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
                   padding: const EdgeInsets.all(AppTokens.s24),
                   decoration: BoxDecoration(
                     color: AppTokens.surface,
-                    borderRadius: AppTokens.radius20,
+                    borderRadius: AppTokens.radius16,
                     border: Border.all(color: AppTokens.border),
                     boxShadow: AppTokens.raised,
                   ),
@@ -317,38 +316,40 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      // 品牌标识：圆形 tonal 容器承托图标，形成记忆点。
+                      // 终端安全徽标
                       Align(
                         alignment: Alignment.center,
                         child: Container(
-                          width: 72,
-                          height: 72,
+                          width: 64,
+                          height: 64,
                           decoration: const BoxDecoration(
                             color: AppTokens.brandContainer,
                             shape: BoxShape.circle,
                           ),
-                          child: const Icon(Icons.workspace_premium_outlined,
-                              size: 38, color: AppTokens.brandDark),
+                          child: const Icon(Icons.security_rounded,
+                              size: 32, color: AppTokens.brandDark),
                         ),
                       ),
-                      const SizedBox(height: AppTokens.s20),
+                      const SizedBox(height: AppTokens.s16),
                       const Text(
-                        '激活授权',
+                        '终端安全认证',
                         textAlign: TextAlign.center,
                         style: TextStyle(
-                            fontSize: 24,
+                            fontSize: 22,
                             fontWeight: FontWeight.w800,
                             color: AppTokens.ink,
-                            letterSpacing: 0.5),
+                            letterSpacing: 0.8),
                       ),
-                      const SizedBox(height: AppTokens.s8),
+                      const SizedBox(height: AppTokens.s6),
                       Text(
                         prompt,
                         textAlign: TextAlign.center,
                         style: const TextStyle(
-                            fontSize: 13, color: AppTokens.muted),
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w500,
+                            color: AppTokens.muted),
                       ),
-                      const SizedBox(height: AppTokens.s24),
+                      const SizedBox(height: AppTokens.s20),
                       TextField(
                         controller: _code,
                         enabled: !_busy && !isLocked,
@@ -357,68 +358,91 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
                         textCapitalization: TextCapitalization.characters,
                         keyboardType: TextInputType.text,
                         inputFormatters: [
-                          // 仅放行字母/数字/连字符，杜绝输入法塞入中文或空白。
                           FilteringTextInputFormatter.allow(
                               RegExp(r'[A-Za-z0-9\-]')),
                         ],
                         decoration: InputDecoration(
-                          hintText: '例如 MJ-XXXX-XXXX-XXXX-XXXX',
-                          prefixIcon: const Icon(Icons.vpn_key_outlined,
-                              color: AppTokens.faint),
+                          hintText: '输入授权卡密 (如 MJ-XXXX-...)',
+                          hintStyle: const TextStyle(
+                              fontSize: 13.5, color: AppTokens.faint),
+                          prefixIcon: const Icon(Icons.key_rounded,
+                              size: 19, color: AppTokens.faint),
+                          suffixIcon: IconButton(
+                            icon: const Icon(Icons.content_paste_rounded,
+                                size: 18, color: AppTokens.brand),
+                            tooltip: '粘贴',
+                            onPressed: () async {
+                              final data = await Clipboard.getData('text/plain');
+                              if (data != null && (data.text?.isNotEmpty ?? false)) {
+                                _code.text = data.text!.trim();
+                              }
+                            },
+                          ),
                           border: OutlineInputBorder(
-                              borderRadius: AppTokens.radius12),
+                              borderRadius: AppTokens.radius10),
                           enabledBorder: OutlineInputBorder(
-                              borderRadius: AppTokens.radius12,
+                              borderRadius: AppTokens.radius10,
                               borderSide:
                                   const BorderSide(color: AppTokens.border)),
                           focusedBorder: OutlineInputBorder(
-                              borderRadius: AppTokens.radius12,
+                              borderRadius: AppTokens.radius10,
                               borderSide: const BorderSide(
-                                  color: AppTokens.brand, width: 2)),
+                                  color: AppTokens.brand, width: 1.5)),
                         ),
                         style: const TextStyle(
-                            fontSize: 16,
+                            fontSize: 15,
                             letterSpacing: 1.2,
                             fontFamily: 'monospace',
                             color: AppTokens.ink),
                       ),
                       if (st?.message != null && !isExpired && !isRefused) ...[
-                        const SizedBox(height: AppTokens.s12),
+                        const SizedBox(height: AppTokens.s10),
                         Text(
                           st!.message!,
                           style: const TextStyle(
-                              color: AppTokens.danger, fontSize: 13),
+                              color: AppTokens.danger, fontSize: 12),
                         ),
                       ],
-                      const SizedBox(height: AppTokens.s20),
+                      const SizedBox(height: AppTokens.s16),
                       SizedBox(
-                        height: 50,
+                        height: 48,
                         child: FilledButton(
                           onPressed: (_busy || isLocked) ? null : _activate,
                           style: FilledButton.styleFrom(
                             backgroundColor: isLocked ? AppTokens.borderStrong : AppTokens.brand,
                             foregroundColor: Colors.white,
+                            elevation: 0,
                             shape: RoundedRectangleBorder(
-                                borderRadius: AppTokens.radius12),
+                                borderRadius: AppTokens.radius10),
                           ),
                           child: _busy
                               ? const SizedBox(
-                                  width: 22,
-                                  height: 22,
+                                  width: 20,
+                                  height: 20,
                                   child: CircularProgressIndicator(
-                                      strokeWidth: 2.5, color: Colors.white))
-                              : Text(isLocked ? '安全冷却中 (${remLock}s)' : '激活',
+                                      strokeWidth: 2.2, color: Colors.white))
+                              : Text(isLocked ? '安全保护锁定 (${remLock}s)' : '验 证 并 激 活',
                                   style: const TextStyle(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.w700)),
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.w700,
+                                      letterSpacing: 0.6)),
                         ),
                       ),
-                      const SizedBox(height: AppTokens.s16),
-                      const Text(
-                        '如提示联网失败，请检查网络后重试；卡密激活后即绑定本机。',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                            fontSize: 11.5, color: AppTokens.faint),
+                      const SizedBox(height: AppTokens.s14),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.shield_outlined,
+                              size: 13, color: AppTokens.faint),
+                          const SizedBox(width: 5),
+                          const Text(
+                            '硬件指纹单向哈希 · 离线签名加密',
+                            style: TextStyle(
+                                fontSize: 11,
+                                color: AppTokens.faint,
+                                letterSpacing: 0.2),
+                          ),
+                        ],
                       ),
                     ],
                   ),
