@@ -210,12 +210,10 @@ class TestModeGateWiring(unittest.TestCase):
                          "识别跑在玩法 reload 之前，用户声明的玩法被无视")
 
     def test_honors_exist_only_when_the_mode_allows_them(self):
-        """② 同一帧：全牌玩法读出字牌，川麻玩法读不出 —— 闸门的用户可见后果。"""
+        """② 全牌玩法必须读出屏上每一枚字牌（窄玩法那一半由 ②b 钉）。"""
         _s_full, panel_full = first_frame_valid_tiles(self.img, self.e["platform"], FULL_MODE)
-        _s_sc, panel_sc = first_frame_valid_tiles(
-            self.img, self.e["platform"], NO_HONOR_MODE)
         # 前提（不是空断言）：这帧的平台房卡里没这条窄牌集玩法——v1.7.5 之后引擎
-        # 不拦它、只提示，所以 ② 能直接走生产链路测窄闸门；若这对组合哪天进了
+        # 不拦它、只提示，所以 ②b 能直接走生产链路测窄闸门；若这对组合哪天进了
         # 房卡，本对照仍成立，但 ⑥ 的「未收录」那一面就少了个真夹具，得换帧。
         self.assertNotIn(NO_HONOR_MODE, PLATFORMS[self.e["platform"]]["supported_modes"],
                          "② 用窄牌集做对照的前提变了：这对组合已进了房卡清单")
@@ -224,25 +222,49 @@ class TestModeGateWiring(unittest.TestCase):
         for t in gt_honors:
             self.assertIn(t, panel_full,
                           f"玩法允许 {t} 却面板读不到（面板={panel_full}）：闸门之外的新问题")
-            self.assertNotIn(t, panel_sc,
-                             f"川麻牌集本应排除 {t}，面板却读出了它：闸门失效（{panel_sc}）")
         self.assertEqual(sorted(panel_full), sorted(self.e["hand"]),
                          f"全牌玩法下面板应逐位等于 GT，实为 {panel_full} vs {self.e['hand']}")
 
+    def test_out_of_gate_tiles_are_never_read_without_a_trail(self):
+        """②b 闸门外的牌要么不读，要么读了必须留痕（`hand_gate_conflict`）。
+
+        为什么不再断言「窄玩法必读不出字牌」：用户报的是「字牌认不出」，而「把屏上
+        明摆着的牌读对」不该以玩法为条件（v1.7.6 的 `_rescue_out_of_gate`）。但救回来的
+        每张都得能查到：没有留痕的门外读数就是面板凭空多出的牌，比少报更难发现。
+        """
+        d = run_payload(self.img, self.e["platform"], NO_HONOR_MODE)
+        panel = lc.canon_mpsz(d.get("hand", ""))
+        trail = {c[1] for c in (d.get("hand_gate_conflict") or [])}
+        gate = mode_labels(NO_HONOR_MODE)
+        outside_read = [t for t in panel if t not in gate]
+        self.assertTrue(outside_read,
+                        "这帧在窄玩法下没读到任何门外牌：本条退化成空断言，得换帧")
+        self.assertEqual(set(outside_read), set(outside_read) & trail,
+                         f"读到了闸门外的牌却没全部留痕：读到={outside_read} 留痕={trail}")
+        for t in trail:
+            self.assertNotIn(t, gate, f"留痕里的 {t} 本来就在牌集里：这条字段在测空气")
+            self.assertIn(t, set(self.e["hand"]),
+                          f"留痕说屏上有 {t}，人眼真值里却没有：救错了牌")
+        # 数牌一张不许因为这道补打分而变动：门外读数只允许是字牌
+        self.assertTrue(all(t.endswith("z") for t in trail),
+                        f"补打分把数牌也换掉了（这不是该救的形状）：{trail}")
+
     def test_sc_mode_gate_is_the_reason_for_the_84_gap(self):
-        """② 的量化版：川麻玩法下丢的必须**全是字牌**，补的**全是数牌**。
+        """② 的量化版：窄玩法相对全牌玩法的差额**只能落在字牌上**。
 
         这个形状是「玩法闸门」独有的指纹。哪天丢的是数牌，就不是这条链路，
-        得回头查识别/后处理，别把新问题塞进旧结论里。
+        得回头查识别/后处理，别把新问题塞进旧结论里。（v1.7.6 后差额可能为空——
+        那正是补打分把字牌救回来了，所以这里不再强求「必须丢牌」。）
         """
         _s, panel = first_frame_valid_tiles(
             self.img, self.e["platform"], NO_HONOR_MODE)
         want = self.e["hand"]
         lost = sorted(collections.Counter(want) - collections.Counter(panel))
         gained = sorted(collections.Counter(panel) - collections.Counter(want))
-        self.assertTrue(lost, "川麻玩法下没丢牌：闸门假设被否证，本守卫该重写")
-        self.assertTrue(all(t.endswith("z") for t in lost), f"丢的不全是字牌：{lost}")
-        self.assertTrue(all(not t.endswith("z") for t in gained), f"补的不全是数牌：{gained}")
+        self.assertTrue(all(t.endswith("z") for t in lost),
+                        f"窄玩法丢掉了数牌（闸门不该影响数牌）：{lost}")
+        self.assertTrue(all(t.endswith("z") for t in gained),
+                        f"窄玩法凭空多出数牌：{gained}")
 
     def test_fixture_mode_selection_covers_the_gt(self):
         """③ 夹具侧：每帧声明的玩法必须装得下该帧 GT；装不下要留在台账里。"""
@@ -360,8 +382,8 @@ class TestModePlatformNote(unittest.TestCase):
                              f"{key} 的 default_mode 自己都被报未收录：玩法表不自洽")
 
     def test_real_frame_keeps_the_mode_and_says_it_out_loud(self):
-        """⑥ 的用户可见面：挂着「血流红中」的那帧——玩法照旧生效、标题多一句未收录、
-        而错声明导致的丢牌必须同时自报不可信（不许伪装成「读好了」）。"""
+        """⑥ 的用户可见面：挂着「血流红中」的那帧——玩法照旧生效、标题多一句未收录，
+        而屏上明摆着的 北/白板 必须被读回来并逐张留在 `hand_gate_conflict` 里。"""
         name, pf, mode, gt = QUESHEN_OFF_CATALOG
         d = run_payload(multi_frame(name), pf, mode)
         panel = lc.canon_mpsz(d.get("hand", ""))
@@ -371,17 +393,18 @@ class TestModePlatformNote(unittest.TestCase):
                          "房卡外的玩法必须报出来，否则面板与实桌不一致时没人知道从哪查")
         self.assertIn("未收录", d.get("mode_name", ""),
                       f"标题必须把这件事说出口，实为「{d.get('mode_name')}」")
-        # 窄闸门的后果（川麻牌集不含北/白板）：钉住它，是为了不许有人拿「把引擎
-        # 改回静默替换」当捷径——那等于把用户的声明当噪声。
-        self.assertNotIn("4z", panel, f"{name} 在 sc_hz 闸门下不应读出北：{panel}")
-        self.assertEqual(panel.count("5z"), 0, f"{name} 在 sc_hz 闸门下不应读出白板：{panel}")
-        self.assertNotEqual(panel, sorted(gt),
-                            f"声明错了却被读对了？那本帧对照不成立，重写它：{panel}")
-        # 但错读不许装确定：那几张被强贴的牌必须自报不可信、且本帧不给建议。
-        self.assertTrue(d.get("hand_uncertain"),
-                        f"{name} 牌集与牌桌不符却未自报不可信：面板在拿一行错牌给建议")
-        self.assertEqual(d.get("advice") or [], [],
-                         "已自报不可信却仍给建议：可读性硬门没接上")
+        # v1.7.6：错玩法不再拿用户的牌当代价——屏上的 北 与 4 张白板必须读回来，
+        # 并且每一张都得在留痕里（否则就是“面板凭空多出字牌”那种更难发现的坑）。
+        self.assertIn("4z", panel, f"{name} 屏上有北却没读回来：{panel}")
+        self.assertEqual(panel.count("5z"), 4, f"{name} 屏上有 4 张白板：{panel}")
+        self.assertEqual(panel, sorted(gt),
+                         f"{name} 面板应逐张等于人眼真值 {sorted(gt)}，实为 {panel}")
+        trail = {c[1] for c in (d.get("hand_gate_conflict") or [])}
+        # 川麻牌集只放开 7z，所以这帧上被救回来的只可能是 北(4z) 与 白板(5z)。
+        self.assertEqual(trail, {"4z", "5z"},
+                         f"留痕与读数对不上：读到={panel} 留痕={trail}")
+        self.assertEqual(int(d.get("hand_missing") or 0), 0,
+                         "读完了却还报「有框没读出」：两条口径在打架")
 
 
 class TestMutationControls(unittest.TestCase):
@@ -442,10 +465,11 @@ class TestMutationControls(unittest.TestCase):
                          "gd_queshen 已按 D2 修好，不该再躺在待裁决台账里")
 
     def test_mutant_shrunk_gd_hz_gate_breaks_5(self):
-        """变异体 = 把 gd_hz 牌集改回 `range(27)+[33]`（P2-A 前），⑤必须报红。
+        """变异体 = 把 gd_hz 牌集改回 `range(27)+[33]`（P2-A 前），⑤ 必须报红。
 
-        不能只看「牌集长回去了」——必须在真帧上把北弄丢，才能证明 ⑤ 真的在测
-        闸门到面板的那条链路，而不是在抄一遍表。
+        v1.7.6 之后“北掉出去”不再是可观察后果（补打分把它救回来），可观察的是：
+        牌集一旦变窄，北 就从「合法读数」变成「门外读数」——它必须出现在留痕里。
+        没留痕只有两种可能：牌集根本没进闸门，或者闸门失效。两者都得红。
         """
         name, pf, mode, gt = QUESHEN_HZ
         entry_m = M.MODES["gd_hz"]
@@ -457,10 +481,10 @@ class TestMutationControls(unittest.TestCase):
         finally:
             entry_m["available"], entry_m["wall"] = orig_avail, orig_wall
         panel = lc.canon_mpsz(d.get("hand", ""))
-        self.assertNotIn("4z", panel,
-                         f"闸门改回窄牌集后面板仍读到了北（{panel}）：⑤ 在测空气")
-        self.assertNotEqual(panel, sorted(gt),
-                            "窄牌集与全牌牌集给出同一行手牌：识别根本没走 available_set")
+        trail = {c[1] for c in (d.get("hand_gate_conflict") or [])}
+        self.assertIn("4z", trail,
+                      f"闸门改回窄牌集后，北 既没被挡在外面也没留痕（面板={panel} "
+                      f"留痕={trail}）：⑤ 在测空气，available_set 根本没进闸门")
 
     def test_mutant_silenced_note_breaks_6(self):
         """变异体 = 把「未收录」提示算成永远为空，⑥ 必须报红。"""

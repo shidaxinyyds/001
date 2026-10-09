@@ -1372,6 +1372,80 @@ RIVER_REGRET_FRAMES = 5
 # 抓不住它 —— 抓得住的那张足以把「这帧别信」说出口，剩下的记在守卫里当台账。
 HAND_UNREADABLE_CONF = 0.55
 
+# 手牌「放开闸门重打分」的三个门槛。全部来自实测（`localtest/probe_gate_rescue.py`：
+# 30 帧、逐枚同时记「闸门内 top1」与「全 34 top1」两份分数，共 381 枚）：
+#   真该救的只有 9 枚（广东雀神挂着川麻玩法时屏上的 東/北/北）：
+#     東：闸内 7z/0.522 → 全 34 1z/0.982（差 0.460）
+#     北：闸内 7s/0.374 → 全 34 4z/0.587（差 0.213）
+#   其余 372 枚的最优本来就在闸门内 —— 一次误接受都没有。
+# 触发线 0.62：被救的三枚在 0.52 以下，而读数全对的帧里最低那张是 0.588（多打一次
+# 分也不改变结论，只是多花几毫秒）。
+# 接受线 0.55 与 0.15：门外那张自己得够像（与 HAND_UNREADABLE_CONF 同一条线：低于
+# 它的读数不配当事实），且比闸内那个明显更像（实测最小差 0.213，留 1.4 倍余量）。
+# 代价量过了（`localtest/ab_gate_rescue.py`，同进程 old→new→old 三趟交替）：
+# 10 帧上中位 34.5→56.0ms（+21.5ms），最差帧 268→274ms（没变差）；第一趟的 737ms
+# 是 bank 首次加载的冷启动，不能当结论。触发线不敢降到 0.55 以下：被救的 東 在
+# 0.522，而读对的帧里最低那张是 0.588 —— 取 0.62 是「宁可多打一次分也不漏救」，
+# 多付的那一次只花几毫秒，漏救一张则是用户报障里那行「字牌认不出」。
+HAND_GATE_RESCORE_BELOW = 0.62
+HAND_GATE_RESCORE_MIN = 0.55
+HAND_GATE_RESCORE_MARGIN = 0.15
+ALL_THIRTY_FOUR = ([f"{n}{s}" for s in "mps" for n in range(1, 10)]
+                   + [f"{n}z" for n in range(1, 8)])
+
+
+def _rescue_out_of_gate(detector, image, row):
+    """闸门内读不出的框，放开到全 34 面重打分；门外那张明显更像就照屏上事实读。
+
+    为什么需要：玩法牌集是**分类之前**的闸门。用户在广东雀神上挂着川麻玩法（只放开
+    7z）打广东麻将时，屏上的 東/北/北 连被模板比较的机会都没有 → 面板 14 张只报 11 张，
+    剩下的贴成 7z/9s。这就是用户报的「明明有完整牌面却只识别出几张」与「字牌认不出」
+    的同一个根子。
+
+    为什么只改读数、不改玩法：玩法是用户选的（v1.7.5 定下的口径），但**屏上的牌是事实**。
+    两者不一致时正确做法是把牌读对、把冲突说出去（`hand_gate_conflict`），而不是替用户
+    换玩法，也不是拿一个错玩法去理直气壮地报错牌。
+
+    只对「闸内分数低于触发线」的框补打分（实测每帧 0~3 枚，每枚一次完整分类），
+    全牌玩法下门外集合为空，一次也不会多付。
+    返回 (新的 row, [[屏上第几张, 门外牌面, 分数], ...])。
+    """
+    try:
+        from recognition.tencent_grid_detector import resolve_candidate_tiles
+        gate = resolve_candidate_tiles(None, getattr(detector, "_mode_tiles", None),
+                                       bool(getattr(detector, "full_honors", False)))
+    except Exception:
+        return row, []
+    if not gate or not (set(ALL_THIRTY_FOUR) - gate):
+        return row, []        # 玩法本来就含全部 34 面，重打分只是白付钱
+    if image is None or not hasattr(detector, "classify_tile"):
+        return row, []
+    ih, iw = image.shape[:2]
+    out, conflicts = [], []
+    for i, (r, lab, conf) in enumerate(row):
+        weak = lab is None or float(conf) < HAND_GATE_RESCORE_BELOW
+        if not weak:
+            out.append((r, lab, conf))
+            continue
+        x, y, w, h = [int(v) for v in r]
+        x0, y0 = max(0, x), max(0, y)
+        crop = image[y0:min(ih, y0 + h), x0:min(iw, x0 + w)]
+        if crop.size == 0:
+            out.append((r, lab, conf))
+            continue
+        try:
+            fl, fs = detector.classify_tile(crop, avail=ALL_THIRTY_FOUR)
+        except Exception:
+            fl, fs = None, 0.0
+        if (fl and fl not in gate and float(fs) >= HAND_GATE_RESCORE_MIN
+                and float(fs) >= (float(conf) if lab is not None else 0.0)
+                + HAND_GATE_RESCORE_MARGIN):
+            out.append((r, fl, float(fs)))
+            conflicts.append([i + 1, fl, round(float(fs), 2)])
+        else:
+            out.append((r, lab, conf))
+    return out, conflicts
+
 # ===== 牌河/副露全图检测的区域差分门控（响应提速的关键修复）=====
 # 实测：detect_river_discards + detect_player_melds 单帧合计 600ms~1s（桌面），
 # 手机上 1.5~4s；而它们只是给「记牌器/剩余活牌」供数，牌河只在有人出牌时才变（几秒一次）。
@@ -1802,6 +1876,11 @@ class Engine:
         # 本帧手牌行里「连最像的模板都不够像」的那几张：[[屏上第几张, 分数], ...]。
         # 每帧在手牌刚切完时重算（不能拖到下一帧），非空就把建议降级为「本帧不给建议」。
         self._hand_low_conf: List[List] = []
+        # 本帧「闸门内读不出、放开到全 34 才读对」的那几张：[[第几张, 牌面, 分数], ...]。
+        # 它是玩法声明与牌桌不符的直接证据（不是识别退化），面板必须把它说出口。
+        self._hand_gate_conflict: List[List] = []
+        # 本帧手牌行里「有框但一张都没读出来」的框数（救不回也不许静默少报）。
+        self._hand_missing: int = 0
         # 条带探测的连续不合格计数与停用标。停用后 `_hand_strip` 直接交回整屏，
         # 不再每帧多付一次「注定不起效」的条带检测；平台/玩法切换时重置。
         self._strip_reject_streak: int = 0
@@ -4496,9 +4575,19 @@ class Engine:
             # 必须在 `_reconcile_hand_tiles` 之前抓：那一步会把逐张标签改成稳定手牌，
             # 改完再看置信度就是「拿已经粉饰过的数据自证清白」。
             self._hand_low_conf = []
+            self._hand_gate_conflict = []
+            self._hand_missing = 0
             if hand_row is not None:
                 hand_row = sorted(hand_row, key=lambda d: d[0][0])
+                # 先救「闸门外的牌面」：它在闸门内根本不可能读对，不先走这一步就会
+                # 被下面的 `_hand_missing` 当成「读不出」，而它其实能读（实测：广东雀神
+                # 挂川麻玩法时屏上的 東/北/北，全 34 下 0.98/0.59）。
+                hand_row, self._hand_gate_conflict = _rescue_out_of_gate(
+                    hand_detector, full_for_preview, hand_row)
                 raw_labels = [d[1] for d in hand_row if d[1] is not None]
+                # 框在、牌读不出：这就是用户看到的「明明 13 张只显几张」。静默少报
+                # 比报错更坑（面板看起来只是“牌少了”），所以必须数出来、说出口。
+                self._hand_missing = sum(1 for d in hand_row if d[1] is None)
                 # 「第几张的**最好**模板匹配也不像牌」——本帧读数不可信的直接证据。
                 # 与行均置信度不是一回事，判据与门槛的实测分布见 `HAND_UNREADABLE_CONF`。
                 self._hand_low_conf = [
@@ -5309,16 +5398,31 @@ class Engine:
             # 实测 57 帧（20 帧真机 + 37 帧腾讯 GT）：只有被大字动画压住的两帧被标，
             # 其余 55 帧零误报（`localtest/measure_hand_uncertain.py`）；这条判据与
             # 「真值表里只有已知缺陷帧该被标」由 `test_multi_hand_guard` 钉住。
-            if status == "ok" and getattr(self, "_hand_low_conf", None):
+            # ===== 手牌可读性硬门：读数不完整时宁可不答 =====
+            _bad = list(getattr(self, "_hand_low_conf", []))
+            _miss = int(getattr(self, "_hand_missing", 0))
+            _conf = list(getattr(self, "_hand_gate_conflict", []))
+            if status == "ok" and (_bad or _miss):
                 advice = []
                 best = ""
-                _pos = "、".join(str(p[0]) for p in self._hand_low_conf)
-                _c = min(float(p[1]) for p in self._hand_low_conf)
-                # 不写「动画过去会自动恢复」这一句：实测有两个成因都会触这道门——
-                # 牌面被动画压住，以及玩法声明与牌桌不符（闸门把字牌挤出去后强贴）。
-                # 后者不会自己恢复，只能用户改玩法；报错了因等于给了一个错的行动指令。
-                message = (f"第 {_pos} 张牌面读不清（相似度 {_c:.2f}），"
-                           "本帧读数不完整，不给建议；若是玩法与牌桌不符，改成实际在打的那个")
+                bits = []
+                if _miss:
+                    bits.append(f"有 {_miss} 张牌面读不出来")
+                if _bad:
+                    _pos = "、".join(str(p[0]) for p in _bad)
+                    _c = min(float(p[1]) for p in _bad)
+                    bits.append(f"第 {_pos} 张读不清（相似度 {_c:.2f}）")
+                # 不写「动画过去会自动恢复」这一句：实测有三个成因都会触这道门——
+                # 牌面被动画压住、玩法声明与牌桌不符，以及牌面确实不在模板库里。
+                # 后两者不会自己恢复，只能用户改玩法/换平台；报错了因等于给了一个
+                # 错的行动指令。
+                if _conf:
+                    _names = "、".join(sorted({p[1] for p in _conf}))
+                    tail = (f"屏上 {_names} 不在当前玩法（{get_mode(self.mode).get('name', self.mode)}）"
+                            "的牌集里，已按实际牌面读；请把玩法改成你在打的那个")
+                else:
+                    tail = "若是玩法与牌桌不符，改成实际在打的那个"
+                message = "、".join(bits) + f"，本帧读数不完整，不给建议；{tail}"
 
             # 标记"最优"那张牌（最高 EV 或最高 ukeire），UI 上加"最优"角标
             if advice:
@@ -6112,6 +6216,11 @@ class Engine:
                 # 本帧哪几张牌「连最像的模板都不够像」（[屏上第几张, 分数]）。
                 # 单张分数才有这个分辨力，行均没有（见 `HAND_UNREADABLE_CONF`）。
                 "hand_uncertain": list(getattr(self, "_hand_low_conf", [])),
+                # 屏上有、但当前玩法牌集里没有的牌（已按实际牌面读）。与
+                # `hand_uncertain` 不是一回事：那条说「看不清」，这条说「玩法不符」。
+                "hand_gate_conflict": list(getattr(self, "_hand_gate_conflict", [])),
+                # 有框却读不出的张数（面板上「手牌(N张)」比屏上少时，这个数就是差额）
+                "hand_missing": int(getattr(self, "_hand_missing", 0)),
                 "count": tile_count,
                 "status": status,
                 "message": message,

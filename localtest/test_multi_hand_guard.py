@@ -116,6 +116,13 @@ def panel_of(d):
     return lc.canon_mpsz(d.get("hand", ""))
 
 
+def mode_gate(key):
+    """玩法 key 的牌集（mpsz 集合）——与分类器用同一把尺。"""
+    from trainer.utils.convert import tiles34_index_to_mpsz
+    import engine.engine as _E
+    return {tiles34_index_to_mpsz(i) for i in _E.available_set(key)}
+
+
 class TestMultiHandGT(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -210,15 +217,22 @@ class TestMultiHandGT(unittest.TestCase):
 class TestMutationControls(unittest.TestCase):
     """变异体：证明上面的断言在测真链路，不是在抄表。"""
 
-    def test_mutant_narrower_gate_drops_the_laizi(self):
-        """同平台换一条合法但字牌更窄的玩法（sc_xz 连 7z 都不放开）→ 7z 必须掉。"""
+    def test_mutant_narrower_gate_is_visible_as_a_conflict(self):
+        """同平台换一条合法但字牌更窄的玩法（sc_xz 连 7z 都不放开）。
+
+        v1.7.6 之后可观察的不是「7z 掉出去」（补打分把它救回来），而是它必须
+        以「门外读数 + 留痕」的形式出现。两者都对不上，只能说明牌集没进闸门。"""
         e = next(x for x in load_gt() if x["file"] == "shushan_play_03.jpg")
         gt = panel_of(run_frame(read_frame(e["file"]), e["platform"], "sc_hz"))
         self.assertIn("7z", gt, "夹具帧本身没有 7z，本对照不成立")
-        narrow = panel_of(run_frame(read_frame(e["file"]), e["platform"], "sc_xz"))
-        self.assertNotIn("7z", narrow,
-                         f"换成更窄的牌集后面板仍有 7z（{narrow}）：玩法根本没进闸门，"
-                         "① 的读数与表怎么对上都说明不了识别正确")
+        d = run_frame(read_frame(e["file"]), e["platform"], "sc_xz")
+        narrow = panel_of(d)
+        trail = {c[1] for c in (d.get("hand_gate_conflict") or [])}
+        self.assertNotIn("7z", mode_gate("sc_xz"),
+                         "sc_xz 竟含 7z：本对照的前提变了")
+        self.assertIn("7z", trail,
+                      f"换成更窄的牌集后 7z 既没被挡在外面也没留痕（{narrow} 留痕={trail}）："
+                      "玩法根本没进闸门，① 的读数与表怎么对上都说明不了识别正确")
 
     def test_mutant_hardcoded_mode_breaks_the_wiring(self):
         """把生效玩法写死成 std_tdh（绕过声明值）→ 声明不是它的帧必须对不上。
