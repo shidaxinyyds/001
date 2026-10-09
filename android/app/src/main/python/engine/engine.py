@@ -4634,6 +4634,9 @@ class Engine:
             self._hand_low_conf = []
             self._hand_gate_conflict = []
             self._hand_missing = 0
+            # 每帧开头先清零「沿用」标记：沿用分支会把它置 True，读到牌的正常帧
+            # 那么保持 False。不在入口清，上一帧的 True 会泄漏到本帧。
+            self._hand_carried_over = False
             if hand_row is not None:
                 hand_row = sorted(hand_row, key=lambda d: d[0][0])
                 # 先救「闸门外的牌面」：它在闸门内根本不可能读对，不先走这一步就会
@@ -5345,7 +5348,12 @@ class Engine:
                         advice = list(self._advice)
                         best = getattr(self, "_stable_best", "") or (advice[0]["tile"] if advice else "")
                         shanten = getattr(self, "_stable_shanten", None)
-                        message = "手牌已就绪"
+                        # 沿用旧读数时不得声称「本帧就绪」：上一版这里写死
+                        # 「手牌已就绪」，而同一帧的降级标签又说「读不到手牌」，
+                        # 两者同屏就是用户报的「结论跟当前手牌对不上」。
+                        self._hand_carried_over = True
+                        self._hand_stale_frames = self._transient_drop_streak
+                        message = f"沿用上一帧手牌（本帧被遮挡/未读到，已 {self._transient_drop_streak} 帧）"
                     else:
                         # 超过 3 帧仍未恢复完整手牌，平滑降级为 partial
                         try:
@@ -6326,6 +6334,11 @@ class Engine:
                 "hand_missing": int(getattr(self, "_hand_missing", 0)),
                 # 手牌取区整体被压暗（弹窗遮罩）：区分「没开局」与「看不清」
                 "hand_dim": bool(getattr(self, "_hand_band_dim", False)),
+                # 本帧手牌是沿用上一帧的（阻尼开启）+ 沿用了多少帧。没这两个字段，
+                # 「沿用旧牌」与「本帧真读到」在面板上完全同形，而用户只能从
+                # 「弹窗都消失了两帧还是那 4 张」发现它。
+                "hand_carried_over": bool(getattr(self, "_hand_carried_over", False)),
+                "hand_stale_frames": int(getattr(self, "_hand_stale_frames", 0)),
                 "count": tile_count,
                 "status": status,
                 "message": message,
