@@ -15,6 +15,7 @@ import os
 import sys
 
 import cv2
+import numpy as np
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(HERE, "android", "app", "src", "main", "python"))
@@ -42,8 +43,12 @@ try:
     eng = E.Engine()
     eng.get_hand_detector()
     for i in range(n_frames):
+        # 每帧给一个 1px 位移：同一张图直接重喂会被帧差去重直接回吐上一份 payload，
+        # 几乎不花墙钟时间——那会量到「后台任务始络没完成」的假现象（上一轮就是这么
+        # 把“测不到”误读成“设备上就是空”）。位移不动牌的内容，只让去重不拦。
+        frame = np.roll(img, i, axis=1)
         with __import__("contextlib").redirect_stdout(__import__("io").StringIO()):
-            d = json.loads(eng.process(img).result)
+            d = json.loads(eng.process(frame).result)
         dg = d.get("diag") or {}
         print(f"第{i + 1}次  status={d.get('status'):8s} "
               f"手牌={len((d.get('hand') or '')) // 2:2d}  "
