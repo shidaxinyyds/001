@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:auto_vision/mode_store.dart';
+import 'package:auto_vision/platform_store.dart';
 import 'package:auto_vision/channel.dart';
 import 'package:auto_vision/license/license_service.dart';
 import 'package:auto_vision/license/license_status.dart';
@@ -516,6 +517,12 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   // 悬浮窗内玩法切换菜单展开态
   bool _showModeSelector = false;
 
+  /// 引擎回传的**生效平台**（不是主页那个选择框，也不是本地缓存）。
+  /// 玩法菜单要按平台筛就得拿它当依据：菜单里列什么牌集就决定识别闸门，
+  /// 拿一个「用户可能还没落地的选项」去筛，会筛出与引擎实际行为不一致的列表。
+  /// 引擎没出过帧时为 null，此时不筛（宁可多列，不能误藏掉当前在用的玩法）。
+  String? _enginePlatformKey;
+
   void _selectMode(String key) {
     final norm = GameMode.normalizeKey(key);
     setState(() {
@@ -942,6 +949,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     _pendingJson = null;
     setState(() {
       result = json;
+      final pk = json['platform'];
+      if (pk is String && pk.isNotEmpty) _enginePlatformKey = pk;
       final st = json['status'];
       final c = (json['count'] as num?)?.toInt() ?? 0;
       if (st == 'waiting' || st == 'no_tiles' || c == 0) {
@@ -1573,6 +1582,19 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   }
 
   Widget _buildModeSelectorOverlay() {
+    // 只列「当前平台真开着的玩法」。玩法牌集是一道**分类之前**的闸门：给一个
+    // 平台挂上它没有的玩法（实测：广东雀神 + 血流红中），牌堆里明摆着的
+    // 北/白板会在模板被比较之前就被挤出去，剩下的候选强行贴上去——用户看到的
+    // 是「特殊牌认不出/漏识别」，根子却在配置。引擎侧 `reconcile_mode_platform`
+    // 会兜底纠正，但那是事后补救；在菜单里就把不存在的选项去掉才是修干净。
+    final pf = GamePlatform.info(_enginePlatformKey ?? '');
+    final modes = pf == null
+        ? GameMode.allModes
+        : GameMode.allModes
+            .where((m) => pf.supportedModes.contains(m.key))
+            .toList();
+    // 平台名提前取好：标题里不再嵌同种引号的字面量插值。
+    final pfName = pf?.name ?? '全平台';
     return Positioned.fill(
       child: Container(
         decoration: BoxDecoration(
@@ -1590,9 +1612,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                 const SizedBox(width: 5),
                 Expanded(
                   child: Text(
-                    // 条数从目录取，不写死：之前硬编码“10种规则”，上架到 19 条后
-                    // 菜单列表会跟着长但标题还在说 10 种，属于界面静默错信息。
-                    '切换玩法 (${GameMode.allModes.length}种规则)',
+                    // 条数从**筛后的列表**取，不写死也不拿全目录数：之前硬编码
+                    // “10种规则”，上架到 19 条后菜单列表会跟着长但标题还在说 10 种；
+                    // 而按平台筛之后，标题再报全目录条数就是在报一个屏上滑不到的数。
+                    '切换玩法 · $pfName (${modes.length}种)',
                     style: const TextStyle(
                       color: Color(0xFFFFF9C4),
                       fontSize: 10.5,
@@ -1619,10 +1642,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             Expanded(
               child: ListView.separated(
                 physics: const BouncingScrollPhysics(),
-                itemCount: GameMode.allModes.length,
+                itemCount: modes.length,
                 separatorBuilder: (_, __) => const SizedBox(height: 3),
                 itemBuilder: (context, index) {
-                  final info = GameMode.allModes[index];
+                  final info = modes[index];
                   final isCurrent = GameMode.normalizeKey(selectedMode) == info.key;
                   return GestureDetector(
                     onTap: () => _selectMode(info.key),

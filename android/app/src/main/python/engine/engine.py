@@ -50,6 +50,7 @@ from modes import (
     MODES,
     is_dingque_mode,
     is_sichuan_family,
+    is_known_mode,
     get_mode,
     get_laizi_set,
     get_analyzer,
@@ -853,6 +854,38 @@ def _reconcile_hand_tiles(row, stable_mpsz: str):
     return out
 
 
+def reconcile_mode_platform(mode: str, platform: str) -> Tuple[str, Optional[str]]:
+    """把「玩法」校正到「该平台确实开得了的玩法」，返回 (生效玩法, 被纠正掉的玩法或 None)。
+
+    为什么必须由引擎兜这一道（而不是只靠面板把选项筛干净）：玩法牌集是
+    **分类之前**的闸门（`recognition/tencent_grid_detector.py::resolve_candidate_tiles`），
+    一旦 (平台, 玩法) 这对组合本身不成立，闸门就会在模板被比较之前把整批牌
+    挤出去，剩下的候选强行贴上去——用户看到的是「漏识别 / 特殊牌认不出」，
+    而根子在配置。实测（2026-10 真机帧 localtest/shots_multi/）：广东雀神挂上
+    血流红中（牌集 27 型 + 7z）后，同一帧里明摆着的 北(4z) 被贴成 红中(7z)、
+    四张 白板(5z) 被贴成 9条/8条，还凭空少读一张。
+
+    配置能到达引擎的路径不止一条（Java 推送、磁盘轮询、旧版本残留的 json），
+    所以只在 UI 里筛选项堵不住全部：这里每帧复核一次，任何一条路进来的组合
+    都只会被校正成同一个结果。
+
+    口径：
+      * 玩法本就在平台 supported_modes 里 → 原样返回，绝不改动（零行为变化）；
+      * 否则回落到该平台 default_mode；default_mode 自身不合法时退到
+        supported_modes 里第一个合法项，再不行退回原值（宁可保持现状，也不
+        能把玩法悄悄换成一个谁都没选过的东西）；
+      * 返回值第二项非 None 时，调用方**必须**把它显示出去：纠正本身不是终点，
+        让用户知道「面板上那个玩法在这个平台根本不存在」才是。
+    """
+    supported = get_supported_modes(platform)
+    if mode in supported:
+        return mode, None
+    for cand in (get_platform(platform).get("default_mode"), *(supported or [])):
+        if cand and cand in supported and is_known_mode(cand):
+            return cand, (mode or None)
+    return mode, None
+
+
 def _error_result(status: str, message: str) -> "EngineResult":
     """构造错误状态的结果。
 
@@ -1335,6 +1368,19 @@ RIVER_CONF = {
 # 才判定此前计数为误检虚高并回退（单帧抖动绝不触发）。
 RIVER_REGRET_FRAMES = 5
 
+# 手牌单张「读不出」下限：低于这条 = 这张牌与它**最像**的模板都不够像，屏幕上
+# 多半有东西压住了牌面（蜀山「清X色」大字动画实测 0.44）。
+# 门槛是量出来的，不是拍的（`localtest/probe_tile_conf.py`：逐张打分的 top 分与
+# top2 差距，对 20 帧真机 + 37 帧腾讯 GT 全量）：
+#   读数错的那几张：0.443 / 0.442（蜀山两帧被动画压住的 4万→2条）；
+#   读数全对的帧里最低：0.588（广东雀神一帧的 9筒，亚军 6筒，差距 0.081）。
+# 所以 0.55 落在「错读」与「对读最低」之间。**不用行平均置信度做触发**：实测
+# 分不开这两类——读数 100% 正确的广东雀神两帧行均只有 0.76/0.79，读数错的蜀山
+# 两帧行均反而有 0.91/0.94；拿一个分不开好坏的数去报「降级」就是假测量。
+# 已知边界：同帧另一处错读（7万→3万）top=0.626 但 top2 差距只有 0.006，单看分数
+# 抓不住它 —— 抓得住的那张足以把「这帧别信」说出口，剩下的记在守卫里当台账。
+HAND_UNREADABLE_CONF = 0.55
+
 # ===== 牌河/副露全图检测的区域差分门控（响应提速的关键修复）=====
 # 实测：detect_river_discards + detect_player_melds 单帧合计 600ms~1s（桌面），
 # 手机上 1.5~4s；而它们只是给「记牌器/剩余活牌」供数，牌河只在有人出牌时才变（几秒一次）。
@@ -1667,6 +1713,12 @@ class Engine:
         self._prev_mode: str = ""
         # 游戏平台预设管理（腾讯、途游、微乐、JJ、通用）
         self.platform: str = load_platform()
+        # 建实例时就先校一次（P2-B 的补刀）：手牌识别发生在 process 里那段 reload **之前**
+        # （方向探测/手牌条带都走这里的 self.mode），只在 process 里纠正会让「每帧新建
+        # Engine」的评测和「切配置后第一帧」的真机仍按旧牌集识别。守卫 ⑥
+        # （localtest/test_mode_gate_guard.py）正是靠这个时间差把只改 process 的版本打红的。
+        self._mode_forced: Optional[str] = None
+        self.mode, self._mode_forced = reconcile_mode_platform(self.mode, self.platform)
         self._prev_platform: str = ""
         self._last_doctrine: str = ""
         self._last_mood_state: str = "steady"
@@ -1753,6 +1805,12 @@ class Engine:
         # 当前玩法是否在本平台 supported_modes 里。False = 牌集与平台不匹配，
         # 面板会整类少一批牌（必须在 diag 可见，否则只会当成识别坏了报障）。
         self._mode_supported: bool = True
+        # 本帧被引擎从「面板选中的玩法」纠正成哪个玩法（None = 没纠正过）。
+        # 它必须上屏：否则用户点的是 A、面板标题写着 B，看起来像被篡改。
+        self._mode_forced: Optional[str] = None
+        # 本帧手牌行里「连最像的模板都不够像」的那几张：[[屏上第几张, 分数], ...]。
+        # 每帧在手牌刚切完时重算（不能拖到下一帧），非空就把建议降级为「本帧不给建议」。
+        self._hand_low_conf: List[List] = []
         # 条带探测的连续不合格计数与停用标。停用后 `_hand_strip` 直接交回整屏，
         # 不再每帧多付一次「注定不起效」的条带检测；平台/玩法切换时重置。
         self._strip_reject_streak: int = 0
@@ -2235,6 +2293,9 @@ class Engine:
         """显式设置当前游戏平台预设（支持腾讯、途游、微乐、JJ、通用）。"""
         set_platform_explicit(platform_key)
         self.platform = platform_key
+        # 平台换了，旧玩法可能在新平台上根本不存在：立刻过一道闸，别等下一帧的
+        # reload（本方法后面就要重推牌风与候选牌集，推到旧牌集上就白跑了）。
+        self.mode, self._mode_forced = reconcile_mode_platform(self.mode, self.platform)
         self._tile_voter.reset()
         self._hand_stab.reset()
         self._last_hand_y = None
@@ -2275,6 +2336,21 @@ class Engine:
         if key in self._cfg:
             self._cfg[key] = bool(value)
 
+    def _display_mode_name(self) -> str:
+        """面板标题里的玩法名：说清「引擎实际在按哪个玩法算」。
+
+        被 `reconcile_mode_platform` 纠正过时不能只写生效那一个：用户点的是
+        「血流红中」、标题却凭空变成「大众推倒胡」，看起来像被篡改。两个名字
+        并列才能把「这个玩法在本平台不存在」这件事递到用户眼前（也是他唯一
+        能自己修好的入口）。名字走 `get_mode` 而不是 `MODES.get`：后者对别名
+        （sc/4p）会拿不到条目而直接回显 key。
+        """
+        name = get_mode(self.mode).get("name", self.mode)
+        forced = getattr(self, "_mode_forced", None)
+        if forced:
+            return f"{name}（已纠正：{get_mode(forced).get('name', forced)}不支持本平台）"
+        return name
+
     def set_config_dir(self, path) -> None:
         """Java 侧推入真实外部 files 目录（getExternalFilesDir 实际返回值）。
 
@@ -2292,6 +2368,10 @@ class Engine:
             m = str(key).strip().lower() if key else ""
             if m:
                 _modes_set_mode_explicit(m)
+                # Java 直推的玩法也要先过平台这道闸：面板能选到的组合已被 UI 筛过，
+                # 但 set_mode 是另一条入口（旧版本残留 / Java 直接推），不能绕过。
+                # 磁盘/内存里仍留用户原选（上面那行），只把**生效值**换掉并在标题说明。
+                m, self._mode_forced = reconcile_mode_platform(m, self.platform)
                 if m != getattr(self, "mode", None):
                     self.mode = m
                     self._prev_mode = m
@@ -3119,7 +3199,7 @@ class Engine:
             image=_make_preview(image),
             result=json.dumps({
                 "mode": self.mode,
-                "mode_name": MODES.get(self.mode, {}).get("name", self.mode),
+                "mode_name": self._display_mode_name(),
                 "platform": self.platform,
                 "platform_name": get_platform(self.platform).get("name", self.platform),
                 "knowledge_doctrine": "【待机推演】等待牌局开始…",
@@ -4195,6 +4275,11 @@ class Engine:
             # 模式或平台变了 → 投票窗口 / 行锁 / 缓存全部失效，必须清空重建。
             self.mode = load_mode()
             self.platform = load_platform()
+            # 玩法/平台错配的硬纠正（判据与为什么必须在引擎里做，见
+            # `reconcile_mode_platform`）。放在这里是因为这是两条配置都落定后的
+            # 第一个点：下面的变更检测与重置、候选牌集重推、规则计算全部只能
+            # 看到纠正后的玩法，否则就会出现「纠正了但识别器还在用旧牌集」。
+            self.mode, self._mode_forced = reconcile_mode_platform(self.mode, self.platform)
             # 出牌建议配置每帧 reload（与 load_mode 同一时机，文件极小，开销可忽略）：
             # "显示出牌建议" 与 "好牌机率(进张下限)" 由调试页经 Java 写入。
             # 注意：改动 min_ukeire 会让 build_advice 的缓存键变化 → 自动重算。
@@ -4224,11 +4309,8 @@ class Engine:
                 self._strip_disabled = False
             avail = available_set(self.mode)
             hsizes = hand_sizes(self.mode)
-            # 玩法是否被当前平台支持。`get_supported_modes` 早就 import 了但从未
-            # 被调用过（一个悬着的意图）：玩法牌集是一道「分类之前」的闸门，
-            # 给广东雀神挂上血流红中（牌集 range(27)+[33]）会把全部字牌在候选
-            # 阶段就挤掉 —— 表现是「识别缺张」，根子在配置而不在识别。
-            # 引擎不擅自改面板选项（那是产品决定），但这个错配必须可见。
+            # 玩法是否被当前平台支持。纠正已在上游做完，这里因此恒为 True；
+            # 保留这条诊断是为了「哪天有人把纠正挪走，面板立刻能在 diag 里看到」。
             self._mode_supported = self.mode in get_supported_modes(self.platform)
 
             detector = self.get_detector()
@@ -4420,9 +4502,19 @@ class Engine:
 
             # ===== 手牌：本帧原始标签 → 多重集稳定器定夺 =====
             raw_labels: List[str] = []
+            # 必须在 `_reconcile_hand_tiles` 之前抓：那一步会把逐张标签改成稳定手牌，
+            # 改完再看置信度就是「拿已经粉饰过的数据自证清白」。
+            self._hand_low_conf = []
             if hand_row is not None:
                 hand_row = sorted(hand_row, key=lambda d: d[0][0])
                 raw_labels = [d[1] for d in hand_row if d[1] is not None]
+                # 「第几张的**最好**模板匹配也不像牌」——本帧读数不可信的直接证据。
+                # 与行均置信度不是一回事，判据与门槛的实测分布见 `HAND_UNREADABLE_CONF`。
+                self._hand_low_conf = [
+                    [i + 1, round(float(d[2]), 2)]
+                    for i, d in enumerate(hand_row)
+                    if d[1] is not None and float(d[2]) < HAND_UNREADABLE_CONF
+                ]
 
             # 摸牌/出牌瞬间（张数切换），立刻清空空间投票历史与帧缓存，保证下一帧无任何幽灵残留
             curr_raw_n = len(raw_labels)
@@ -5219,6 +5311,21 @@ class Engine:
             else:
                 self._dirty_streak = 0
 
+            # ===== 手牌可读性硬门：有牌「连最像的模板都不够像」时宁可不答 =====
+            # 与守恒硬门同一条立场：少一句建议的代价远小于给一句错建议。触发条件用
+            # **本帧逐张分数**（实测分布写在 `HAND_UNREADABLE_CONF` 上方），不是行平均
+            # 置信度——后者分不开「读对但画面暗」与「读错」，拿它当触发就是假测量。
+            # 实测 57 帧（20 帧真机 + 37 帧腾讯 GT）：只有被大字动画压住的两帧被标，
+            # 其余 55 帧零误报（`localtest/measure_hand_uncertain.py`）；这条判据与
+            # 「真值表里只有已知缺陷帧该被标」由 `test_multi_hand_guard` 钉住。
+            if status == "ok" and getattr(self, "_hand_low_conf", None):
+                advice = []
+                best = ""
+                _pos = "、".join(str(p[0]) for p in self._hand_low_conf)
+                _c = min(float(p[1]) for p in self._hand_low_conf)
+                message = (f"第 {_pos} 张牌面被遮挡或过暗（相似度 {_c:.2f}），"
+                           "本帧读数不完整，不给建议；动画过去会自动恢复")
+
             # 标记"最优"那张牌（最高 EV 或最高 ukeire），UI 上加"最优"角标
             if advice:
                 if is_sichuan_family(self.mode) or getattr(self.trainer, "analyzer", "") == "std":
@@ -5941,7 +6048,10 @@ class Engine:
 
             result = {
                 "mode": self.mode,
-                "mode_name": MODES.get(self.mode, {}).get("name", self.mode),
+                "mode_name": self._display_mode_name(),
+                # 被引擎纠正过的玩法原值（None = 没发生过）。面板标题已把两个名字
+                # 并列写进 mode_name，这里再给一份机读事实，供调试页/取证链路对齐。
+                "mode_forced": getattr(self, "_mode_forced", None),
                 # Java 侧 native 接管的路由判据（能力而非 key 前缀）：native 求解器
                 # 没有鬼牌概念且会丢弃所有 z 字牌，只有它能让当前玩法算对时才允许接管。
                 "native_ready": native_solver_ready(self.mode),
@@ -5975,6 +6085,9 @@ class Engine:
                     "hand_channel": dict(getattr(self, "_hand_channel_diag", {})),
                     # 玩法/平台牌集错配标记。缺字牌时先看这里，不要先改识别阈值。
                     "mode_supported": bool(getattr(self, "_mode_supported", True)),
+                    # 错配被纠正成了哪个玩法（None = 本帧没纠正）。与上面那条合在
+                    # 一起读才能分清「玩法合法、牌集本就如此」与「玩法非法、已被换掉」。
+                    "mode_forced": getattr(self, "_mode_forced", None),
                     # 条带探测是否已被停用（连续试了却没反超整屏）。停用是「这个配置下
                     # 兜底不起效」的确证，不记就只会留下“识别好像变差了”的谜题。
                     "strip_disabled": bool(getattr(self, "_strip_disabled", False)),
@@ -6002,6 +6115,9 @@ class Engine:
                     "phase_error": getattr(self, "_phase_error", None),
                 },
                 "hand": hand_mpsz,
+                # 本帧哪几张牌「连最像的模板都不够像」（[屏上第几张, 分数]）。
+                # 单张分数才有这个分辨力，行均没有（见 `HAND_UNREADABLE_CONF`）。
+                "hand_uncertain": list(getattr(self, "_hand_low_conf", [])),
                 "count": tile_count,
                 "status": status,
                 "message": message,

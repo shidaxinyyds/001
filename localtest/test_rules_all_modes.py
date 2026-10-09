@@ -87,11 +87,21 @@ class TestModeConfig(unittest.TestCase):
         # 转转胡：不能吃（无顺子）、全刻、红中赖子
         self.assertFalse(MODES["cs_zz"]["sequences"])
         self.assertTrue(MODES["cs_zz"].get("need_all_pungs"))
-        # 广东/长沙仅留红中一种字牌可用
-        for k in ("gd_hz", "cs_zz"):
-            self.assertIn(33, MODES[k]["available"])
-            for honor in range(27, 33):
-                self.assertNotIn(honor, MODES[k]["available"])
+        # 长沙转转麻将：牌堆只有万筒条 + 4 张红中（112 张），1z..6z 全不存在。
+        self.assertIn(33, MODES["cs_zz"]["available"])
+        for honor in range(27, 33):
+            self.assertNotIn(honor, MODES["cs_zz"]["available"])
+        # 广东红中王：**不是**「只留红中一种字牌」。这条旧断言把川麻的形状
+        # （先删光字牌、再单加回红中）照抄到广东玩法上，牌集是分类之前的
+        # 闸门，于是真机上明摆着的 北(4z)/白板(5z) 连被模板比较的机会都没有，
+        # 被强贴成 7z/9s/8s 还凭空少读一张（用户真机 2026-10 批次）。
+        # 广东麻将的底子是 136 全牌，本玩法只把既有的红中升为鬼牌。
+        # 判据详见 modes.MODES["gd_hz"] 的注释；夹具：
+        # localtest/shots_multi/queshen_play_01.jpg（北）与 _02.jpg（北+4 张白板）。
+        self.assertEqual(MODES["gd_hz"]["available"], list(range(34)),
+                         "广东红中王必须是 34 型全牌，否则字牌会在闸门被挤掉")
+        self.assertEqual(MODES["gd_hz"]["wall"], 136)
+        self.assertEqual(MODES["gd_hz"]["laizi"], 33)
 
 
 # ============ 大众推倒胡 std_tdh ============

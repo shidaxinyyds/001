@@ -160,6 +160,10 @@ PLATFORMS: Dict[str, Dict] = {
 }
 
 _EXPLICIT_PLATFORM: Optional[str] = None
+# 显式推送（Java 经 Chaquopy 推入，或本地探针调 `Engine.set_platform`）的时刻。
+# 它只用于一个判据：**比这份推送旧的磁盘文件是上一轮残留，不许盖掉刚推进来的值**
+#（下面 `load_platform` 里那条）。靠文件自身赋值时它保持 0，磁盘优先的旧口径不变。
+_EXPLICIT_PLATFORM_AT = 0.0
 _PLATFORM_CACHE = {"path": "", "mtime": 0.0, "check_time": 0.0, "platform": DEFAULT_PLATFORM}
 
 
@@ -216,9 +220,19 @@ def load_platform() -> str:
 
     for path in _candidate_platform_paths():
         try:
+            if not config_read_allowed(path):
+                continue
             if not os.path.exists(path):
                 continue
             mtime = os.path.getmtime(path)
+            if _EXPLICIT_PLATFORM is not None and mtime <= _EXPLICIT_PLATFORM_AT:
+                # 磁盘上这份比显式推送还旧 = 上一轮别的平台留下的残留（实测：仓库外
+                # 的 `mahjong_platform.json` 写着 gd_queshen，把腾讯口径的 37 帧基线
+                # 静默改成另一个平台的输出）。让推送赢，并把这一份记进缓存，
+                # 免得下一帧又再跑一次同样的磁盘扫描。
+                _PLATFORM_CACHE["path"] = path
+                _PLATFORM_CACHE["mtime"] = mtime
+                return _EXPLICIT_PLATFORM
             if mtime != _PLATFORM_CACHE["mtime"]:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
@@ -237,12 +251,69 @@ def load_platform() -> str:
     return _EXPLICIT_PLATFORM if _EXPLICIT_PLATFORM is not None else _PLATFORM_CACHE["platform"]
 
 
+def _chaquo_application():
+    """Android 应用上下文；非设备环境（本地跑评测/探针）返回 None。"""
+    try:
+        from com.chaquo.python import Python
+        return Python.getPlatform().getApplication()
+    except Exception:
+        return None
+
+
+def config_write_allowed(path: str) -> bool:
+    """这份配置目标路径允不允许落盘（`save_platform`/`save_mode` 共用这一条闸）。
+
+    真机上候选第一条来自 Chaquopy 上下文（`getExternalFilesDir` 已经把目录建好），
+    所以恒真，Java/UI 依旧能从文件读到引擎在用的平台/玩法，行为零变化。
+
+    桌面上必须拦住：本地没有 Chaquopy，候选会退到硬编码的
+    `/storage/emulated/0/...`，而 Windows 把以 `/` 开头的路径解析成**当前盘根**
+    ——实测探针里一次 `Engine().set_platform(...)`（它走
+    `set_platform_explicit`→`save_platform`）就会在仓库之外造出
+    `D:\storage\emulated\0\Android\data\com.example.auto_vision\files\mahjong_platform.json`。
+    那是一份**全局、跨进程、看不见**的配置：下一轮 `eval_base`（本该是腾讯口径的
+    37 帧基线）会静默读到上一支探针留下的「广东雀神」，于是定缺/选牌阶段全部
+    变成另一个玩法的输出——两边报的数都不再是它们声称测的东西（2026-10 实测：
+    工作树 26 条不匹配 vs 基线工作树 2 条，差的全是阶段，而根因就是这份文件）。
+
+    口径：**写不进去的路径也不该去读**（两条闸共用 `config_read_allowed`），所以
+    设备环境照旧写；桌面上 Android 绝对路径直接否掉，其余只写**已经存在**的
+    目录（临时配置目录 `set_config_dir(tmp)` 这类有意测试读写链路的场景仍然能跑），
+    绝不新建仓库外的目录。内存态（`_EXPLICIT_PLATFORM`）不受影响，本地探针
+    拿到的行为一致。
+    """
+    if not config_read_allowed(path):
+        return False
+    if _chaquo_application() is not None:
+        return True
+    d = os.path.dirname(path)
+    return not d or os.path.isdir(d)
+
+
+def config_read_allowed(path: str) -> bool:
+    """这条候选配置路径允不允许被当成「用户在面板上选的那个平台」来读。
+
+    只拦一种情况：Windows 上把以 `/` 开头的 Android 绝对路径解析到**当前盘根**。
+    `D:\storage\emulated\0\...` 那里只可能是本仓库探针自己 `os.makedirs` 留下的
+    残留（写侧已由 `config_write_allowed` 拦住），永远不可能是真机上的用户配置；
+    让它参与读取，等于让每一轮本地评测的口径取决于「上一支探针最后设了谁」。
+
+    真机（Android/Linux，`os.name == 'posix'`）逐字不受影响：那条判据直接为真，
+    即使 Chaquopy 上下文一时拿不到也照旧能读到硬编码的兜底路径。
+    """
+    if os.name != "nt":
+        return True
+    return not str(path).startswith(("/", "\\"))
+
+
 def save_platform(key: str) -> bool:
     """将平台配置写入共享 JSON 文件。"""
     if key not in PLATFORMS:
         return False
     candidate_paths = _candidate_platform_paths()
     target_path = candidate_paths[0] if candidate_paths else PLATFORM_PATH
+    if not config_write_allowed(target_path):
+        return False
     try:
         d = os.path.dirname(target_path)
         if d:
@@ -257,10 +328,12 @@ def save_platform(key: str) -> bool:
 
 def set_platform_explicit(key: str) -> bool:
     """由 Java/UI 直接推入平台，绕过文件轮询即时生效。"""
-    global _EXPLICIT_PLATFORM
+    global _EXPLICIT_PLATFORM, _EXPLICIT_PLATFORM_AT
     k = str(key).strip().lower()
     if k in PLATFORMS:
         _EXPLICIT_PLATFORM = k
+        # 记下推送时刻：早于它的磁盘文件从此不再能反过来盖掉这个值。
+        _EXPLICIT_PLATFORM_AT = time.time()
         _PLATFORM_CACHE["platform"] = k
         _PLATFORM_CACHE["check_time"] = time.time()
         save_platform(k)

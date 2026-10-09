@@ -83,6 +83,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _platformReady = true;
       });
       _syncPlatformField(p);
+      // 平台与玩法是两个各自独立的 Future，谁先回来不定；两边都就绪后
+      // 再对一次账（详见 `_reconcileModeWithPlatform`）。
+      _reconcileModeWithPlatform();
     });
 
     // 拉一次本机已存的游戏ID（持久化在 shared_preferences，重启不丢）
@@ -103,6 +106,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         }
         _modeReady = true;
       });
+      _reconcileModeWithPlatform();
     });
 
     // 接收悬浮窗通过 shareData 发来的消息：
@@ -813,11 +817,69 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
+  /// 当前平台真开着的玩法 key。`null` = 平台信息还没拉回来，此时**不筛**：
+  /// 拿默认平台（腾讯）去裁一个别家平台的合法玩法，会把用户正在用的玩法
+  /// 从列表里变没，比多列几条严重得多。
+  List<String>? get _platformModes => _currentPlatformInfo?.supportedModes;
+
+  /// 当前平台的元数据；平台尚未就绪或 key 不认识时返回 null（同上：不筛）。
+  GamePlatformInfo? get _currentPlatformInfo {
+    if (!_platformReady) return null;
+    return GamePlatform.info(selectedPlatform ?? '');
+  }
+
+  /// 把「已存玩法」校正到当前平台支持的那一个。
+  ///
+  /// 为什么需要这一条：`initState` 里平台与玩法是两个各自独立的 `Future`，
+  /// 谁先回来不确定；而旧版本残留的 `mahjong_mode.json` 可以装着任何 key。
+  /// 一旦「玩法 × 平台」这对组合不成立，玩法牌集（= 分类之前的闸门）就会
+  /// 把整批牌在模板被比较之前挤出去，表现是「识别缺张/特殊牌认不出」。
+  /// 引擎侧已每帧兜底纠正（`reconcile_mode_platform`），但那是运行期的事：
+  /// 主页选择框与引擎生效值不一致，用户下次进来看到的仍是一个点不动的选项。
+  void _reconcileModeWithPlatform() {
+    if (!mounted || !_platformReady || !_modeReady) return;
+    final pInfo = GamePlatform.info(selectedPlatform ?? '');
+    final m = selectedMode;
+    if (pInfo == null || m == null) return;
+    if (pInfo.supportedModes.contains(m)) return;
+    final fallback = pInfo.defaultMode;
+    if (!pInfo.supportedModes.contains(fallback)) return;
+    final gone = GameMode.label(m);
+    GameMode.set(fallback).then((ok) {
+      if (!ok || !mounted) return;
+      final info = GameMode.info(fallback);
+      setState(() {
+        selectedMode = fallback;
+        if (info != null) _selectedCategory = info.category;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('「$gone」在 ${pInfo.name} 没有开放，已切到 ${info?.name ?? fallback}'),
+        duration: const Duration(seconds: 4),
+      ));
+    });
+  }
+
   Widget _buildHomeBody(String mode) {
     final bool canStart = !isProcessing && _modeReady && _platformReady && mode.isNotEmpty;
-    final categoryModes = GameMode.allModes
+    final supported = _platformModes;
+    final inCategory = GameMode.allModes
         .where((m) => m.category == _selectedCategory)
         .toList();
+    // 玩法卡片只列本平台真开着的：列一个选了会把识别改坏的选项，不如不列。
+    final categoryModes = supported == null
+        ? inCategory
+        : inCategory.where((m) => supported.contains(m.key)).toList();
+    // 整分类被筛空、但这个分类本身有玩法 = 该平台确实不开这一系玩法。
+    // 必须说一句：否则页面看起来像加载坏了，而用户不知道去换分类/换平台。
+    final pInfo = _currentPlatformInfo;
+    // 提前取局部变量而不是在插值里嵌同种引号的字面量：写法上等价，但不依赖
+    // 解析器对嵌套字符串的宽容度，也少一次 `?.`。
+    final pfName = pInfo?.name ?? '当前平台';
+    final hiddenNotice = (supported != null &&
+            categoryModes.isEmpty &&
+            inCategory.isNotEmpty)
+        ? '「$_selectedCategory」分类下的玩法 $pfName 没有开放，请换个分类'
+        : null;
 
     return SafeArea(
       child: SingleChildScrollView(
@@ -851,10 +913,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               child: Column(
                 key: ValueKey<String>(_selectedCategory),
                 crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: categoryModes.map((info) {
-                  final bool sel = info.key == mode;
-                  return _buildModeCard(info, sel);
-                }).toList(),
+                children: [
+                  if (hiddenNotice != null)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: AppTokens.s12),
+                      child: Text(hiddenNotice,
+                          style: const TextStyle(
+                              fontSize: 12, color: AppTokens.muted)),
+                    ),
+                  ...categoryModes.map((info) {
+                    final bool sel = info.key == mode;
+                    return _buildModeCard(info, sel);
+                  }).toList(),
+                ],
               ),
             ),
 

@@ -56,14 +56,18 @@ FRAMES = [
 ]
 
 # 人眼读屏得到的阶段事实（屏幕原文），用于对齐引擎自述。play = 已在摸打。
+# **文件名里的阶段是当初看缩略图猜的，不是真值**：这两条就是被屏幕原文推翻的——
+# 阶段守卫的权威表在 `eval_phase_layout.MULTI_TRUTH`（那里没原文的帧记 `other`），
+# 两处若再分叉，以屏幕原文为准改这里。
 TRUTH_PHASE = {
     "jj_swap_01.jpg": "swap",          # 「选择3张同花色手牌」+ 换牌按钮
     "jj_dingque_01.jpg": "dingque",    # 「请选择定缺的花色（无此花色才能胡牌）」
     "shushan_dingque_01.jpg": "dingque",
-    "tuyou_swap_01.jpg": "swap",
+    # 「大家在等您出牌哦(2)」/ 听牌提示 + 出牌倒计时 = 已经在打这一局，不是换牌
+    "tuyou_swap_01.jpg": "play",
+    "tencent_swap_01.jpg": "play",
     "tuyou_pick_01.jpg": "swap",       # 「选择以下任意3张手牌 确定(2)」
     "tuyou_dingque_01.jpg": "dingque",  # 「请选择一种不要的花色」
-    "tencent_swap_01.jpg": "swap",
     "tencent_pick_01.jpg": "swap",
     "tencent_pick_02.jpg": "swap",
     "tencent_pick_03.jpg": "swap",

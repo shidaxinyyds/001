@@ -20,7 +20,7 @@
     cs_zz     112 张、红中作鬼、sequences=False（转转胡=碰碰胡）
     pp_zz     108 张无字、sequences=False
     hz_ne     全牌、红中作鬼、sequences=False（红中麻将禁吃）
-    gd_hz     112 张、红中作鬼、可吃可碰
+    gd_hz     全牌、红中作鬼、可吃可碰（抓鸟买马未建模）
   牌集规模 / 人数
     mj_3p     三麻：去 2/8 万筒条与白板 → 27 型 108 张、3 人
     mj_2p     二麻（筒条版）：18 型 72 张、2 人
@@ -205,11 +205,24 @@ MODES: Dict[str, Dict] = {
     "gd_hz": {
         "name": "广东红中王",
         "players": 4,
-        "available": list(range(27)) + [33],
+        # 牌集曾是 `range(27)+[33]`（112 张：只留红中一枚字牌）。那是把川麻
+        # 血流红中的牌集形状照抄到广东玩法上——川麻是先删光字牌、再单独加回
+        # 红中，所以「27 型 + 7z」对它成立；广东麻将的底子本身就是 136 张全牌，
+        # 「红中王」只是把牌堆里既有的红中升为鬼牌，不存在「留中、删掉东南西北发白」
+        # 这种牌堆。
+        # 实证（用户真机截图，2026-10 批次 localtest/shots_multi/）：
+        #   queshen_play_01.jpg 面板玩法标题=「广东红中王」，底部手牌行里明摆着
+        #   一枚 北(4z) 与一枚 白板(5z)，牌河里还有一张 北。
+        # 牌集是**分类之前**的闸门（recognition/tencent_grid_detector.py::
+        # resolve_candidate_tiles），闸门里没有 4z/5z，模板就连被比较的机会都没有，
+        # 于是北被贴成 7z、四张白板被贴成 9s/8s —— 表现是「特殊牌识别不出来/
+        # 漏识别」，根因在牌集而不在模板。守卫见
+        # localtest/test_mode_gate_guard.py ⑤。
+        "available": list(ALL_34),
         "hand_sizes": (14, 13, 12, 11, 10, 8, 7, 5, 4, 2, 1),
-        # 牌库实为 27×4+4=112（部分台版去部分数牌为 100，牌河物理守恒
-        # 按每种 4 张计算不受 wall 影响，wall 仅作剩余牌数显示基准）
-        "wall": 112,
+        # wall 与牌集种类数×4 同一条契约（localtest/test_new_modes.py 钉死），
+        # 它同时是悬浮窗「还剩多少牌」的显示基准。
+        "wall": 136,
         "dingque": False,
         "laizi": 33,  # 红中做鬼牌（任搭），不可打出
         "analyzer": "std",
@@ -264,7 +277,8 @@ MODES: Dict[str, Dict] = {
         "sequences": True,
         "seven_pairs": True,
         "kokushi": True,
-        # 与广东红中王的差异是牌集：本玩法保留全部字牌（136），后者只到 112。
+        # 与广东红中王的差别只剩「抓鸟买马」（未建模）：两家的牌集/鬼牌现在相同，
+        # 都是 136 全牌 + 红中作鬼。旧注释写的「后者只到 112」是错的，见 gd_hz。
     },
     "fc_all": {
         "name": "发财麻将",
@@ -536,6 +550,11 @@ def mode_keys() -> List[str]:
 
 
 _EXPLICIT_MODE: Optional[str] = None
+# 显式推送玩法的时刻。`set_mode_explicit` 的口径是「优先级最高」，但旧实现里磁盘
+# 文件反而能反过来盖掉它（下一帧 `load_mode` 读到新 mtime 就直接改写内存态）。本地
+# 探针调 `Engine.set_mode` 后拿到的其实是磁盘上那份残留 —— 与仓库外
+# `mahjong_platform.json` 是同一形状的坑（判据详见 `platforms._EXPLICIT_PLATFORM_AT`）。
+_EXPLICIT_MODE_AT = 0.0
 _CONFIG_DIR: Optional[str] = None
 # path 与 mtime 联合判缓存命中：候选路径列表可能因 set_config_dir 推送而重排，
 # 只有「同一物理文件 + 未变更」才算命中，避免跨路径误共享 mtime。
@@ -579,13 +598,16 @@ def get_laizi_explicit() -> List[int]:
 
 def set_mode_explicit(key: str) -> bool:
     """显式设置当前玩法，优先级最高，直接绕过磁盘 IO。"""
-    global _EXPLICIT_MODE
+    global _EXPLICIT_MODE, _EXPLICIT_MODE_AT
     if not key:
         return False
     key = str(key).strip().lower()
     norm = ALIASES.get(key, key)
     if norm in MODES:
         _EXPLICIT_MODE = norm
+        # 记下推送时刻：早于它的磁盘文件是残留，不能再反过来盖掉这个值（见
+        # `_EXPLICIT_MODE_AT` 那条注释与 `load_mode` 里的判据）。
+        _EXPLICIT_MODE_AT = time.time()
         _MODE_CACHE["mode"] = norm
         _MODE_CACHE["check_time"] = time.time()
         return True
@@ -628,11 +650,23 @@ def load_mode() -> str:
     _MODE_CACHE["check_time"] = now
 
     candidate_paths = _get_candidate_paths("mahjong_mode.json")
+    from platforms import config_read_allowed
     for path in candidate_paths:
         try:
+            if not config_read_allowed(path):
+                # Windows 上 `/storage/...` 会被解成当前盘根，那里只可能是探针残留
+                # （判据与真机逐字不受影响的理由见 platforms.config_read_allowed）。
+                continue
             if not os.path.exists(path):
                 continue
             mtime = os.path.getmtime(path)
+            if _EXPLICIT_MODE is not None and mtime <= _EXPLICIT_MODE_AT:
+                # 比显式推送旧的磁盘文件 = 上一轮残留（与 `load_platform` 同一条
+                # 闸），让推送赢。文件自身读出来的赋值不会抬 `_EXPLICIT_MODE_AT`，
+                # 所以“Java 直写磁盘 / Dart 双保险直写”这两条真机路径照旧。
+                _MODE_CACHE["path"] = path
+                _MODE_CACHE["mtime"] = mtime
+                return _EXPLICIT_MODE
             if mtime != _MODE_CACHE["mtime"]:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
@@ -652,11 +686,20 @@ def load_mode() -> str:
 
 
 def save_mode(key: str) -> bool:
-    """把玩法键写入共享文件，供 Python 引擎读取。"""
+    """把玩法键写入共享文件，供 Python 引擎读取。
+
+    落盘闸门与 `platforms.save_platform` 同一条（判据与它要躲的坑写在那里）：
+    本地探针在 `set_config_dir(tmp)` 下照旧能写，但绝不会再在仓库外凭空造出
+    `/storage/...`（Windows 下就是当前盘根）那份全局配置。函数内 import：
+    `platforms` 不依赖本模块，不构成循环，但启动期少一条隐式耦合。
+    """
     if key not in MODES:
         return False
+    from platforms import config_write_allowed
     candidate_paths = _get_candidate_paths("mahjong_mode.json")
     target_path = candidate_paths[0] if candidate_paths else MODE_PATH
+    if not config_write_allowed(target_path):
+        return False
     try:
         d = os.path.dirname(target_path)
         if d:
@@ -726,8 +769,13 @@ def load_advice_config() -> Dict:
     mg = DEFAULT_MOOD_GUARD
 
     candidate_paths = _get_candidate_paths("mahjong_advice.json")
+    from platforms import config_read_allowed
     for path in candidate_paths:
         try:
+            if not config_read_allowed(path):
+                # 出牌建议配置走同一批候选路径，也是同一形状的坑：一份探针残留的
+                # `mahjong_advice.json`（警告开关/最小进张）会静默改掉建议口径。
+                continue
             if not os.path.exists(path):
                 continue
             mtime = os.path.getmtime(path)

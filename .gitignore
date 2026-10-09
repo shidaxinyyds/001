@@ -78,7 +78,11 @@ localtest/_dbg*
 localtest/_*
 localtest/*.jsonl
 localtest/*.txt
-localtest/gt/
+localtest/gt/*
+# 例外：这份真值表是**人眼读屏手记**的（20 帧六平台手牌 + 声明玩法），没有任何脚本能
+# 重新生成它；它一丢，`test_multi_hand_guard.py` 就退化成测空气。夹具帧本身已在
+# `localtest/shots_multi/` 里被跟踪，所以表（纯牌码，~4KB）也必须一起跟着走。
+!localtest/gt/shots_multi.json
 localtest/river_vis/
 localtest/shots/
 localtest/shots_shushan/

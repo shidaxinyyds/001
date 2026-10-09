@@ -42,6 +42,9 @@ PY = [sys.executable, "-X", "utf8"]
 # ——漏登记的后果是「静默不跑变异检验」，那比不跑更糟。
 MUTABLE = {
     "test_mode_gate_guard.py",
+    # 多平台真机 20 帧手牌表：真值来自人眼读屏，读数链路（玩法闸门/平台风格）断了
+    # 不会让任何既有精度守卫变红——它只会被当成“识别退化了”。
+    "test_multi_hand_guard.py",
     "test_skip_frame_guard.py",
     "test_non_table_honesty_guard.py",
     "test_hot_path_contracts_guard.py",

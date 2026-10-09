@@ -183,14 +183,18 @@ def fx_tall_strip():
     return _hexagon_blob(blank(), BAND_X0 + 100, BAND_Y0 + 10, 22, 100, GOLD_BGR)
 
 
-def fx_discs(w, h, r, gap_factor=1.0):
-    """在定缺取区（y 0.40~0.75、x 0.25~0.75）画 万(红)/条(绿)/筒(橙) 三盘。"""
+def fx_discs(w, h, r, gap_factor=1.0, cols=(RED_BGR, GREEN_BGR, ORANGE_BGR)):
+    """在定缺取区（y 0.40~0.75、x 0.25~0.75）画三盘，默认 万(红)/条(绿)/筒(橙)。
+
+    `cols` 可换顺序：各家平台把三盘摆成什么次序并不统一，而腾讯旧取区是「红在绿左、
+    绿在橙左」的**顺序**判据 —— 反序帧只有跨平台几何通路认得出，所以它得有独立的
+    变异对照（否则几何通路被删空也照样全绿）。"""
     img = np.full((h, w, 3), (60, 60, 60), np.uint8)
     cy = int(h * 0.575)
     sub_w = w * 0.50
     x0 = int(w * 0.25 + sub_w * 0.15)
     step = int((r * 2 + max(8, r * 0.9)) * gap_factor)
-    for k, col in enumerate((RED_BGR, GREEN_BGR, ORANGE_BGR)):
+    for k, col in enumerate(cols):
         cv2.circle(img, (x0 + k * step, cy), r, col, -1)
     return img
 
@@ -261,6 +265,13 @@ def _assert_big_discs_are_dingque(probe):
     # 2000x899 真机帧：筒盘实测外接框 159x162、轮廓面积 12763。
     # 旧写法用绝对面积上限把它拒了，is_dingque_phase 漏判。
     assert probe(fx_discs(W, H, r=80)), "大屏真机帧上的三色盘又被绝对面积上限挡在门外"
+
+
+def _assert_reversed_discs_are_dingque(probe):
+    """筒-条-万 反序三盘：腾讯旧取区的顺序判据（红<绿<橙）必然不成立，
+    只剩跨平台几何通路认得出。这条是「几何通路在承重」的唯一证据。"""
+    assert probe(fx_discs(W, H, r=80, cols=(ORANGE_BGR, GREEN_BGR, RED_BGR))), \
+        "异序（筒-条-万）三色盘漏判：非腾讯布局的定缺阶段又瞎了"
 
 
 def _assert_small_discs_are_dingque(probe):
@@ -608,17 +619,27 @@ def _guard_breaks(assertion) -> bool:
         return True
 
 
-def _mutated_det(method: str, old: str, new: str):
-    """把识别器的一个方法体改坏一处，返回可调用函数（不碰磁盘也不碰生产实例）。
+def _mutated_det(method: str, old, new):
+    """把识别器的一个方法体改坏（可以一次改好几处），返回可调用函数（不碰磁盘也不碰生产实例）。
 
     只 exec 这一个方法：det 模块导入了 cv2/numpy，拿它的命名空间当 globals 就够
-    方法体用，而不必重建整个模板库（加载 bank 要好几秒）。"""
+    方法体用，而不必重建整个模板库（加载 bank 要好几秒）。
+
+    为什么要支持一次改多处：`is_dingque_phase` 现在是**两条通路**，跨平台几何通路在前、
+    命中就 return，腾讯旧取区在后。只改坏后面那段，夹具帧在第一段就返回了，被改坏的代码
+    根本没执行到 —— 变异活下来既不代表「守卫接住」也不代表「判据失效」，纯属空转。
+    要证明旧取区还在承重，就得把几何通路一并拆掉（见 BEHAVIOR_MUTANTS 里 `old` 是列表那条）。"""
     body = _det_method_src(method)
-    if old not in body:
-        raise AssertionError(f"变异模板过期（{method}）：{old[:70]}")
-    mutated = body.replace(old, new, 1)
+    pairs = list(zip(old, new)) if isinstance(old, list) else [(old, new)]
+    if isinstance(old, list) and len(old) != len(new):
+        raise AssertionError(f"变异模板 old/new 不成对（{method}）")
+    mutated = body
+    for o, n in pairs:
+        if o not in mutated:
+            raise AssertionError(f"变异模板过期（{method}）：{o[:70]}")
+        mutated = mutated.replace(o, n, 1)
     if mutated == body:
-        raise AssertionError(f"变异无效：{old[:70]}")
+        raise AssertionError(f"变异无效：{str(old)[:70]}")
     ns = dict(vars(TGD))
     exec(compile(textwrap.dedent(mutated), f"<mutant:{method}>", "exec"), ns)
     return ns[method]
@@ -661,12 +682,23 @@ class TestMutationControls(unittest.TestCase):
          "                and 0.20 <= sh / float(bh) <= 0.60)",
          "        return True",
          _assert_loading_sheet_is_not_swap),
-        ("定缺色盘退回绝对面积上限（2000x899 帧漏判定缺阶段）",
-         "is_dingque_phase",
-         "                if not (side_lo <= bw <= side_hi and side_lo <= bh <= side_hi):\n"
-         "                    continue",
-         "                if area > 10000:\n                    continue",
+        ("定缺色盘退回绝对面积上限（2000x899 帧漏判定缺阶段）；"
+         "必须连几何通路一起拆 —— 它在前面命中即 return，留着它这段代码跑不到，"
+         "变异活下来只说明守卫空转", "is_dingque_phase",
+         ["        discs = _find_phase_discs(image_bgr)\n"
+          "        if discs and _phase_disc_row_in_band(\n"
+          "                _phase_disc_row(discs, _PHASE_DISC_TRIPLE_GAP, 0.035)):\n"
+          "            return True",
+          "                if not (side_lo <= bw <= side_hi and side_lo <= bh <= side_hi):\n"
+          "                    continue"],
+         ["        discs = []",
+          "                if area > 10000:\n                    continue"],
          _assert_big_discs_are_dingque),
+        ("跨平台几何通路被抽掉（只剩腾讯顺序判据）：异序三盘必须漏判",
+         "is_dingque_phase",
+         "        discs = _find_phase_discs(image_bgr)",
+         "        discs = []",
+         _assert_reversed_discs_are_dingque),
         ("定缺色盘相对下限改成 0（中等色块凑成一行就算选门）",
          "is_dingque_phase",
          "        side_lo = max(20.0, sub.shape[1] * 0.035)",

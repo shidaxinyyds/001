@@ -129,7 +129,11 @@ LOFO_GT_FILES = ["shots_b1.json"]
 # 来源），不得被拿去当 LOFO 样本外数字。名单里的文件必须还在 —— 它被删了却没从
 # 这里销掉，等于守卫在为一个不存在的口径写理由。
 LEGACY_GT = {"shots.json": "腾讯底座 37 帧，手绘主库同源",
-             "new_shots.json": "public/0 新素材帧，不落选模板的收割来源"}
+             "new_shots.json": "public/0 新素材帧，不落选模板的收割来源",
+             # 用户真机 20 帧：P2-A/P2-B 的修法（gd_hz 牌集、错配纠正）就是按这批
+             # 帧的错读形状定的，拿它报“样本外准确率”是自夸。它能钉的是**不回退**
+             # （见 localtest/test_multi_hand_guard.py），不是泛化能力。
+             "shots_multi.json": "用户真机 20 帧（六平台），修法同源=样本内，只当回归钉"}
 DEFAULT_SRC = os.path.relpath(os.path.join(REPO, "public", "0"), REPO).replace("\\", "/")
 # 手绘主库模板没有收割文件名：它们不是从任何 GT 帧割的，拿键名去 provenance 里
 # 查只会“借”到同名的收割样本（见 bank_instances 的 docstring），所以单独标一个值。

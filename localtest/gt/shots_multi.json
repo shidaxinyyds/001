@@ -1,0 +1,66 @@
+{
+  "_readme": [
+    "用户真机 20 帧（localtest/shots_multi/）的手牌真值表。守卫：localtest/test_multi_hand_guard.py。",
+    "真值来源 = **人眼逐帧读屏**（拼屏工具 localtest/montage_hands.py + 分区放大 localtest/zoom_hand.py），",
+    "不是引擎输出。多数条目与引擎读数一致是因为「先人眼钉死、再拿引擎对」，顺序不能反。",
+    "hand 是**多重集**（排序后的两位码），不声明屏幕排列顺序 —— 排序是后处理的事，",
+    "把顺序也钉住会让一条无关改动打红这条识别守卫。",
+    "mode = 面板上写着的那个玩法（用户声明），不是引擎纠正后的生效玩法；",
+    "queshen_play_02 就是唯一一条「声明的玩法本平台没开」的帧，生效值由守卫另查。"
+  ],
+  "shots": [
+    {"file": "jj_play_01.jpg", "platform": "jj", "mode": "sc_hz", "verified": true,
+     "hand": ["1m", "3m", "7m", "9m", "9m", "7p", "7p", "8p", "8p", "8p", "9p", "7z", "7z", "7z"]},
+    {"file": "jj_play_02.jpg", "platform": "jj", "mode": "sc_hz", "verified": true,
+     "hand": ["1m", "3m", "7m", "9m", "9m", "7p", "7p", "8p", "8p", "8p", "9p", "7z", "7z", "7z"]},
+    {"file": "jj_play_03.jpg", "platform": "jj", "mode": "sc_hz", "verified": true,
+     "hand": ["1m", "3m", "7m", "9m", "9m", "7p", "7p", "7p", "8p", "8p", "8p", "9p", "7z", "7z"]},
+    {"file": "jj_dingque_01.jpg", "platform": "jj", "mode": "sc_hz", "verified": true,
+     "hand": ["1m", "1m", "3m", "7m", "9m", "1p", "7p", "7p", "7p", "8p", "8p", "8p", "7z"]},
+    {"file": "jj_swap_01.jpg", "platform": "jj", "mode": "sc_hz", "verified": true,
+     "hand": ["1m", "1m", "3m", "8m", "9m", "1p", "7p", "7p", "7p", "8p", "8p", "8p", "7z"]},
+
+    {"file": "zj_play_01.jpg", "platform": "zj_sichuan", "mode": "sc_hz", "verified": true,
+     "hand": ["4p", "5p", "5p", "5p", "9p", "9p", "9p", "1s", "1s", "2s", "9s", "9s", "7z", "7z"]},
+    {"file": "zj_play_02.jpg", "platform": "zj_sichuan", "mode": "sc_hz", "verified": true,
+     "hand": ["4p", "5p", "5p", "5p", "9p", "9p", "9p", "1s", "1s", "2s", "9s", "9s", "7z", "7z"]},
+
+    {"file": "shushan_play_03.jpg", "platform": "shushan", "mode": "sc_hz", "verified": true,
+     "note": "同局三帧里唯一没被大字动画压住的一帧，它的读数就是 play_01/play_02 的真值来源",
+     "hand": ["2m", "2m", "3m", "3m", "3m", "4m", "4m", "4m", "7m", "7m", "9m", "9m", "7z"]},
+    {"file": "shushan_play_01.jpg", "platform": "shushan", "mode": "sc_hz", "verified": true,
+     "note": "屏上「清800色」大字动画压在手牌行中段；已知缺陷见守卫 KNOWN_DEFECTS",
+     "hand": ["2m", "2m", "3m", "3m", "3m", "4m", "4m", "4m", "7m", "7m", "9m", "9m", "7z"]},
+    {"file": "shushan_play_02.jpg", "platform": "shushan", "mode": "sc_hz", "verified": true,
+     "note": "同上，动画文案换成「清9315色」；已知缺陷见守卫 KNOWN_DEFECTS",
+     "hand": ["2m", "2m", "3m", "3m", "3m", "4m", "4m", "4m", "7m", "7m", "9m", "9m", "7z"]},
+    {"file": "shushan_dingque_01.jpg", "platform": "shushan", "mode": "sc_hz", "verified": true,
+     "hand": ["2m", "2m", "3m", "3m", "3m", "4m", "4m", "4m", "7m", "7m", "9m", "9m", "9p", "7z"]},
+
+    {"file": "queshen_play_01.jpg", "platform": "gd_queshen", "mode": "gd_hz", "verified": true,
+     "note": "面板标题「广东红中王」。屏上明摆着一枚北(4z) —— P2-A 之前被贴成 7z/9s 并凭空少一张",
+     "hand": ["4p", "9p", "9p", "2s", "4s", "4s", "5s", "5s", "5s", "6s", "4z"]},
+    {"file": "queshen_play_02.jpg", "platform": "gd_queshen", "mode": "sc_hz", "verified": true,
+     "effective_mode": "std_tdh",
+     "note": "面板挂着「血流红中」，但广东雀神没开这条玩法：引擎必须纠正成 std_tdh 并说出去（P2-B）。屏上有北 + 4 张白板",
+     "hand": ["4p", "9p", "9p", "2s", "4s", "5s", "5s", "5s", "9s", "4z", "5z", "5z", "5z", "5z"]},
+
+    {"file": "tuyou_swap_01.jpg", "platform": "tuyou", "mode": "sc_hz", "verified": true,
+     "note": "曾疑似与引擎有 2 处分歧，用 zoom_hand 分区放大后逐张复核：3 张 3条 + 2 张 4条 + 1 张 5条 成立（人眼初读把一对 4条 记成了 5条）",
+     "hand": ["2s", "2s", "3s", "3s", "3s", "4s", "4s", "5s", "6s", "6s", "7s", "8s", "8s", "7z"]},
+    {"file": "tuyou_dingque_01.jpg", "platform": "tuyou", "mode": "sc_hz", "verified": true,
+     "hand": ["7m", "2s", "3s", "3s", "3s", "4s", "5s", "6s", "6s", "7s", "8s", "8s", "7z"]},
+    {"file": "tuyou_pick_01.jpg", "platform": "tuyou", "mode": "sc_hz", "verified": true,
+     "hand": ["1m", "3m", "6m", "7m", "2s", "3s", "3s", "4s", "5s", "6s", "7s", "8s", "7z"]},
+
+    {"file": "tencent_swap_01.jpg", "platform": "tencent", "mode": "sc_hz", "verified": true,
+     "note": "文件名写 swap，屏上却是「听牌」提示 + 出牌倒计时 → 局中帧（阶段真值见 eval_phase_layout.py）",
+     "hand": ["1p", "2p", "4p", "5p", "7p", "7p", "8p", "8p", "8p", "8p", "1s", "4s", "5s", "7z"]},
+    {"file": "tencent_pick_01.jpg", "platform": "tencent", "mode": "sc_hz", "verified": true,
+     "hand": ["4m", "6m", "9m", "1p", "2p", "4p", "7p", "7p", "8p", "1s", "4s", "5s", "7z"]},
+    {"file": "tencent_pick_02.jpg", "platform": "tencent", "mode": "sc_hz", "verified": true,
+     "hand": ["4m", "6m", "9m", "1p", "2p", "4p", "7p", "7p", "8p", "1s", "4s", "5s", "7z"]},
+    {"file": "tencent_pick_03.jpg", "platform": "tencent", "mode": "sc_hz", "verified": true,
+     "hand": ["4m", "6m", "9m", "1p", "2p", "4p", "7p", "7p", "8p", "1s", "4s", "5s", "7z"]}
+  ]
+}
