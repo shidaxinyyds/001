@@ -96,35 +96,57 @@ jobs:
           name: app-release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
 
+      # 发布 tag 与发布说明一律从 pubspec / CHANGELOG 取，不写死在 workflow 里。
+      # 曾经这里硬编码 `tag_name: v1.7.2`：结果 v1.7.4 的 APK 被传到了 v1.7.2 的 tag
+      # 上（直链文件名与包内容对不上），而 workflow 本身还是绿的。写死的 tag +
+      # 写死的正文必然会在下一次升版时错配，所以改成算出来，并当场断言两者一致。
+      - name: 算发布版本与发布说明
+        run: |
+          set -euo pipefail
+          VER=$(sed -n 's/^version: \([0-9][0-9.]*\)+[0-9]*/\1/p' pubspec.yaml | head -1)
+          BUILD=$(sed -n 's/^version: [0-9][0-9.]*+\([0-9]*\).*/\1/p' pubspec.yaml | head -1)
+          if [ -z "$VER" ] || [ -z "$BUILD" ]; then
+            echo "::error::pubspec.yaml 里没解析出 version（VER=$VER BUILD=$BUILD）"
+            exit 1
+          fi
+          # 取 CHANGELOG「## [未发布]」下的第一个 ### 小节（本次发布的逐条归因）。
+          # 两个坑都踩过：退出条件写成 `^#` 而不是 `^#{2,3}`（runner 默认 awk 是 mawk，
+          # 区间量词不总生效）；进入小节后必须把 s 关掉，否则每一条规则对同一行都会
+          # 依次判一遍，后面的 `### ` 仍命中「第一条小节」规则，整份 CHANGELOG 会被
+          # 当成发布正文（本地复现脚本 localtest/check_release_step.sh 当场抠出来的）。
+          awk '/^## \[未发布\]/{s=1; next} s && /^### /{t=1; s=0; print; next} t && /^#/{exit} t{print}' \
+            CHANGELOG.md > "$RUNNER_TEMP/section.md"
+          if [ "$(wc -l < "$RUNNER_TEMP/section.md")" -gt 80 ]; then
+            echo "::error::发布正文抽了 $(wc -l < "$RUNNER_TEMP/section.md") 行（>80），节选规则坏了"
+            exit 1
+          fi
+          if [ ! -s "$RUNNER_TEMP/section.md" ]; then
+            echo "::error::CHANGELOG 没有与本次发布对应的「未发布」小节，拒绝发布空正文的 release"
+            exit 1
+          fi
+          # 正文必须自报版本：防止「tag v1.7.4、正文讲 v1.7.2」这种错配再一次发生
+          if ! grep -q "v$VER" "$RUNNER_TEMP/section.md"; then
+            echo "::error::CHANGELOG 首节未提及 v$VER（pubspec 当前版本），发布说明与包不是同一版"
+            exit 1
+          fi
+          {
+            echo "### 雀神助手 v$VER+$BUILD 安装包"
+            echo
+            cat "$RUNNER_TEMP/section.md"
+            echo
+            echo '手机端直接点击下方 `app-release.apk` 即可下载安装！'
+          } > "$RUNNER_TEMP/release_body.md"
+          echo "RELEASE_TAG=v$VER" >> "$GITHUB_ENV"
+          echo "RELEASE_NAME=雀神助手 v$VER+$BUILD APK" >> "$GITHUB_ENV"
+          echo "发布 tag: v$VER（构建号 $BUILD）"
+
       - name: 自动发布 GitHub Release (手机免登录直链)
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         with:
-          tag_name: v1.7.2
-          name: "雀神助手 局况感知纠偏与推理提速版 v1.7.2 APK"
-          body: |
-            ## 雀神助手 v1.7.2 安装包
-
-            ### 本版修了什么（对齐真机反馈的四件事）
-            - **阶段感知错乱（不在换牌却显示换牌，反之也是）**：换牌判据剔除已被实测证伪的青色「过」反证，改用换牌按钮低带 + 形状三窗口（41 帧实测值，不许随手放宽）；迟滞续帧 3→1；阶段排他只认牌局账本（弃牌/副露），拆掉引擎自己立的伪铁律「立牌 >=14 张 ⇒ 已摸牌 ⇒ 不在换牌」——GT 里 s_6d33/t2 两帧同时是 14 张立牌与换三张阶段；
-            - **局况不再拿张数编事**：「立牌等于基数」只推出「轮不到你」，推不出「你刚打完一张」（开局未摸牌时本家也是 13 张）；定缺事件只能来自牌桌徽章或手动指定，推荐值不再被播成「定缺敲定」；同一局缺门改口只计入 `evidence.rejected.dingque_conflict` 不播报；
-            - **有手牌却不显示 / 莫名「等待牌局开始」**：新增出口不变量——报 `waiting` 却带着本帧真读到的牌就升级为 `partial`；读到 1~5 张不再被整块藏起（旧实现直接报等待开局）；瞬态阻尼与 partial 兜底去掉 `_match_started` 前置；悬浮窗闸门只信「引擎真报出了牌」，不再自行二次否定引擎读数（闸门改造后遗留的 4 个「算了却没人读」的阶段局部量一并清掉）；
-            - **定缺徽章读数的时间稳定门（面板自噬的第三道次级防线）**：悬浮窗压住徽章取区时读到的是面板 chip 颜色（真机 s2 报筒、s4 报条）。像素启发式已实测证伪并拆除，还能区分的只剩时间轴：最近 3 次扫描里非空读数必须彼此全等才可信，出现分歧就整体判「没读到」（宁可不报也不让最后一枪直接上屏）；新局与换朝向作废窗口，抽搐扣下有计数可追溯。如实声明：这道门只挡「抽搐」，**不挡持续遮挡**，彻底解法是面板矩形事实源（需真机验证，尚未做）；
-            - **定缺三色盘面积窗改分辨率无关**（此前同一局在不同分辨率下一个判得出一个判不出）；
-            - **推理提速（动手四刀，均以逐帧输出零差异为上线前提；第三刀实测否决未落地，第五刀是一项死常量处置）**：① 风格核预算——声明腾讯后不再扫蜀山牌风，每片 110 核（此前白挂 76 枚），37 帧 hand/status/dingque 逐帧差异 0；② 张数候选序贯早停——先只切第一档，均分 <0.55 才回到全候选重扫，41 帧逐格全等；中途那层「不达标先补跑第二档」的兜底实测从未生效，已删；③ 决策层 memo 实测否决（非稳态成本中心，不落地）；④ 打分改「粗筛+精算」两阶段（图与核同缩一半，精算集 = 粗筛前 3 ∪ 分差 0.06 带 ∪ `_decide` 七条相邻类闭包），738 次真实调用打分 11.26 → 5.71ms/枚（-49.3%）且逐枚最终裁决全等；⑤ 删掉从未接线的死常量 `MAX_SKIP_FRAMES`，改为累计漂移门（同一阈值，不新增参数）；
-
-            ### 实测数据（PC 夹具，非手机端）
-            - 接线守卫 `run_all_guards.py` **39 条全绿、红 0**；变异检验 `--mutate` **21 条全绿、红 0**（本版新增 5 个守卫：真机四帧阶段回归/风格核预算/张数早停/定缺时间稳定门/粗筛精算一致性）；
-            - 腾讯格网 GT 37 帧全链路：手牌 **37/37 帧、逐张 444/444**、阶段 status **37/37**、定缺 **10/10**，与改前持平（无精度倒退）；
-            - 单帧端到端（37 帧常驻 Engine 连续跑帧）均值 **187.1 → 128.7ms**、中位 95.2 → **60.1ms**、最差 1049.0 → **696.6ms**；逐枚打分单价 11.26 → 5.71ms；
-            - 未达成项如实标注：≤300ms 是 PC 夹具口径，**手机端尚未真机复测**（本环境无 Android 工具链/Flutter SDK）；跳帧与硬重置带来的卡顿改善、暗光不再误报、连续 30 分钟无泄漏均**必须真机目测**；
-
-            ### 历史能力（v1.7.0 继承）
-            - **对手手牌贝叶斯概率透视与危险流向反推 (Bayesian Hand Range Reading & Danger Flow)**：结合定缺物理坍缩、现物折损与筋牌防御法则，实时推断三家手牌概率分布与点炮高危度，知己知彼；
-            - **全场实时胡牌胜率与期望收益雷达 (Win Equity & EV Gauge)**：结合对手听牌竞争模型、听牌枚数与期望番数，输出精准全场胜率、净收益预估与攻防决策胶囊；
-            - **轻量级强化学习策略价值网络 (Policy-Value Network)**：引入双头网络架构（策略先验分布 π 与盘面价值标量 v），深度融合打牌 EV 综合评分，告别机械死算；
-            - **视觉检测引擎升级 YOLO11-Nano (2024年底最新一代)**：原生 OpenCV cv2.dnn 多线程半精度 FP16 硬件加速与 50 倍 NumPy 矢量化后处理，告别模型空转；
-            - 手机端直接点击下方 `app-release.apk` 即可下载安装！
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_NAME }}
+          body_path: ${{ runner.temp }}/release_body.md
           files: build/app/outputs/flutter-apk/app-release.apk
           draft: false
           prerelease: false
