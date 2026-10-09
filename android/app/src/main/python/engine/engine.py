@@ -1501,6 +1501,17 @@ def _rescue_out_of_gate(detector, image, row):
 RIVER_SCAN_DIFF_THRESH = 8.0   # 牌河区块均值 L1 距离低于此值视为未变（静止≈0~3，一张弃牌≈30+）
 RIVER_SCAN_MAX_INTERVAL = 10   # 即便签名判未变，最多攒这么多帧也强制重扫一次（兜底防漏检漂移）
 
+# 单次牌河扫描最多分类多少个候选。这个上限是被**实测逼出来的**：一次不限制
+# 候选的全图扫描要 6.66 秒（`build/river_timing.py`），而后台结果必须在接下来
+# 几帧内能被认领才有意义——扫得完但赶不上，面板上就是「记牌器空白」。
+# 截断按「白底占比」降序取前 N：丢掉的永远是最不像牌的那批。
+RIVER_SCAN_MAX_TILES = 24
+
+# 首选旋转最高分低于此值 → 不再走「全量 bank × 3 旋转」兜底重扫。兜底是给
+# 风格探针路由失误留的，不是给碎块噪声留的：那些切片本来就过不了采信线，
+# 重扫只会在它们身上把成本乘以四。
+RIVER_FALLBACK_MIN_SCORE = 0.30
+
 
 def _tile_content_key(tile_crop: np.ndarray):
     """切片内容指纹（8x8 缩略 hash）：牌河未变时同一切片命中缓存 → 零分类。"""
@@ -1553,7 +1564,9 @@ def _classify_tile_fast(detector, tile_crop, avail, pref_rots, cache):
             break
 
     # 探针路由失误致全低分（本就低于门槛会被丢弃）→ 全量 bank 兜底重扫一次
-    if best_sc < 0.42 and hasattr(detector, "classify_tile"):
+    # 但只在「有点像牌」时才兜：首转最高分连 RIVER_FALLBACK_MIN_SCORE 都不到的
+    # 切片几乎肯定是碎块/桌布纹，它过不了采信线，而兜底是把成本乘以四。
+    if best_sc < 0.42 and best_sc >= RIVER_FALLBACK_MIN_SCORE and hasattr(detector, "classify_tile"):
         for r in pref_rots:
             cur = tile_crop if r is None else cv2.rotate(tile_crop, r)
             lbl, sc = detector.classify_tile(cur, avail=avail, styles=None)
@@ -1583,6 +1596,8 @@ def detect_river_discards(image: np.ndarray, detector, mode: str = "4p", hand_ro
         ih, iw = image.shape[:2]
         avail = available_set(mode)
         raw_discards = []
+        # 候选收集表（先收集后分类）：(白底占比, x, y, w, h, 区名, 切片)
+        candidates: List[tuple] = []
         # 分类缓存挂在 detector 上跨帧复用（牌河未变时命中即零分类）。
         river_cache = getattr(detector, "_river_cls_cache", None)
         if river_cache is None:
@@ -1655,14 +1670,27 @@ def detect_river_discards(image: np.ndarray, detector, mode: str = "4p", hand_ro
                 for sx, sy, sw, sh, tile_crop in sub_crops:
                     if tile_crop.size == 0:
                         continue
-                    pref = _RIVER_ROT_PREF.get(
-                        zname, (None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE))
-                    best_lbl, best_sc = _classify_tile_fast(
-                        detector, tile_crop, avail, pref, river_cache)
+                    # 先只收集候选，不在此分类。分类是整条牌河路径的绝对成本大头
+                    # （实测一次扫描 6.66s → 比采样窗口还长，结果永远赶不上认领）。
+                    # 「像不像牌」用白底占比衡量：牌面基本是整块象牙白，低占比的
+                    # 碎块/纹理几乎一定是噪声，它们的分类分数也永远过不了采信线。
+                    fill = float(np.count_nonzero(
+                        mask[by:by + bh, bx:bx + bw])) / float(max(1, bw * bh))
+                    candidates.append((fill, sx, sy, sw, sh, zname, tile_crop))
 
-                    # 牌河弃牌置信度门槛（可配，默认 0.42）
-                    if best_lbl and best_sc >= RIVER_CONF["min_conf"]:
-                        raw_discards.append((sx, sy, sw, sh, best_lbl, best_sc, zname))
+        # 按「像牌程度」降序只分类前 N 个：截断的是最不像牌的那批，而不是任意
+        # 截前 N 个。超出预算的候选宁可不读，也不能让整次扫描赶不上认领。
+        candidates.sort(key=lambda t: t[0], reverse=True)
+        budget = candidates[:RIVER_SCAN_MAX_TILES]
+        for _fill, sx, sy, sw, sh, zname, tile_crop in budget:
+            pref = _RIVER_ROT_PREF.get(
+                zname, (None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE))
+            best_lbl, best_sc = _classify_tile_fast(
+                detector, tile_crop, avail, pref, river_cache)
+
+            # 牌河弃牌置信度门槛（可配，默认 0.42）
+            if best_lbl and best_sc >= RIVER_CONF["min_conf"]:
+                raw_discards.append((sx, sy, sw, sh, best_lbl, best_sc, zname))
 
         # 空间非极大值抑制（NMS）
         raw_discards.sort(key=lambda d: d[5], reverse=True)

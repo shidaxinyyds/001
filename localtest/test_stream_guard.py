@@ -101,9 +101,14 @@ KNOWN_STREAM_DEFECTS = {
     # 始终 0（`localtest/probe_river_repeat.py`）。所以不是“扫了没扫到”，而是异步认领
     # 这一环断了（认领块里 rf.result() 若抛异常会被外层 except 吞掉，与“从未 done”
     # 在面板上长得一模一样）。
-    # 曾经写过的两个错归因，记在这里免得下一个人重踩：
+    # 曾经写过的错归因，记在这里免得下个人重踩：
     #   × 「future 正常返回 tuple，但区内检不出」——实际 consumes=0，根本没走到那步；
-    #   × 「主检测器没有 classify_tile 就是根因」——它是必要条件（接线已修），不充分。
+    #   × 「主检测器没有 classify_tile 就是根因」——它是必要条件（接线已修），不充分；
+    #   × 「单次扫描 6.66s 太慢，所以赶不上认领」——不准：同一任务在主线程空闲时
+    #     走 executor 1.0s 就 done。真正的瓶颈是**连帧时后台线程抢不到 CPU**（主线程
+    #     一直在做网格识别/GIL 密集调用），done() 在 15 帧内始终为假。属于
+    #     项目里已有的「OpenCV 线程争用」那一类，下一步从线程配额与单次工作量
+    #     两侧同时收（已先加 RIVER_SCAN_MAX_TILES / RIVER_FALLBACK_MIN_SCORE 两道上限）。
     "river_always_empty:zj_play_03.jpg": {"bottom": 0, "top": 0, "left": 0, "right": 0},
     # A8：牌河为空、且屏上处于换三张阶段（手牌没有任何「缺」角标），
     # 面板已经报出“seat 1 定缺了”。缺门证据不存在，这个值是凭空的。
