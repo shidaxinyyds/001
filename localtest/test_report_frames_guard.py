@@ -46,16 +46,22 @@ import layer_cost as lc  # noqa: E402
 SHOT_DIR = DR.SHOT_DIR
 
 # 人眼真值：(文件, 平台, 玩法, 手牌多重集, 屏上阶段)
-# 阶段取值：dingque=定缺选门、swap=换三张、play=局中（出牌/摸牌/已下叫）
+# 阶段取值：dingque=定缺选门、swap=换三张、play=局中（出牌/摸牌/已下叫/结算）
+#
+# 真值怎么定的（改错过一次，记在这）：上一版阶段是我**看整屏缩略图**填的，把两帧填错
+# 了：`shushan_swap_02` 被标成 dingque（它的色盘带里根本没有盘，屏上写的是「选择三张同
+# 花色手牌」+ 圆形换牌按钮），`zj_popup_01` 跟着**面板当时错误的显示**标成了 swap。
+# 现在阶段一律看 `localtest/montage_phase_bands.py` 出的中央证据带（文字/按钮都在那），
+# 而不是看面板——拿被检者的输出当真值，就是自证。
 TRUTH = [
     ("shushan_dingque_01.jpg", "shushan", "sc_hz",
      ["1m", "2m", "2m", "3m", "3m", "3m", "4m", "4m", "5m", "5m", "5m", "7m", "7m"],
      "dingque"),
     ("shushan_swap_01.jpg", "shushan", "sc_hz",
      ["1m", "2m", "3m", "3m", "3m", "4m", "5m", "5m", "5m", "7m"], "swap"),
-    ("shushan_dingque_02.jpg", "shushan", "sc_hz",
+    ("shushan_swap_02.jpg", "shushan", "sc_hz",
      ["1m", "1p", "2m", "3m", "3m", "3m", "4m", "5m", "5m", "5m", "5p", "6p", "7m"],
-     "dingque"),
+     "swap"),
     ("jj_play_02.jpg", "jj", "sc_hz",
      ["2m", "2s", "3p", "4m", "4p", "5p", "5s", "6m", "7p", "8m", "8p", "8s", "9p"],
      "play"),
@@ -69,9 +75,9 @@ TRUTH = [
     ("queshen_play_05.jpg", "gd_queshen", "sc_hz",
      ["1p", "1z", "3s", "4z", "4z", "5s", "6p", "6s", "8p", "9p", "9p", "9p", "9s"],
      "play"),
-    ("zj_swap_01.jpg", "zj_sichuan", "sc_hz",
+    ("zj_popup_01.jpg", "zj_sichuan", "sc_hz",
      ["1m", "1m", "1s", "1s", "1s", "2m", "2m", "2m", "2s", "2s", "2s", "7z", "7z"],
-     "swap"),
+     "play"),
     ("zj_anomaly_01.jpg", "zj_sichuan", "sc_hz",
      ["1m", "1m", "1s", "1s", "1s", "2m", "2m", "2m", "2s", "2s", "2s", "7z", "7z"],
      "play"),
@@ -83,24 +89,43 @@ TRUTH = [
 # 已知缺陷台账（双向棘轮）。key = 文件，value = 当前引擎的**错误**输出。
 # 每一条都写着「错在哪、为什么还没修」——修好后必须删条目，否则本守卫报红。
 KNOWN_HAND_DEFECTS = {
-    # 检测层漏框（不是分类）：第 14 张「發」在窄玩法下压根没进手牌行，
-    # 所以补打分也救不到它。要修的是手牌行检测/通道选择，与牌集闸门无关。
+    # 检测层漏框（不是分类）：第 14 张「發」压根没进手牌行。
+    # 真身已量到：不是 `drawn_box` 那条 `sc_d >= 0.48`（那条已能救），而是
+    # `detect_hand_strip` 里的**张数候选打分**：`_try_counts` 比 13/14 哪个假设均分高，
+    # 而第 14 张在川麻门内只有 0.37 → 把 14 档的均分拉下去 → 选了 13 档。
+    # 实测：同一帧全牌玩法 14 框、川麻玩法 13 框（`probe_geometry_purity.py`）。
+    # 要动的是全仓最承重、守卫最密的那个函数，不能顺手改；改完必须逐格对拍。
     "queshen_play_03.jpg": ["1p", "1z", "3s", "4z", "4z", "5s", "6p", "6s",
                             "8p", "9p", "9p", "9p", "9s"],
-    # 全屏弹窗（“购买麻卡解锁记牌器”）压暗整张图 → 一个框都没检出，还报「等待牌局开始」。
-    # 这是用户第 3 条「关键阶段莫名不显示」的最强形态。要修的是暗化画面下的手牌召回。
-    "zj_swap_01.jpg": [],
+    # 全屏弹窗（“购买麻卡解锁记牌器”）压暗手牌带 → 一个框都没检出。
+    # 本轮修的是“不说谎”：这一帧现在报「画面被弹窗或暗层压住，本帧读不到手牌」
+    # 而不是「等待牌局开始」（见下面的 test_dim_frame_says_why_it_cannot_read）。
+    # 真把暗层下的牌读出来需要自适应归一化，那会动牌面掩膜本身，未做。
+    "zj_popup_01.jpg": [],
 }
 KNOWN_PHASE_DEFECTS = {
     # 屏上是换三张（「选择三张同花色手牌」+ 右侧圆形换牌按钮），引擎没认出来：
     # 现有 `is_swap_phase` 只认腾讯那块低带金色扁圆盘，蜀山的按钮在右侧中部。
+    #
+    # 为什么本轮没直接加一条“跨平台几何通路”：拿“桌面中带里的白色近圆盘”试过，
+    # **被实测否证**（`localtest/sweep_swap_button.py`，67 帧）：同一形状在 10 帧
+    # 非换牌帧上照样出现（蜀山定缺帧 3 个、蜀山局中帧 3 个、JJ 局中帧 1 个，
+    # 位置与真那个换牌按钮几乎重叠，如 shushan_play_03 的 (0.691,0.641) vs
+    # shushan_swap_02 的 (0.672,0.638)）。拿它上屏就是把“不在换牌却显示换牌”
+    # 亲手造出来——那正是用户报的第 ② 条。剩下的可用差异只有按钮里那两个字，
+    # 需要 OCR 或模板，不是调阈值能得到的。
     "shushan_swap_01.jpg": "play",
-    # 屏上有 万/条/筒 三个色盘 + 「选择定缺花色」，但 `_find_phase_discs` 一个圆盘都没
-    # 找到（同场景的 dingque_01 找到 3 个）→ 定缺漏判。
-    "shushan_dingque_02.jpg": "play",
-    # 屏上是换三张，弹窗遮挡 + 版式不同 → 既没认出手牌也没认出阶段。
-    "zj_swap_01.jpg": "waiting",
+    # 同上：同一局的另一帧换三张（带圆形换牌按钮），一样漏判。
+    "shushan_swap_02.jpg": "play",
+    # 全屏弹窗（“购买麻卡解锁记牌器”）+ 结算画面：引擎读不出手牌。
+    # 本轮修的是“不说谎”：阶段仍报 waiting，但消息从「等待牌局开始」改成
+    # 「画面被弹窗或暗层压住，本帧读不到手牌」（见 ⑤ 与 engine 的 `HAND_BAND_DIM_V`）。
+    # 把牌真读出来需要自适应归一化（会动牌面掩膜本身），未做。
+    "zj_popup_01.jpg": "waiting",
 }
+# 上一轮台账里的「蜀山定缺圆盘召回」已删：那是一条**假缺陷**——我把一帧换三张误标成
+# 定缺，然后去量“为什么定缺漏判”。重新按中央证据带定阶段后，那帧本来就是 swap，引擎
+# 判 play 的错属于上面两条同一个根子（跨平台换牌判据缺失），不是定缺召回问题。
 
 
 def read_frame(name):
@@ -197,6 +222,27 @@ class TestReportFrames(unittest.TestCase):
                              "动的是另一条链路，别把新问题塞进旧台账")
         self.assertEqual(set(bad and [b[0] for b in bad]) or set(), set(registered),
                          "台账里有已经修好的条目（或漏了新条目）")
+
+
+    def test_dim_frame_says_why_it_cannot_read(self):
+        """⑤ 读不到牌时，面板必须说对原因：「没开局」与「被暗层压住」是两回事。
+
+        这条不修召回（那张帧现在仍读不出牌，台账已记），只钉“不许把未知说成事实”：
+        旧行为报「等待牌局开始」，用户会以为还要去开局，而牌局正在跑。
+        判据与阈值（正常帧手牌带 V 中位 173~230、该帧 62）见 engine 的 `HAND_BAND_DIM_V`。
+        """
+        d = self._d("zj_popup_01.jpg")
+        self.assertTrue(d.get("hand_dim"),
+                        "这帧手牌带 V 中位只有 62，却没报出「被压暗」：那条判据失效了")
+        msg = str(d.get("message") or "")
+        self.assertNotIn("等待牌局开始", msg,
+                         f"把「看不清」报成「没开局」就是把未知说成事实：{msg!r}")
+        self.assertTrue("压住" in msg or "读不到" in msg,
+                        f"降级了却没说原因：{msg!r}")
+        # 反向：正常帧不得被这条判据误伤（不然“看不清”会喊成狼来了）
+        dimmed = [t[0] for t in TRUTH
+                  if t[0] != "zj_popup_01.jpg" and self._d(t[0]).get("hand_dim")]
+        self.assertEqual(dimmed, [], f"这些帧手牌带并不暗却被报成压暗：{dimmed}")
 
 
 def _mp(i):

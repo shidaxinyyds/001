@@ -32,12 +32,12 @@ SHOT_DIR = os.path.join(HERE, "shots_report")
 FRAMES = [
     ("shushan_dingque_01.jpg", "shushan", "sc_hz"),
     ("shushan_swap_01.jpg", "shushan", "sc_hz"),
-    ("shushan_dingque_02.jpg", "shushan", "sc_hz"),
+    ("shushan_swap_02.jpg", "shushan", "sc_hz"),
     ("jj_play_02.jpg", "jj", "sc_hz"),
     ("queshen_play_03.jpg", "gd_queshen", "sc_hz"),
     ("queshen_play_04.jpg", "gd_queshen", "sc_hz"),
     ("queshen_play_05.jpg", "gd_queshen", "sc_hz"),
-    ("zj_swap_01.jpg", "zj_sichuan", "sc_hz"),
+    ("zj_popup_01.jpg", "zj_sichuan", "sc_hz"),
     ("zj_anomaly_01.jpg", "zj_sichuan", "sc_hz"),
     ("zj_play_02.jpg", "zj_sichuan", "sc_hz"),
 ]

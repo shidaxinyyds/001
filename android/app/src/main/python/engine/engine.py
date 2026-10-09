@@ -1390,6 +1390,42 @@ HAND_UNREADABLE_CONF = 0.55
 HAND_GATE_RESCORE_BELOW = 0.62
 HAND_GATE_RESCORE_MIN = 0.55
 HAND_GATE_RESCORE_MARGIN = 0.15
+
+# 手牌带「被压暗」的判定线：取整条带 V 通道的 **p75**，低于这条就算暗。
+# 为什么是 p75 而不是中位数：上一版取中位数，结果 6 帧正常帧被误判成「压暗」——
+# 手牌带里大半是桌布（实测占比 0.47~0.64），中位数由桌布决定，跟牌亮不亮无关
+# （是守卫的反向检查 `test_report_frames_guard.test_dim_frame_says_why_it_cannot_read`
+# 当场把它抓出来的）。牌是带里最亮的东西，所以看高分位数。
+# 分位数实测（`localtest/probe_dim_percentiles.py`，10 帧真机）：
+#   正常帧 p75 = 194 / 196 / 196 / 209 / 211 / 215 / 223 / 227 / 232
+#   弹窗压暗那一帧 p75 = **63**
+# 130 落在中间那个空档上：暗侧余量 2.06 倍、亮侧余量 1.49 倍。
+# 为什么不拿它去放宽牌面阈值：同一帧里弹窗自己的亮区 V=211，把阈值降到能看见
+# 暗牌，就会把别的帧的桌面空地也当成牌（实测桌面空地通过率 4.7%→72%）。
+# 所以暗层只拿来**说清为什么读不到**，不拿来改识别判据。
+HAND_BAND_DIM_V = 130.0
+
+
+def _hand_band_is_dim(image: CVImage, roi) -> bool:
+    """手牌取区这一条带是不是整体被压暗（弹窗遮罩/回大厅动画）。
+
+    只回答一个事实：这一带里最亮的那 25% 像素有多亮。不参与任何识别判据。
+    取区装不下、或带里没像素时返回 False（「没意见」不等于「暗」，这条原则同
+    `_face_brightness`）。
+    """
+    try:
+        if image is None or image.size == 0:
+            return False
+        ih = image.shape[0]
+        top, bot = float(roi[0]), float(roi[1])
+        y0, y1 = int(ih * top), int(ih * min(1.0, bot))
+        band = image[y0:y1]
+        if band.size == 0 or band.shape[0] < 8:
+            return False
+        v = cv2.cvtColor(band, cv2.COLOR_BGR2HSV)[:, :, 2]
+        return float(np.percentile(v, 75)) < HAND_BAND_DIM_V
+    except Exception:
+        return False
 ALL_THIRTY_FOUR = ([f"{n}{s}" for s in "mps" for n in range(1, 10)]
                    + [f"{n}z" for n in range(1, 8)])
 
@@ -1423,8 +1459,16 @@ def _rescue_out_of_gate(detector, image, row):
     ih, iw = image.shape[:2]
     out, conflicts = [], []
     for i, (r, lab, conf) in enumerate(row):
-        weak = lab is None or float(conf) < HAND_GATE_RESCORE_BELOW
-        if not weak:
+        if lab is not None and lab not in gate:
+            # 识别器已经把它救回来了（浮起的摸牌那条路是在 `classify_tile_rescued` 里做的），
+            # 不必再打一次分，但**留痕不能省**：否则同一行里“切好的牌”有留痕、
+            # “浮起的牌”没留痕，面板上那句「屏上有 N 张不在当前玩法牌集里」就会少报。
+            conflicts.append([i + 1, lab, round(float(conf), 2)])
+            out.append((r, lab, conf))
+            continue
+        if lab is None or float(conf) < HAND_GATE_RESCORE_BELOW:
+            pass
+        else:
             out.append((r, lab, conf))
             continue
         x, y, w, h = [int(v) for v in r]
@@ -1881,6 +1925,9 @@ class Engine:
         self._hand_gate_conflict: List[List] = []
         # 本帧手牌行里「有框但一张都没读出来」的框数（救不回也不许静默少报）。
         self._hand_missing: int = 0
+        # 本帧手牌取区是否整体被压暗（全屏弹窗遮罩）。它只用来把「读不到」的
+        # 原因说对，不参与任何识别判据（判据与实测见 `HAND_BAND_DIM_V`）。
+        self._hand_band_dim: bool = False
         # 条带探测的连续不合格计数与停用标。停用后 `_hand_strip` 直接交回整屏，
         # 不再每帧多付一次「注定不起效」的条带检测；平台/玩法切换时重置。
         self._strip_reject_streak: int = 0
@@ -4588,6 +4635,10 @@ class Engine:
                 # 框在、牌读不出：这就是用户看到的「明明 13 张只显几张」。静默少报
                 # 比报错更坑（面板看起来只是“牌少了”），所以必须数出来、说出口。
                 self._hand_missing = sum(1 for d in hand_row if d[1] is None)
+                # 本帧手牌取区是否整体被压暗：这条事实要在「一行都没检到」时也能拿到，
+                # 所以直接量取区本身，而不是量检到的牌（暗层下根本没有牌可量）。
+                self._hand_band_dim = _hand_band_is_dim(
+                    full_for_preview, get_hand_roi(self.platform))
                 # 「第几张的**最好**模板匹配也不像牌」——本帧读数不可信的直接证据。
                 # 与行均置信度不是一回事，判据与门槛的实测分布见 `HAND_UNREADABLE_CONF`。
                 self._hand_low_conf = [
@@ -5325,7 +5376,12 @@ class Engine:
                     best = ""
                     shanten = None
                     status = "waiting"
-                    message = "等待牌局开始"
+                    # 「读不到牌」有两种完全不同的原因：牌局真没开始，和画面被弹窗/
+                    # 暗层压住。把后者说成「等待牌局开始」就是把一个未知说成一个事实，
+                    # 而且是会让人误操作的那种（他会以为还要去开局，其实牌局正在跑）。
+                    message = ("画面被弹窗或暗层压住，本帧读不到手牌"
+                               if getattr(self, "_hand_band_dim", False)
+                               else "等待牌局开始")
                 else:
                     # 局中且 curr_raw_n == 0：交由上方 empty_hand_streak 判定（达到3帧时硬重置），
                     # 1~2 帧空时先不刷屏
@@ -6221,6 +6277,8 @@ class Engine:
                 "hand_gate_conflict": list(getattr(self, "_hand_gate_conflict", [])),
                 # 有框却读不出的张数（面板上「手牌(N张)」比屏上少时，这个数就是差额）
                 "hand_missing": int(getattr(self, "_hand_missing", 0)),
+                # 手牌取区整体被压暗（弹窗遮罩）：区分「没开局」与「看不清」
+                "hand_dim": bool(getattr(self, "_hand_band_dim", False)),
                 "count": tile_count,
                 "status": status,
                 "message": message,
