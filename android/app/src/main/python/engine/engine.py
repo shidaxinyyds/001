@@ -4868,9 +4868,12 @@ class Engine:
             # 接收后台异步完成的牌河与副露扫描结果，更新视觉累计账本
             rf = getattr(self, "_river_future", None)
             if rf is not None and rf.done():
+                # 计数必须在 result() 之前：上一版放在之后，于是「后台任务抛异常被
+                # 外层 except 吞掉」与「任务从未完成」在 diag 上都是 consumes=0，
+                # 刚加的诊断当场把自己要查的东西盖住了。
+                self._river_consumes = getattr(self, "_river_consumes", 0) + 1
                 try:
                     bg_river_entries, bg_meld_entries = rf.result()
-                    self._river_consumes = getattr(self, "_river_consumes", 0) + 1
                     # 「牌河为空」必须能区分两件事：场上真没人打牌，与分类链断了。
                     # 后者曾因为 `hasattr` 兑底而静默了几百帧，不记就只会留下
                     # “记牌器怎么是空的”这一谜题。判据用提交时存下的那个检测器。
@@ -4931,8 +4934,10 @@ class Engine:
                                     self._pending_melds_34[i] = frame_melds[i]
                             elif frame_melds[i] == 0:
                                 self._pending_melds_34[i] = self._meld_counts_34[i]
-                except Exception:
-                    pass
+                except Exception as e:
+                    # 不能只 pass：后台任务抛异常会被这里吞掉，表现与「牌河是空的」
+                    # 完全一样。必须把原因记下来，否则断链永远查不到。
+                    self._river_error = (f"认领牌河结果失败: {type(e).__name__}: {e}")[:200]
                 self._river_future = None
 
             # 仅在非定缺/换牌/任选牌阶段且进入正式对局后扫描牌河
