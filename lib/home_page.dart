@@ -83,16 +83,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _platformReady = true;
       });
       _syncPlatformField(p);
-      // 平台与玩法是两个各自独立的 Future，谁先回来不定；两边都就绪后
-      // 再对一次账（详见 `_reconcileModeWithPlatform`）。
-      _reconcileModeWithPlatform();
+      // 启动时**不**拿平台去校正已存的玩法：玩法是用户选的，重启一次就被换掉
+      // 是「点不动的选项」那种坑。跨平台残留由下面 `_selectPlatform` 那一条处理：
+      // 那里真知道「用户刚刚换了平台」。
     });
 
     // 拉一次本机已存的游戏ID（持久化在 shared_preferences，重启不丢）
     SessionStore.loadGameId().then((v) {
       if (!mounted) return;
       _setFieldText(_gameIdCtrl, v);
-      setState(() => _gameIdNotice = v.isEmpty ? '' : '已保存 $v');
+      setState(() => _gameIdNotice =
+          v.isEmpty ? SessionStore.requiredNotice : '已保存 $v');
     });
 
     // 拉一次当前玩法（来自 Java 写的共享文件，Python 引擎也读这个文件）
@@ -106,7 +107,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         }
         _modeReady = true;
       });
-      _reconcileModeWithPlatform();
     });
 
     // 接收悬浮窗通过 shareData 发来的消息：
@@ -431,8 +431,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _syncPlatformField(platform);
       final pInfo = GamePlatform.info(platform);
       if (pInfo != null && selectedMode != null) {
+        // 切平台时把玩法带到新平台的默认玩法（仅当旧玩法不在它的房卡里）。
+        // 这是唯一一处「系统替用户改玩法」的地方，所以必须说出口：不声不响地
+        // 换了玩法，用户下一局看到的就是一行与他预期不符的建议。
         if (!pInfo.supportedModes.contains(selectedMode)) {
+          final gone = GameMode.label(selectedMode!);
           _selectMode(pInfo.defaultMode);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text(
+                  '已把玩法从「$gone」带到 ${pInfo.name} 默认的'
+                  '「${GameMode.label(pInfo.defaultMode)}」；'
+                  '若你确实打前者，重新选上就行（引擎照你选的跑）'),
+              duration: const Duration(seconds: 4),
+            ));
+          }
         }
       }
     }
@@ -541,7 +554,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _gameIdNotice = '本地保存失败，请重试';
         } else {
           final cur = SessionStore.normalize(_gameIdCtrl.text);
-          _gameIdNotice = cur.isEmpty ? '' : '已保存 $cur';
+          // 清空后不能留一屏空白：必填这件事得当场说清楚，否则用户到点锁定
+          // 那一步才知道，看起来像「锁定按钮坏了」。
+          _gameIdNotice = cur.isEmpty ? SessionStore.requiredNotice : '已保存 $cur';
         }
       });
     });
@@ -580,10 +595,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _syncPlatformField(selectedPlatform ?? GamePlatform.defaultPlatform);
     }
 
-    // 2. 校验游戏ID字符合法性
+    // 2. 校验游戏ID：先看字符合不合法，再看**填没填**（必填）。
     final rawGameId = _gameIdCtrl.text;
     final normalizedId = SessionStore.normalize(rawGameId);
-    final idErr = SessionStore.validate(normalizedId);
+    final idErr =
+        SessionStore.validate(normalizedId) ?? SessionStore.require(normalizedId);
     if (idErr != null) {
       setState(() {
         _gameIdNotice = idErr;
@@ -625,11 +641,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (!mounted) return;
     final curPlat = selectedPlatform ?? GamePlatform.defaultPlatform;
     final platLabel = GamePlatform.label(curPlat);
-    final idDisplay = normalizedId.isEmpty ? '默认ID' : normalizedId;
 
     setState(() {
       _isConfigConfirmed = true;
-      _gameIdNotice = normalizedId.isEmpty ? '' : '已保存 $normalizedId';
+      _gameIdNotice = '已保存 $normalizedId';
       _platformNotice = '已确定：$platLabel';
     });
 
@@ -642,7 +657,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                '配置已锁定（$platLabel · $idDisplay）· 推演就绪',
+                '配置已锁定（$platLabel · $normalizedId）· 可启动实时进程',
                 style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
               ),
             ),
@@ -739,7 +754,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   ),
                   const SizedBox(width: 5),
                   Text(
-                    isProcessing ? '推演中' : '待命',
+                    isProcessing ? '启动中' : '待命',
                     style: TextStyle(
                       fontSize: 11.5,
                       fontWeight: FontWeight.w700,
@@ -817,69 +832,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
-  /// 当前平台真开着的玩法 key。`null` = 平台信息还没拉回来，此时**不筛**：
-  /// 拿默认平台（腾讯）去裁一个别家平台的合法玩法，会把用户正在用的玩法
-  /// 从列表里变没，比多列几条严重得多。
-  List<String>? get _platformModes => _currentPlatformInfo?.supportedModes;
-
-  /// 当前平台的元数据；平台尚未就绪或 key 不认识时返回 null（同上：不筛）。
-  GamePlatformInfo? get _currentPlatformInfo {
-    if (!_platformReady) return null;
-    return GamePlatform.info(selectedPlatform ?? '');
-  }
-
-  /// 把「已存玩法」校正到当前平台支持的那一个。
-  ///
-  /// 为什么需要这一条：`initState` 里平台与玩法是两个各自独立的 `Future`，
-  /// 谁先回来不确定；而旧版本残留的 `mahjong_mode.json` 可以装着任何 key。
-  /// 一旦「玩法 × 平台」这对组合不成立，玩法牌集（= 分类之前的闸门）就会
-  /// 把整批牌在模板被比较之前挤出去，表现是「识别缺张/特殊牌认不出」。
-  /// 引擎侧已每帧兜底纠正（`reconcile_mode_platform`），但那是运行期的事：
-  /// 主页选择框与引擎生效值不一致，用户下次进来看到的仍是一个点不动的选项。
-  void _reconcileModeWithPlatform() {
-    if (!mounted || !_platformReady || !_modeReady) return;
-    final pInfo = GamePlatform.info(selectedPlatform ?? '');
-    final m = selectedMode;
-    if (pInfo == null || m == null) return;
-    if (pInfo.supportedModes.contains(m)) return;
-    final fallback = pInfo.defaultMode;
-    if (!pInfo.supportedModes.contains(fallback)) return;
-    final gone = GameMode.label(m);
-    GameMode.set(fallback).then((ok) {
-      if (!ok || !mounted) return;
-      final info = GameMode.info(fallback);
-      setState(() {
-        selectedMode = fallback;
-        if (info != null) _selectedCategory = info.category;
-      });
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('「$gone」在 ${pInfo.name} 没有开放，已切到 ${info?.name ?? fallback}'),
-        duration: const Duration(seconds: 4),
-      ));
-    });
-  }
-
   Widget _buildHomeBody(String mode) {
     final bool canStart = !isProcessing && _modeReady && _platformReady && mode.isNotEmpty;
-    final supported = _platformModes;
-    final inCategory = GameMode.allModes
+    // 玩法卡片列**全部**分类下的玩法，不再拿平台的房卡清单去筛。
+    // 上一版按 `supportedModes` 筛过，代价是把用户的列表从 19 种砍到 3~6 种；
+    // 而那份清单是手写的房卡猜测，不是能力事实（主 bank 手绘 34 面家家常驻，
+    // 实测见 localtest/measure_mode_coverage.py）。选了房卡外的玩法时，引擎照用户
+    // 说的跑，并在面板标题上写明「该平台房卡未收录」。
+    final categoryModes = GameMode.allModes
         .where((m) => m.category == _selectedCategory)
         .toList();
-    // 玩法卡片只列本平台真开着的：列一个选了会把识别改坏的选项，不如不列。
-    final categoryModes = supported == null
-        ? inCategory
-        : inCategory.where((m) => supported.contains(m.key)).toList();
-    // 整分类被筛空、但这个分类本身有玩法 = 该平台确实不开这一系玩法。
-    // 必须说一句：否则页面看起来像加载坏了，而用户不知道去换分类/换平台。
-    final pInfo = _currentPlatformInfo;
-    // 提前取局部变量而不是在插值里嵌同种引号的字面量：写法上等价，但不依赖
-    // 解析器对嵌套字符串的宽容度，也少一次 `?.`。
-    final pfName = pInfo?.name ?? '当前平台';
-    final hiddenNotice = (supported != null &&
-            categoryModes.isEmpty &&
-            inCategory.isNotEmpty)
-        ? '「$_selectedCategory」分类下的玩法 $pfName 没有开放，请换个分类'
-        : null;
 
     return SafeArea(
       child: SingleChildScrollView(
@@ -914,13 +876,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 key: ValueKey<String>(_selectedCategory),
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  if (hiddenNotice != null)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: AppTokens.s12),
-                      child: Text(hiddenNotice,
-                          style: const TextStyle(
-                              fontSize: 12, color: AppTokens.muted)),
-                    ),
                   ...categoryModes.map((info) {
                     final bool sel = info.key == mode;
                     return _buildModeCard(info, sel);
@@ -972,7 +927,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        '请先在上方锁定对局配置，再启动推演引擎',
+                        '请先在上方锁定对局配置，再启动实时进程',
                         style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
                       ),
                     ),
@@ -1383,7 +1338,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9_\-]')),
         LengthLimitingTextInputFormatter(SessionStore.maxLen),
       ],
-      decoration: _fieldDecoration('对局/玩家ID (选填)'),
+      decoration: _fieldDecoration('对局/玩家ID（必填）'),
     );
   }
 
@@ -1465,7 +1420,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 ),
                 const SizedBox(width: 5),
                 Text(
-                  mood ? '气运推演' : '进张期望',
+                  mood ? '运势概率' : '好牌概率',
                   style: TextStyle(
                     fontSize: 12.5,
                     fontWeight: active ? FontWeight.bold : FontWeight.w500,
@@ -1626,16 +1581,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } else if (canStart) {
       if (!_isConfigConfirmed) {
         btnColor = AppTokens.brandDark.withAlpha(200);
-        btnText = '启动实时推演 (待锁定配置)';
+        btnText = '启动实时进程 (待锁定配置)';
         btnIcon = Icons.lock_outline_rounded;
       } else {
         btnColor = _kAccent;
-        btnText = '启动实时推演引擎';
+        btnText = '启动实时进程';
         btnIcon = Icons.sensors_rounded;
       }
     } else {
       btnColor = AppTokens.borderStrong;
-      btnText = mode.isEmpty ? '请选择上方玩法' : '启动实时推演';
+      btnText = mode.isEmpty ? '请选择上方玩法' : '启动实时进程';
       btnIcon = Icons.play_arrow_rounded;
     }
 
@@ -1701,7 +1656,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
             const SizedBox(width: 6),
             const Text(
-              '视觉感知核待命 · 本地推理流就绪',
+              '视觉感知核待命',
               style: TextStyle(
                 fontSize: 11.5,
                 fontWeight: FontWeight.w500,

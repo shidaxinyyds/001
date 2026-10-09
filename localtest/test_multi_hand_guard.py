@@ -14,9 +14,9 @@
   3. 然后才拿引擎读数去对。表在 `localtest/gt/shots_multi.json`。
 
 钉三件事：
-① 每帧按**面板上写着的那个玩法**跑，手牌多重集逐张等于真值（已知缺陷帧除外）。
-② 生效玩法必须等于声明玩法，除非表里显式写了 `effective_mode`——那是 P2-B 的纠正
-   通道，全表只允许 queshen_play_02 一条（挂着「血流红中」的广东雀神帧）。
+① 每帧按**表里声明的那个玩法**跑，手牌多重集逐张等于真值（已知缺陷帧除外）。
+② 生效玩法必须**逐字等于**表里声明的玩法（v1.7.5 起引擎不再替用户换玩法），且房卡
+   清单内的玩法不许报 `mode_off_catalog`——否则「未收录」会喊成狼来了。
 ③ `KNOWN_DEFECTS` 是双向棘轮：登记在册的错读必须**错得一模一样**；哪天读对了，
    这条就报红逼着把台账删掉。留空断言/删条目当"修好了"是假绿灯。
 ④ 错读不许装确定：那两帧必须同时交出 `hand_uncertain`（哪几张连最像的模板都
@@ -27,7 +27,8 @@
 变异检验（`py -3.10 -X utf8 localtest/test_multi_hand_guard.py --mutate`）：
   · 把 shushan 那帧的玩法换成同平台合法但字牌更窄的 sc_xz → 7z 必须掉出来
     （证明 ① 的读数真的走玩法闸门，不是缓存或写死的表）；
-  · 把 P2-B 的纠正换成恒等 → queshen_play_02 必须读不真（证明 ② 不是空字段）；
+  · 把生效玩法写死成某一条（绕过声明值）→ 声明不是它的那些帧必须对不上（证明 ②
+    在量真链路，不是把表抄一遍）；
   · 把逐张门槛改成 0（永不标）→ 那两帧必须重新给出建议（证明 ④ 的「不给建议」
     真是这条门槛拦的，不是别处恰好算空）。
 
@@ -55,6 +56,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 import engine.engine as E  # noqa: E402
 import layer_cost as lc  # noqa: E402
+from platforms import PLATFORMS  # noqa: E402
 
 MUTATE = "--mutate" in sys.argv
 GT_PATH = os.path.join(HERE, "gt", "shots_multi.json")
@@ -153,21 +155,18 @@ class TestMultiHandGT(unittest.TestCase):
         self.assertEqual(bad, [], "这些帧的面板读数不等于人眼真值：\n  " + "\n  ".join(bad))
 
     def test_effective_mode_is_the_declared_one(self):
-        """② 生效玩法 == 声明玩法，除非表里显式写了 `effective_mode`（P2-B 纠正）。"""
+        """② 生效玩法 == 声明玩法，无一例外；房卡内的玩法不许报「未收录」。"""
         for e in type(self).shots:
             d = self.payload(e)
-            want = e.get("effective_mode", e["mode"])
-            self.assertEqual(d.get("mode"), want,
-                             f"{e['file']} 声明 {e['mode']}，引擎生效 {d.get('mode')}："
-                             "表里没写 effective_mode 就说明这次纠正不该发生")
-            forced = d.get("mode_forced")
-            if "effective_mode" in e:
-                self.assertEqual(forced, e["mode"],
-                                 f"{e['file']} 被纠正了却没报原值：面板凭空换了玩法")
-                self.assertIn("已纠正", d.get("mode_name", ""),
-                              f"{e['file']} 纠正必须让用户看得见，标题实为「{d.get('mode_name')}」")
-            else:
-                self.assertIsNone(forced, f"{e['file']} 合法组合却被纠正：{forced}")
+            self.assertNotIn("effective_mode", e,
+                             "表里不该再有 effective_mode 例外：引擎已不替用户换玩法")
+            self.assertEqual(d.get("mode"), e["mode"],
+                             f"{e['file']} 声明 {e['mode']}，引擎却按 {d.get('mode')} 跑："
+                             "v1.7.5 之后玩法由用户定，引擎只负责把牌集照他说的装上")
+            if e["mode"] in PLATFORMS[e["platform"]]["supported_modes"]:
+                self.assertIsNone(d.get("mode_off_catalog"),
+                                  f"{e['file']} 的 {e['mode']} 就在这家房卡里却被报未收录："
+                                  "一个天天误报的提示很快就会被用户忽略")
 
     def test_known_defects_are_exactly_the_registered_ones(self):
         """③ 双向棘轮：错读必须错得登记时一模一样；读对了就该删条目。"""
@@ -221,19 +220,23 @@ class TestMutationControls(unittest.TestCase):
                          f"换成更窄的牌集后面板仍有 7z（{narrow}）：玩法根本没进闸门，"
                          "① 的读数与表怎么对上都说明不了识别正确")
 
-    def test_mutant_identity_reconcile_breaks_the_forced_frame(self):
-        """把 P2-B 的纠正换成恒等 → 那条帧必须读不真，且不再报 mode_forced。"""
-        e = next(x for x in load_gt() if "effective_mode" in x)
+    def test_mutant_hardcoded_mode_breaks_the_wiring(self):
+        """把生效玩法写死成 std_tdh（绕过声明值）→ 声明不是它的帧必须对不上。
+
+        ② 若只把表里的值抄回来，写死也不会红；红了就说明量的是引擎真在按哪个玩法跑。"""
+        rows = [x for x in load_gt() if x["mode"] != "std_tdh"]
+        self.assertTrue(rows, "表里全是 std_tdh，本对照不成立")
+        e = rows[0]
         orig = E.reconcile_mode_platform
-        E.reconcile_mode_platform = lambda m, p: (m, None)
+        E.reconcile_mode_platform = lambda m, p: ("std_tdh", None)
         try:
             d = run_frame(read_frame(e["file"]), e["platform"], e["mode"])
         finally:
             E.reconcile_mode_platform = orig
-        self.assertIsNone(d.get("mode_forced"),
-                          "恒等变异体仍报 mode_forced：这个字段不是从纠正里来的")
-        self.assertNotEqual(panel_of(d), sorted(e["hand"]),
-                            f"不纠正竟仍读出完整手牌（{panel_of(d)}）：② 在测空气")
+        self.assertEqual(d.get("mode"), "std_tdh",
+                         "写死生效玩法却没改变 payload：② 读的不是这条链路")
+        self.assertNotEqual(d.get("mode"), e["mode"],
+                            "写死的值竟等于声明值：本行对照不成立，换一行")
 
     def test_mutant_never_flag_breaks_the_readability_gate(self):
         """逐张门槛改成 0（永不标）→ 被动画压住的那帧必须重新给出建议。
@@ -261,7 +264,7 @@ class TestMutationControls(unittest.TestCase):
 
 if __name__ == "__main__":
     if MUTATE:
-        print("[mutate] 只跑变异对照：换窄牌集必须丢 7z、删掉纠正必须读不真、"
+        print("[mutate] 只跑变异对照：换窄牌集必须丢 7z、写死生效玩法必须让声明对不上、"
               "逐张门槛改 0 必须重新给建议")
         unittest.main(argv=[sys.argv[0], "TestMutationControls"], exit=False, verbosity=2)
     else:

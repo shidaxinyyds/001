@@ -1582,18 +1582,15 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
   }
 
   Widget _buildModeSelectorOverlay() {
-    // 只列「当前平台真开着的玩法」。玩法牌集是一道**分类之前**的闸门：给一个
-    // 平台挂上它没有的玩法（实测：广东雀神 + 血流红中），牌堆里明摆着的
-    // 北/白板会在模板被比较之前就被挤出去，剩下的候选强行贴上去——用户看到的
-    // 是「特殊牌认不出/漏识别」，根子却在配置。引擎侧 `reconcile_mode_platform`
-    // 会兜底纠正，但那是事后补救；在菜单里就把不存在的选项去掉才是修干净。
+    // 玩法菜单列**全部**玩法，不再拿平台的房卡清单去筛（v1.7.5）。
+    // 上一版筛过，代价是把用户的列表从 19 种砍到 3~6 种；而那份清单是手写的
+    // 房卡猜测、不是能力事实（主 bank 手绘 34 面家家常驻，实测
+    // localtest/measure_mode_coverage.py）。选了房卡外的玩法时，引擎照用户说的跑，
+    // 并在标题上写明「该平台房卡未收录」（识别质量与算分口径的锅各归各）。
+    final modes = GameMode.allModes;
+    // 平台名仍要拿（只用于标题说明，不再参与筛选）；提前取局部变量而不是
+    // 在插值里嵌同种引号的字面量：写法等价，但不依赖解析器对嵌套字符串的宽容度。
     final pf = GamePlatform.info(_enginePlatformKey ?? '');
-    final modes = pf == null
-        ? GameMode.allModes
-        : GameMode.allModes
-            .where((m) => pf.supportedModes.contains(m.key))
-            .toList();
-    // 平台名提前取好：标题里不再嵌同种引号的字面量插值。
     final pfName = pf?.name ?? '全平台';
     return Positioned.fill(
       child: Container(
@@ -1612,9 +1609,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                 const SizedBox(width: 5),
                 Expanded(
                   child: Text(
-                    // 条数从**筛后的列表**取，不写死也不拿全目录数：之前硬编码
-                    // “10种规则”，上架到 19 条后菜单列表会跟着长但标题还在说 10 种；
-                    // 而按平台筛之后，标题再报全目录条数就是在报一个屏上滑不到的数。
+                    // 条数从列表本身取，不写死：之前硬编码“10种规则”，上架到 19 条后
+                    // 列表跟着长但标题还在说 10 种——屏上滑得到的数与标题不一致最骗人。
                     '切换玩法 · $pfName (${modes.length}种)',
                     style: const TextStyle(
                       color: Color(0xFFFFF9C4),
@@ -2599,6 +2595,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final int wallOnly = (chance?['wall_only'] as num?)?.toInt() ?? 0;
     final int chanceTotal = (chance?['total_unseen'] as num?)?.toInt() ?? totalRemaining;
     final bool oppKnown = chance?['opp_known'] == true;
+    // 引擎自己那句账本口径（`tile_ledger.describe_opportunity`）：叫口牌名、共余几张、
+    // 其中几张只能自摸、牌墙还能撑几轮。卡片右上角那个胶囊只能装下「余 X 张·Y 张只能自摸」
+    // 这一小截，剩下的口径不递出去就等于面板只报了半个事实。
+    final String chanceText = (chance?['text'] ?? '') as String;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 5),
@@ -2667,6 +2667,23 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             ],
           ),
           const SizedBox(height: 5),
+          // 引擎原句只占一行，超了就截断：它比右上角那个胶囊多的是叫口牌名与
+          // 「还能撑几轮」，但不许把下面的叫口 chips 顶出屏幕。
+          if (chanceText.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Text(
+                chanceText,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: hasDead ? const Color(0xFFFFCDD2) : const Color(0xFFB9F6CA),
+                  fontSize: 8.0,
+                  fontWeight: FontWeight.w500,
+                  decoration: TextDecoration.none,
+                ),
+              ),
+            ),
           Wrap(
             spacing: 6,
             runSpacing: 4,
@@ -2865,6 +2882,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final bool calibrated = (evGauge['calibrated'] as bool?) ?? false;
     final String band = (evGauge['band'] as String?) ?? _equityBandWord(level);
     final String basis = (evGauge['equity_basis'] as String?) ?? 'analytical';
+    // 口径脚注（`probability_bands.band_note`：未标定/样本量这类话）。它必须上屏：
+    // 之前它只被织进 `insight` 长句，而这块小卡片根本不渲染 insight——用户看到的就
+    // 是一个没有量纲说明的数字（守卫 localtest/test_equity_honesty.py 钉的就是这件事）。
+    final String note = (evGauge['note'] as String?) ?? '';
     final String evUnit = (evGauge['net_ev_unit'] as String?) ?? '分';
     final double? rawEquity =
         winEquity ?? (evGauge['win_equity'] as num?)?.toDouble();
@@ -2886,9 +2907,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final String tier = (evGauge['tier'] as String?) ?? _equityTierWord(level);
     // 未标定又无模型：本块没有任何可测量的东西，只能当文本说明，不能当仪表。
     final bool degrade = pureAnalytical && !calibrated;
-    final String degradeLabel = pureAnalytical
-        ? '纯解析式评估 · 牌势 $tier'
-        : '牌势评估 · $tier';
+    final String degradeLabel = (pureAnalytical
+            ? '纯解析式评估 · 牌势 $tier'
+            : '牌势评估 · $tier') +
+        (note.isEmpty ? '' : ' · $note');
 
     Color primaryColor;
     Color gradientStart;

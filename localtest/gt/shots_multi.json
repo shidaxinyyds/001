@@ -5,8 +5,8 @@
     "不是引擎输出。多数条目与引擎读数一致是因为「先人眼钉死、再拿引擎对」，顺序不能反。",
     "hand 是**多重集**（排序后的两位码），不声明屏幕排列顺序 —— 排序是后处理的事，",
     "把顺序也钉住会让一条无关改动打红这条识别守卫。",
-    "mode = 面板上写着的那个玩法（用户声明），不是引擎纠正后的生效玩法；",
-    "queshen_play_02 就是唯一一条「声明的玩法本平台没开」的帧，生效值由守卫另查。"
+    "mode = 这一帧**实际在打的玩法**（人眼按屏上牌型判定），不是面板当时挂着哪个标签。",
+    "v1.7.5 起引擎不再替用户换玩法，所以表里不再有 effective_mode：声明与牌桌不符的帧（如 queshen_play_02 的面板曾挂着「血流红中」）按声明跑会丢字牌，那条后果由 localtest/test_mode_gate_guard.py ⑥ 钉住，不混进本表当识别缺陷。"
   ],
   "shots": [
     {"file": "jj_play_01.jpg", "platform": "jj", "mode": "sc_hz", "verified": true,
@@ -40,9 +40,8 @@
     {"file": "queshen_play_01.jpg", "platform": "gd_queshen", "mode": "gd_hz", "verified": true,
      "note": "面板标题「广东红中王」。屏上明摆着一枚北(4z) —— P2-A 之前被贴成 7z/9s 并凭空少一张",
      "hand": ["4p", "9p", "9p", "2s", "4s", "4s", "5s", "5s", "5s", "6s", "4z"]},
-    {"file": "queshen_play_02.jpg", "platform": "gd_queshen", "mode": "sc_hz", "verified": true,
-     "effective_mode": "std_tdh",
-     "note": "面板挂着「血流红中」，但广东雀神没开这条玩法：引擎必须纠正成 std_tdh 并说出去（P2-B）。屏上有北 + 4 张白板",
+    {"file": "queshen_play_02.jpg", "platform": "gd_queshen", "mode": "std_tdh", "verified": true,
+     "note": "屏上有北 + 4 张白板 → 实桌是全牌玩法（std_tdh）。面板当时挂着「血流红中」（跨平台残留），而 sc_hz 闸门会把这批字牌挤出去：那条错声明的代价由 test_mode_gate_guard ⑥ 钉，不在本表里当识别缺陷",
      "hand": ["4p", "9p", "9p", "2s", "4s", "5s", "5s", "5s", "9s", "4z", "5z", "5z", "5z", "5z"]},
 
     {"file": "tuyou_swap_01.jpg", "platform": "tuyou", "mode": "sc_hz", "verified": true,

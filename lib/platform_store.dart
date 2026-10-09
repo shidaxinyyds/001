@@ -9,6 +9,12 @@ class GamePlatformInfo {
   final String subtitle;
   final String badge;
   final List<double> handRoi; // [top, bottom, left, right]
+  /// 这家平台**常见房卡**上开的玩法（与 Python `platforms.py` 同一条）。
+  /// 它是「推荐/默认跟随」的依据，不是能力白名单：v1.7.5 之前曾被当闸门用过两次
+  /// （UI 按它筛玩法 + 引擎把列表外的玩法换成默认），量下来主 bank 手绘 34 面
+  /// 家家常驻（localtest/measure_mode_coverage.py），那条筛法只是把用户的玩法列表
+  /// 从 19 种砍到 3~6 种。现在它只决两件事：切平台时默认跟到哪个玩法、以及选了
+  /// 列表外的玩法时面板要不要多一句「未收录」。
   final List<String> supportedModes;
   final String defaultMode;
 

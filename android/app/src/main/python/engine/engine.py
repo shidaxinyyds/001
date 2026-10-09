@@ -50,7 +50,6 @@ from modes import (
     MODES,
     is_dingque_mode,
     is_sichuan_family,
-    is_known_mode,
     get_mode,
     get_laizi_set,
     get_analyzer,
@@ -855,35 +854,27 @@ def _reconcile_hand_tiles(row, stable_mpsz: str):
 
 
 def reconcile_mode_platform(mode: str, platform: str) -> Tuple[str, Optional[str]]:
-    """把「玩法」校正到「该平台确实开得了的玩法」，返回 (生效玩法, 被纠正掉的玩法或 None)。
+    """玩法**按用户声明的来**，返回 (生效玩法, 该平台房卡未收录的玩法或 None)。
 
-    为什么必须由引擎兜这一道（而不是只靠面板把选项筛干净）：玩法牌集是
-    **分类之前**的闸门（`recognition/tencent_grid_detector.py::resolve_candidate_tiles`），
-    一旦 (平台, 玩法) 这对组合本身不成立，闸门就会在模板被比较之前把整批牌
-    挤出去，剩下的候选强行贴上去——用户看到的是「漏识别 / 特殊牌认不出」，
-    而根子在配置。实测（2026-10 真机帧 localtest/shots_multi/）：广东雀神挂上
-    血流红中（牌集 27 型 + 7z）后，同一帧里明摆着的 北(4z) 被贴成 红中(7z)、
-    四张 白板(5z) 被贴成 9条/8条，还凭空少读一张。
+    第二项不再是「被纠正掉的那个玩法」，而是「一句提示」：引擎不替用户换玩法。
 
-    配置能到达引擎的路径不止一条（Java 推送、磁盘轮询、旧版本残留的 json），
-    所以只在 UI 里筛选项堵不住全部：这里每帧复核一次，任何一条路进来的组合
-    都只会被校正成同一个结果。
+    为什么改口径（2026-10 实测，`localtest/measure_mode_coverage.py`）：这里曾经拿
+    `supported_modes` 当硬闸门，把列表外的玩法换成平台默认，理由是「那个组合在本平台
+    读不出牌」。量完发现这条理由站不住：主 bank（手绘 34 面）在**每个**平台都常驻
+    （`STYLE_PLATFORM_DENYLIST` 只做定点减法、永不踢主 bank），34/34 面家家都有——
+    「读不出」不是能力事实，而是那份手写房卡清单的猜测。代价实打实落在用户身上：
+    玩法列表从 19 种被砍到 3~6 种，且主动选了也会被改回去。
 
-    口径：
-      * 玩法本就在平台 supported_modes 里 → 原样返回，绝不改动（零行为变化）；
-      * 否则回落到该平台 default_mode；default_mode 自身不合法时退到
-        supported_modes 里第一个合法项，再不行退回原值（宁可保持现状，也不
-        能把玩法悄悄换成一个谁都没选过的东西）；
-      * 返回值第二项非 None 时，调用方**必须**把它显示出去：纠正本身不是终点，
-        让用户知道「面板上那个玩法在这个平台根本不存在」才是。
+    保留一句提示（而不是把判据删干净），是因为它仍是一条真信号：你选的玩法不在这家
+    平台的常见房卡里。识别照你选的牌集走，但算分口径与实桌不一致时要自己核对。
+
+    跨平台残留的旧玩法不靠这里兜：切平台时由 UI 把玩法带到新平台的默认玩法（主页
+    `_selectPlatform` 与悬浮窗菜单同一条路径），那才是真知道「用户刚刚换了平台」的位置。
     """
     supported = get_supported_modes(platform)
-    if mode in supported:
+    if not supported or mode in supported:
         return mode, None
-    for cand in (get_platform(platform).get("default_mode"), *(supported or [])):
-        if cand and cand in supported and is_known_mode(cand):
-            return cand, (mode or None)
-    return mode, None
+    return mode, mode
 
 
 def _error_result(status: str, message: str) -> "EngineResult":
@@ -1713,12 +1704,12 @@ class Engine:
         self._prev_mode: str = ""
         # 游戏平台预设管理（腾讯、途游、微乐、JJ、通用）
         self.platform: str = load_platform()
-        # 建实例时就先校一次（P2-B 的补刀）：手牌识别发生在 process 里那段 reload **之前**
-        # （方向探测/手牌条带都走这里的 self.mode），只在 process 里纠正会让「每帧新建
-        # Engine」的评测和「切配置后第一帧」的真机仍按旧牌集识别。守卫 ⑥
-        # （localtest/test_mode_gate_guard.py）正是靠这个时间差把只改 process 的版本打红的。
-        self._mode_forced: Optional[str] = None
-        self.mode, self._mode_forced = reconcile_mode_platform(self.mode, self.platform)
+        # 建实例时就算一次「房卡未收录」提示：第一帧的 payload 就得带着它，
+        # 不能等 process 里那段 reload 之后才算（那样首帧面板会少一句该说的话）。
+        # 注意：这一步**不改** self.mode —— 玩法由用户定，引擎只负责把牌集闸门
+        # 按他说的装上（判据与为何改口径，见 `reconcile_mode_platform`）。
+        self._mode_off_catalog: Optional[str] = None
+        self.mode, self._mode_off_catalog = reconcile_mode_platform(self.mode, self.platform)
         self._prev_platform: str = ""
         self._last_doctrine: str = ""
         self._last_mood_state: str = "steady"
@@ -1802,12 +1793,12 @@ class Engine:
         # 切换重置 True。它不主动多付钱（只在本来就要探测的帧上顺路打日志），所以不
         # 需要额外一个「本帧要付几次检测」的开关；要看**每帧**对照请拨 `hand_channel_ab`。
         self._hand_channel_probe_due: bool = True
-        # 当前玩法是否在本平台 supported_modes 里。False = 牌集与平台不匹配，
-        # 面板会整类少一批牌（必须在 diag 可见，否则只会当成识别坏了报障）。
+        # 当前玩法是否在这家平台的房卡清单（`supported_modes`）里。False 不影响识别：
+        # 牌集照用户声明的装。它只是给面板/取证一句「这玩法在这家不常见，算分口径自己核」。
         self._mode_supported: bool = True
-        # 本帧被引擎从「面板选中的玩法」纠正成哪个玩法（None = 没纠正过）。
-        # 它必须上屏：否则用户点的是 A、面板标题写着 B，看起来像被篡改。
-        self._mode_forced: Optional[str] = None
+        # 本帧那个「房卡未收录」的玩法 key（None = 在清单里）。必须上屏：选了一个
+        # 不常见的玩法是用户的决定，但面板得让他自己看得见这个决定。
+        self._mode_off_catalog: Optional[str] = None
         # 本帧手牌行里「连最像的模板都不够像」的那几张：[[屏上第几张, 分数], ...]。
         # 每帧在手牌刚切完时重算（不能拖到下一帧），非空就把建议降级为「本帧不给建议」。
         self._hand_low_conf: List[List] = []
@@ -2293,9 +2284,9 @@ class Engine:
         """显式设置当前游戏平台预设（支持腾讯、途游、微乐、JJ、通用）。"""
         set_platform_explicit(platform_key)
         self.platform = platform_key
-        # 平台换了，旧玩法可能在新平台上根本不存在：立刻过一道闸，别等下一帧的
-        # reload（本方法后面就要重推牌风与候选牌集，推到旧牌集上就白跑了）。
-        self.mode, self._mode_forced = reconcile_mode_platform(self.mode, self.platform)
+        # 平台换了，玩法不跟着换（用户可能就在这一家打那副规则），但房卡提示要重算：
+        # 同一个玩法在上一家常用、在这一家可能根本没上过房卡。
+        self.mode, self._mode_off_catalog = reconcile_mode_platform(self.mode, self.platform)
         self._tile_voter.reset()
         self._hand_stab.reset()
         self._last_hand_y = None
@@ -2339,16 +2330,15 @@ class Engine:
     def _display_mode_name(self) -> str:
         """面板标题里的玩法名：说清「引擎实际在按哪个玩法算」。
 
-        被 `reconcile_mode_platform` 纠正过时不能只写生效那一个：用户点的是
-        「血流红中」、标题却凭空变成「大众推倒胡」，看起来像被篡改。两个名字
-        并列才能把「这个玩法在本平台不存在」这件事递到用户眼前（也是他唯一
-        能自己修好的入口）。名字走 `get_mode` 而不是 `MODES.get`：后者对别名
-        （sc/4p）会拿不到条目而直接回显 key。
+        玩法不再被引擎替换，所以这里只有一个名字；但若它不在这家平台的房卡清单里，
+        必须把这件事顺带说出口——用户选的越是冷门玩法，算分口径与实桌不一致时越容易
+        把「我算错了」当成「它识别错了」。名字走 `get_mode` 而不是 `MODES.get`：
+        后者对别名（sc/4p）会拿不到条目而直接回显 key。
         """
         name = get_mode(self.mode).get("name", self.mode)
-        forced = getattr(self, "_mode_forced", None)
-        if forced:
-            return f"{name}（已纠正：{get_mode(forced).get('name', forced)}不支持本平台）"
+        off = getattr(self, "_mode_off_catalog", None)
+        if off:
+            return f"{name}（该平台房卡未收录，按所选规则推演）"
         return name
 
     def set_config_dir(self, path) -> None:
@@ -2368,10 +2358,10 @@ class Engine:
             m = str(key).strip().lower() if key else ""
             if m:
                 _modes_set_mode_explicit(m)
-                # Java 直推的玩法也要先过平台这道闸：面板能选到的组合已被 UI 筛过，
-                # 但 set_mode 是另一条入口（旧版本残留 / Java 直接推），不能绕过。
-                # 磁盘/内存里仍留用户原选（上面那行），只把**生效值**换掉并在标题说明。
-                m, self._mode_forced = reconcile_mode_platform(m, self.platform)
+                # Java 直推的玩法也走一次房卡核对：不拦它（玩法由用户定），但
+                # 递到面板上的那句提示不能只给 UI 点选那一条路——旧版本残留、
+                # Java 直接推、磁盘轮询都是同样的口径。
+                m, self._mode_off_catalog = reconcile_mode_platform(m, self.platform)
                 if m != getattr(self, "mode", None):
                     self.mode = m
                     self._prev_mode = m
@@ -4275,11 +4265,11 @@ class Engine:
             # 模式或平台变了 → 投票窗口 / 行锁 / 缓存全部失效，必须清空重建。
             self.mode = load_mode()
             self.platform = load_platform()
-            # 玩法/平台错配的硬纠正（判据与为什么必须在引擎里做，见
-            # `reconcile_mode_platform`）。放在这里是因为这是两条配置都落定后的
-            # 第一个点：下面的变更检测与重置、候选牌集重推、规则计算全部只能
-            # 看到纠正后的玩法，否则就会出现「纠正了但识别器还在用旧牌集」。
-            self.mode, self._mode_forced = reconcile_mode_platform(self.mode, self.platform)
+            # 房卡核对（每帧一次，口径见 `reconcile_mode_platform`）：它只算提示，
+            # 绝不改 self.mode —— 改了就会出现「面板选 A、实际按 B 算」那种看起来
+            # 像被篡改的行为。下面的变更检测与重置、候选牌集重推、规则计算全部
+            # 拿到的就是用户声明的那个玩法。
+            self.mode, self._mode_off_catalog = reconcile_mode_platform(self.mode, self.platform)
             # 出牌建议配置每帧 reload（与 load_mode 同一时机，文件极小，开销可忽略）：
             # "显示出牌建议" 与 "好牌机率(进张下限)" 由调试页经 Java 写入。
             # 注意：改动 min_ukeire 会让 build_advice 的缓存键变化 → 自动重算。
@@ -4309,8 +4299,9 @@ class Engine:
                 self._strip_disabled = False
             avail = available_set(self.mode)
             hsizes = hand_sizes(self.mode)
-            # 玩法是否被当前平台支持。纠正已在上游做完，这里因此恒为 True；
-            # 保留这条诊断是为了「哪天有人把纠正挪走，面板立刻能在 diag 里看到」。
+            # 玩法在这家平台的房卡清单里吗。**不影响识别与建议**（牌集照用户
+            # 声明的装），只决定面板标题要不要多一句「未收录」。缺字牌时先看
+            # 这里与 `mode_off_catalog`，不要先改识别阈值。
             self._mode_supported = self.mode in get_supported_modes(self.platform)
 
             detector = self.get_detector()
@@ -5323,8 +5314,11 @@ class Engine:
                 best = ""
                 _pos = "、".join(str(p[0]) for p in self._hand_low_conf)
                 _c = min(float(p[1]) for p in self._hand_low_conf)
-                message = (f"第 {_pos} 张牌面被遮挡或过暗（相似度 {_c:.2f}），"
-                           "本帧读数不完整，不给建议；动画过去会自动恢复")
+                # 不写「动画过去会自动恢复」这一句：实测有两个成因都会触这道门——
+                # 牌面被动画压住，以及玩法声明与牌桌不符（闸门把字牌挤出去后强贴）。
+                # 后者不会自己恢复，只能用户改玩法；报错了因等于给了一个错的行动指令。
+                message = (f"第 {_pos} 张牌面读不清（相似度 {_c:.2f}），"
+                           "本帧读数不完整，不给建议；若是玩法与牌桌不符，改成实际在打的那个")
 
             # 标记"最优"那张牌（最高 EV 或最高 ukeire），UI 上加"最优"角标
             if advice:
@@ -6049,9 +6043,9 @@ class Engine:
             result = {
                 "mode": self.mode,
                 "mode_name": self._display_mode_name(),
-                # 被引擎纠正过的玩法原值（None = 没发生过）。面板标题已把两个名字
-                # 并列写进 mode_name，这里再给一份机读事实，供调试页/取证链路对齐。
-                "mode_forced": getattr(self, "_mode_forced", None),
+                # 那个「房卡未收录」的玩法 key（None = 在清单里）。引擎不换玩法，
+                # 但必须把“用户选了一个这家不常见的玩法”留成机读事实，供调试页/取证对齐。
+                "mode_off_catalog": getattr(self, "_mode_off_catalog", None),
                 # Java 侧 native 接管的路由判据（能力而非 key 前缀）：native 求解器
                 # 没有鬼牌概念且会丢弃所有 z 字牌，只有它能让当前玩法算对时才允许接管。
                 "native_ready": native_solver_ready(self.mode),
@@ -6083,11 +6077,11 @@ class Engine:
                     # probe_skipped 分别对应「试了没赢」与「本帧不许试」，报障时别把
                     # 后者当成 ROI 配歪。
                     "hand_channel": dict(getattr(self, "_hand_channel_diag", {})),
-                    # 玩法/平台牌集错配标记。缺字牌时先看这里，不要先改识别阈值。
+                    # 玩法/平台房卡对得上吗。缺字牌时先看这里，不要先改识别阈值。
                     "mode_supported": bool(getattr(self, "_mode_supported", True)),
-                    # 错配被纠正成了哪个玩法（None = 本帧没纠正）。与上面那条合在
-                    # 一起读才能分清「玩法合法、牌集本就如此」与「玩法非法、已被换掉」。
-                    "mode_forced": getattr(self, "_mode_forced", None),
+                    # 未收录的是哪个玩法（None = 在清单里）。与上面那条同一条事实的
+                    # 两面：「在清单里、牌集本就如此」与「不在清单里、照用户选的算」。
+                    "mode_off_catalog": getattr(self, "_mode_off_catalog", None),
                     # 条带探测是否已被停用（连续试了却没反超整屏）。停用是「这个配置下
                     # 兜底不起效」的确证，不记就只会留下“识别好像变差了”的谜题。
                     "strip_disabled": bool(getattr(self, "_strip_disabled", False)),

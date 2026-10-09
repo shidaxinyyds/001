@@ -31,6 +31,16 @@ class SessionStore {
     return null;
   }
 
+  /// 锁定配置前的必填判据。与 `validate` 分开两条是有原因的：
+  /// 「清空输入框」这个动作本身必须允许（否则用户删不掉上一局的旧 ID），
+  /// 但**空着不许锁定** —— 没有对局号的配置事后无从对齐到具体哪一局。
+  static String? require(String raw) =>
+      normalize(raw).isEmpty ? requiredNotice : null;
+
+  /// 空 ID 时给用户看的那句话（输入框提示、锁定失败原因、启动后首屏都用它，
+  /// 三处口径必须一模一样：同一个坑不能一会儿叫「必填」一会儿叫「请填」）。
+  static const String requiredNotice = '对局ID 必填：填牌桌上的对局号或你的玩家ID';
+
   /// 读取已保存的游戏 ID；存储不可用时安全返回空串，绝不让主页抛异常。
   static Future<String> loadGameId() async {
     try {

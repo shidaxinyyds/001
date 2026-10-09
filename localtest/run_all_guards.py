@@ -45,6 +45,9 @@ MUTABLE = {
     # 多平台真机 20 帧手牌表：真值来自人眼读屏，读数链路（玩法闸门/平台风格）断了
     # 不会让任何既有精度守卫变红——它只会被当成“识别退化了”。
     "test_multi_hand_guard.py",
+    # 主页/悬浮窗文案与接线（必填、玩法列表不筛、引擎不换玩法）：本机无 Flutter SDK，
+    # 这类契约只能从 Python 侧反向钉 Dart 源码。
+    "test_ui_wording_guard.py",
     "test_skip_frame_guard.py",
     "test_non_table_honesty_guard.py",
     "test_hot_path_contracts_guard.py",

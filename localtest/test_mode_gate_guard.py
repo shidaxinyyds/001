@@ -32,20 +32,23 @@
    `queshen_play_01.jpg` 面板标题就是「广东红中王」，屏上明摆着一枚 北(4z)。
    闸门里没有的字牌连被模板比较的机会都没有 → 被强贴成 7z/9s/8s 还凭空少读一张。
    **用户报障原话「一些特殊的牌识别不出来，比如东西南北风」的根因就在牌集，不在模板。**
-⑥ 引擎必须拒绝「本平台根本没开的玩法」并回落到平台默认，且**必须把纠正说出去**
-   （P2-B）。`queshen_play_02.jpg` 是同一台机器上的另一帧：面板挂着「血流红中」
-   （川麻牌集，闸门只放开 7z），屏上却有 北 + 4 张 白板 → 修法前少读一张并错贴。
-   只在 UI 筛选项堵不住全部：配置到达引擎有三条路（Java 推送、磁盘轮询、旧版本
-   残留的 json），所以纠正必须在引擎每帧做，而纠正本身不是终点 —— 让用户知道
-   「面板上那个玩法在这个平台根本不存在」才是终点。
+⑥ 引擎**不替用户换玩法**，但必须把「这个玩法不在这家平台的房卡清单里」说出去
+   （v1.7.5 改口径）。为什么改：P2-B 曾拿 `supported_modes` 当硬闸门，把列表外的玩法
+   换成平台默认，理由是「那个组合在本平台读不出牌」；而
+   `localtest/measure_mode_coverage.py` 量下来——主 bank（手绘 34 面）在**每个**平台都
+   常驻（`STYLE_PLATFORM_DENYLIST` 只踢附加风格、永不踢主 bank），34/34 面家家都有。
+   那份清单是手写的房卡猜测而不是能力事实；拿它当闸门把用户的玩法列表从 19 种砍到
+   3~6 种、且主动选了也会被改回去，比猜错房卡更坏。本条钉两面：生效玩法**逐字等于**
+   声明值；选了房卡外的玩法时 payload 必须交 `mode_off_catalog`、标题必须带「未收录」。
 
 变异检验（`py -3.10 -X utf8 localtest/test_mode_gate_guard.py --mutate`）：
   ① 的变异体：把 `Engine.__init__` 的玩法退回常量 DEFAULT_MODE（即修法前）。
   ④ 的变异体：把 `gd_queshen` 默认玩法改回装不下字牌的那条（现在是 sc_hz：
      gd_hz 已经按 ⑤ 修正成全牌，拿它当变异体不再能成立，见该用例注释）。
   ⑤ 的变异体：把 gd_hz 牌集改回 `range(27)+[33]` —— 真帧上的 北 必须掉出来。
-  ⑥ 的变异体：把 `reconcile_mode_platform` 换成恒等（删掉纠正调用）—— 那帧必须
-     既不报 `mode_forced`，也读不出 北/白板。
+  ⑥ 的变异体（两面各一条）：把「未收录」提示算成永远为空 → 那帧必须不再报
+     `mode_off_catalog`、标题必须不再带「未收录」；把房卡核对改回「替用户换玩法」
+     → 那帧的生效玩法必须不再是声明的那个（即本条改动被回退时必红）。
   若哪天有人把某条主断言削弱成空断言，对应变异体会与它互相矛盾而报红。
 
 运行：py -3.10 -X utf8 localtest/test_mode_gate_guard.py
@@ -86,11 +89,13 @@ MULTI = os.path.join(HERE, "shots_multi")           # 用户真机 20 帧（已�
 # ⑤⑥ 钉住的两帧广东雀神。手牌真值 = **人眼逐帧读屏**（拼屏工具
 # `localtest/montage_hands.py`，一批 20 帧里只有这两帧与读数不符），不是引擎输出：
 #   queshen_play_01.jpg 面板「广东红中王」：4p 9p9p 2s 4s 5s5s5s 6s 北 4s = 11 张
-#   queshen_play_02.jpg 面板挂着「血流红中」（本平台未开放）：
+#   queshen_play_02.jpg 面板挂着「血流红中」（不在这家房卡里，v1.7.5 起照用户说的跑）：
 #                              9p9p 2s 4s 5s5s5s 9s 北 白白白白 4p = 14 张
+# 两帧的差别就是 ⑥ 的两面：房卡里的玩法逐张等于真值，房卡外的玩法**被如实读出窄闸门
+# 的代价**（丢北/白板）并同时自报不可信 —— 见 TestModePlatformNote。
 QUESHEN_HZ = ("queshen_play_01.jpg", "gd_queshen", "gd_hz",
               ["4p", "9p", "9p", "2s", "4s", "4s", "5s", "5s", "5s", "6s", "4z"])
-QUESHEN_FORCED = ("queshen_play_02.jpg", "gd_queshen", "sc_hz",
+QUESHEN_OFF_CATALOG = ("queshen_play_02.jpg", "gd_queshen", "sc_hz",
                   ["9p", "9p", "2s", "4s", "5s", "5s", "5s", "9s",
                    "4z", "5z", "5z", "5z", "5z", "4p"])
 
@@ -125,17 +130,14 @@ def entry():
     raise unittest.SkipTest(f"缺夹具帧 {FRAME_KEY}（public/0 未就位）")
 
 
-def first_frame_valid_tiles(img, platform, mode, bypass_reconcile=False):
+def first_frame_valid_tiles(img, platform, mode):
     """按生产口径喂**一帧**，返回首张牌打分时的允许牌集与面板手牌串。
 
     只取第一次 `_score_face`：那才是「第一帧」的真实状态。抓多次会把 reload 之后
     的正确状态混进来，等于替被守卫的 bug 打掩护。
 
-    `bypass_reconcile` 只给 ② 用：② 要的对照是「川麻窄闸门 vs 全牌闸门」在同一帧
-    上的形状，而 P2-B 之后 (gd_queshen, sc_hz) 已是引擎会当场拦掉的非法组合
-    （见 ⑥）——生产链路里那对组合根本不存在，窄闸门的形状只能做成显式声明的
-    **实验条件**，并且必须同时断言「生产链路会纠正它」，否则这条对照就是在
-    测量一个已经修掉的世界。
+    v1.7.5 之后这里不再需要「旁路纠正」之类的实验条件：引擎不替用户换玩法，
+    声明什么牌集就按什么牌集识别，② 要的窄闸门对照直接走生产链路就能跑出来。
     """
     seen = []
     orig = TencentGridDetector._score_face
@@ -146,11 +148,8 @@ def first_frame_valid_tiles(img, platform, mode, bypass_reconcile=False):
         return out
 
     orig_lp, orig_lm = E.load_platform, E.load_mode
-    orig_rc = E.reconcile_mode_platform
     E.load_platform = lambda *a, **k: platform
     E.load_mode = lambda *a, **k: mode
-    if bypass_reconcile:
-        E.reconcile_mode_platform = lambda m, p: (m, None)
     TencentGridDetector._score_face = spy
     try:
         eng = E.Engine()
@@ -160,7 +159,6 @@ def first_frame_valid_tiles(img, platform, mode, bypass_reconcile=False):
     finally:
         TencentGridDetector._score_face = orig
         E.load_platform, E.load_mode = orig_lp, orig_lm
-        E.reconcile_mode_platform = orig_rc
     return seen, lc.canon_mpsz(data.get("hand", ""))
 
 
@@ -215,13 +213,12 @@ class TestModeGateWiring(unittest.TestCase):
         """② 同一帧：全牌玩法读出字牌，川麻玩法读不出 —— 闸门的用户可见后果。"""
         _s_full, panel_full = first_frame_valid_tiles(self.img, self.e["platform"], FULL_MODE)
         _s_sc, panel_sc = first_frame_valid_tiles(
-            self.img, self.e["platform"], NO_HONOR_MODE, bypass_reconcile=True)
-        # 窄闸门那半边是实验条件，不是生产状态：生产里这对组合同帧就会被换成全牌
-        # 玩法（⑥）。有人日后把纠正挪走，这里必须立刻显形。
-        self.assertEqual(E.reconcile_mode_platform(NO_HONOR_MODE, self.e["platform"]),
-                         (PLATFORMS[self.e["platform"]]["default_mode"], NO_HONOR_MODE),
-                         "② 靠旁路纠正才能测窄闸门；若这对组合已变成合法组合，"
-                         "本对照的前提就该重写（不再需要旁路）")
+            self.img, self.e["platform"], NO_HONOR_MODE)
+        # 前提（不是空断言）：这帧的平台房卡里没这条窄牌集玩法——v1.7.5 之后引擎
+        # 不拦它、只提示，所以 ② 能直接走生产链路测窄闸门；若这对组合哪天进了
+        # 房卡，本对照仍成立，但 ⑥ 的「未收录」那一面就少了个真夹具，得换帧。
+        self.assertNotIn(NO_HONOR_MODE, PLATFORMS[self.e["platform"]]["supported_modes"],
+                         "② 用窄牌集做对照的前提变了：这对组合已进了房卡清单")
         gt_honors = [t for t in self.e["hand"] if t.endswith("z") and t != "7z"]
         self.assertTrue(gt_honors, "夹具帧没有非 7z 字牌，本断言无从成立")
         for t in gt_honors:
@@ -239,7 +236,7 @@ class TestModeGateWiring(unittest.TestCase):
         得回头查识别/后处理，别把新问题塞进旧结论里。
         """
         _s, panel = first_frame_valid_tiles(
-            self.img, self.e["platform"], NO_HONOR_MODE, bypass_reconcile=True)
+            self.img, self.e["platform"], NO_HONOR_MODE)
         want = self.e["hand"]
         lost = sorted(collections.Counter(want) - collections.Counter(panel))
         gained = sorted(collections.Counter(panel) - collections.Counter(want))
@@ -336,46 +333,55 @@ class TestGdHzTileset(unittest.TestCase):
         name, pf, mode, gt = QUESHEN_HZ
         d = run_payload(multi_frame(name), pf, mode)
         panel = lc.canon_mpsz(d.get("hand", ""))
-        self.assertIsNone(d.get("mode_forced"),
-                          f"{name} 声明的 {mode} 就是本平台合法玩法，不许被悄悄换掉")
+        self.assertIsNone(d.get("mode_off_catalog"),
+                          f"{name} 声明的 {mode} 就在本平台房卡里，不该报「未收录」")
         self.assertIn("4z", panel, f"{name} 屏上明摆着一枚北，面板却没读到：{panel}")
         self.assertEqual(panel, sorted(gt),
                          f"{name} 面板手牌应逐张等于人眼真值 {sorted(gt)}，实为 {panel}")
 
 
-class TestModePlatformReconcile(unittest.TestCase):
-    """⑥ 引擎拒绝「本平台根本没开的玩法」，回落平台默认并把纠正说出去。"""
+class TestModePlatformNote(unittest.TestCase):
+    """⑥ 引擎不替用户换玩法；但「房卡未收录」必须说出去，错声明的代价也得看得见。"""
 
-    def test_unsupported_mode_falls_back_to_platform_default(self):
+    def test_declared_mode_is_always_honored(self):
         R = E.reconcile_mode_platform
-        self.assertEqual(R("sc_hz", "gd_queshen"), ("std_tdh", "sc_hz"),
-                         "血流红中不在广东雀神的玩法表里：必须回落 default 并报告原值")
-        self.assertEqual(R("not_a_mode", "tencent"), ("sc_hz", "not_a_mode"),
-                         "旧版本残留的野 key 也要被接住，并如实报出原值")
+        self.assertEqual(R("sc_hz", "gd_queshen"), ("sc_hz", "sc_hz"),
+                         "血流红中不在广东雀神房卡里：现在必须照用户说的跑，并报未收录")
+        self.assertEqual(R("not_a_mode", "tencent"), ("not_a_mode", "not_a_mode"),
+                         "旧版本残留的野 key 也不许被悄悄换成别的（它走 modes 自己的兜底牌集）")
 
     def test_legal_combinations_are_never_touched(self):
-        """零行为变化：所有「平台×自家玩法」必须逐字原样返回。"""
+        """在房卡里的玩法连提示都不许有：否则「未收录」会喊成狼来了。"""
         R = E.reconcile_mode_platform
         for key, p in PLATFORMS.items():
             for m in p["supported_modes"]:
-                self.assertEqual(R(m, key), (m, None), f"{key}×{m} 合法却被纠正")
+                self.assertEqual(R(m, key), (m, None), f"{key}×{m} 在房卡里却被报未收录")
             self.assertEqual(R(p["default_mode"], key), (p["default_mode"], None),
-                             f"{key} 的 default_mode 自己都被纠正：玩法表不自洽")
+                             f"{key} 的 default_mode 自己都被报未收录：玩法表不自洽")
 
-    def test_real_frame_reports_the_correction_visibly(self):
-        """⑥ 的用户可见面：挂着「血流红中」的那帧必须被换掉，且面板上得看得见。"""
-        name, pf, mode, gt = QUESHEN_FORCED
+    def test_real_frame_keeps_the_mode_and_says_it_out_loud(self):
+        """⑥ 的用户可见面：挂着「血流红中」的那帧——玩法照旧生效、标题多一句未收录、
+        而错声明导致的丢牌必须同时自报不可信（不许伪装成「读好了」）。"""
+        name, pf, mode, gt = QUESHEN_OFF_CATALOG
         d = run_payload(multi_frame(name), pf, mode)
         panel = lc.canon_mpsz(d.get("hand", ""))
-        self.assertEqual(d.get("mode"), "std_tdh", f"{name} 生效玩法应被换成 std_tdh")
-        self.assertEqual(d.get("mode_forced"), "sc_hz",
-                         "被纠正了却不报原值：用户看到的是面板凭空换了玩法")
-        self.assertIn("已纠正", d.get("mode_name", ""),
-                      f"面板标题必须带上纠正说明，实为「{d.get('mode_name')}」")
-        self.assertIn("4z", panel, f"{name} 屏上有北：{panel}")
-        self.assertEqual(panel.count("5z"), 4, f"{name} 屏上有 4 张白板：{panel}")
-        self.assertEqual(panel, sorted(gt),
-                         f"{name} 面板手牌应逐张等于人眼真值 {sorted(gt)}，实为 {panel}")
+        self.assertEqual(d.get("mode"), mode,
+                         f"{name} 生效玩法被引擎换成了 {d.get('mode')}：v1.7.5 不再替用户换玩法")
+        self.assertEqual(d.get("mode_off_catalog"), mode,
+                         "房卡外的玩法必须报出来，否则面板与实桌不一致时没人知道从哪查")
+        self.assertIn("未收录", d.get("mode_name", ""),
+                      f"标题必须把这件事说出口，实为「{d.get('mode_name')}」")
+        # 窄闸门的后果（川麻牌集不含北/白板）：钉住它，是为了不许有人拿「把引擎
+        # 改回静默替换」当捷径——那等于把用户的声明当噪声。
+        self.assertNotIn("4z", panel, f"{name} 在 sc_hz 闸门下不应读出北：{panel}")
+        self.assertEqual(panel.count("5z"), 0, f"{name} 在 sc_hz 闸门下不应读出白板：{panel}")
+        self.assertNotEqual(panel, sorted(gt),
+                            f"声明错了却被读对了？那本帧对照不成立，重写它：{panel}")
+        # 但错读不许装确定：那几张被强贴的牌必须自报不可信、且本帧不给建议。
+        self.assertTrue(d.get("hand_uncertain"),
+                        f"{name} 牌集与牌桌不符却未自报不可信：面板在拿一行错牌给建议")
+        self.assertEqual(d.get("advice") or [], [],
+                         "已自报不可信却仍给建议：可读性硬门没接上")
 
 
 class TestMutationControls(unittest.TestCase):
@@ -456,29 +462,52 @@ class TestMutationControls(unittest.TestCase):
         self.assertNotEqual(panel, sorted(gt),
                             "窄牌集与全牌牌集给出同一行手牌：识别根本没走 available_set")
 
-    def test_mutant_identity_reconcile_breaks_6(self):
-        """变异体 = 把 `reconcile_mode_platform` 换成恒等（即 P2-B 前），⑥必须报红。"""
-        name, pf, mode, gt = QUESHEN_FORCED
+    def test_mutant_silenced_note_breaks_6(self):
+        """变异体 = 把「未收录」提示算成永远为空，⑥ 必须报红。"""
+        name, pf, mode, gt = QUESHEN_OFF_CATALOG
         orig = E.reconcile_mode_platform
         E.reconcile_mode_platform = lambda m, p: (m, None)
         try:
             d = run_payload(multi_frame(name), pf, mode)
         finally:
             E.reconcile_mode_platform = orig
-        self.assertEqual(d.get("mode"), "sc_hz", "恒等变异体下生效玩法仍被换掉了：接线不对")
-        self.assertIsNone(d.get("mode_forced"),
-                          "没纠正却报了 mode_forced：这条字段不是从纠正里来的")
+        self.assertIsNone(d.get("mode_off_catalog"),
+                          "恒等变异体仍报 mode_off_catalog：这个字段不是从房卡核对来的")
+        self.assertNotIn("未收录", d.get("mode_name", ""),
+                         "删掉房卡核对后标题仍写着未收录：那句话另有来源，本字段在测空气")
+
+    def test_mutant_silent_substitution_breaks_6(self):
+        """变异体 = 把房卡核对改回 P2-B 的「替用户换玩法」，⑥ 必须报红。
+
+        这一条钉的是本次改口径的方向：不是「提示漏了」而是「行为被改回去了」。
+        生效玩法一旦不再是声明值，用户选什么都等于没选。"""
+        name, pf, mode, gt = QUESHEN_OFF_CATALOG
+        orig = E.reconcile_mode_platform
+
+        def old(m, p):
+            sup = PLATFORMS[p]["supported_modes"]
+            return (m, None) if m in sup else (PLATFORMS[p]["default_mode"], m)
+
+        E.reconcile_mode_platform = old
+        try:
+            d = run_payload(multi_frame(name), pf, mode)
+        finally:
+            E.reconcile_mode_platform = orig
+        # 变异体必须给出与生产**不同**的可观察结果，否则 ⑥ 那条「生效玩法==声明玩法」
+        # 根本钉不住这件事（只写「断言会红」而不验红，就是空断言）。
+        self.assertNotEqual(d.get("mode"), mode,
+                            f"改回偷换玩法后生效玩法仍等于声明值（{mode}）：⑥ 在测空气")
+        self.assertEqual(d.get("mode"), PLATFORMS[pf]["default_mode"],
+                         f"变异体没按旧写法回落平台默认，而是给了 {d.get('mode')}：对照不成立")
         panel = lc.canon_mpsz(d.get("hand", ""))
-        self.assertNotEqual(panel, sorted(gt),
-                            f"恒等变异体（不纠正）竟仍能读出完整手牌：⑥ 在测空气（{panel}）")
-        self.assertNotIn("4z", panel,
-                         f"删掉纠正后川麻闸门仍在读北（{panel}）：那说明牌集不是从玩法来的")
+        self.assertIn("4z", panel,
+                      f"换成全牌玩法后仍读不出北（{panel}）：那 ⑥ 的丢牌后果在测另一件事")
 
 
 if __name__ == "__main__":
     if MUTATE:
         print("[mutate] 只跑变异对照：① 玩法写死成常量、④ 默认玩法退回窄牌集、"
-              "⑤ gd_hz 牌集改回 112、⑥ 删掉错配纠正 —— 四条各自必须把对应主断言打红")
+              "⑤ gd_hz 牌集改回 112、⑥ 静默提示 / ⑥ 偷换玩法 —— 五条各自必须把对应主断言打红")
         unittest.main(argv=[sys.argv[0], "TestMutationControls"], exit=False, verbosity=2)
     else:
         unittest.main()

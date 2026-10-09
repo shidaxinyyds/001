@@ -438,7 +438,7 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
                               size: 13, color: AppTokens.faint),
                           const SizedBox(width: 5),
                           const Text(
-                            '硬件指纹单向哈希 · 离线签名加密',
+                            '硬件指纹单向哈希 · 签名加密',
                             style: TextStyle(
                                 fontSize: 11,
                                 color: AppTokens.faint,
