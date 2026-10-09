@@ -336,6 +336,13 @@ class _FrameSkipper:
 
     def __init__(self) -> None:
         self._last_sig: Optional[np.ndarray] = None
+        # 本帧签名（`diff()` 里刷新）与「上一次真正做了完整识别的那帧」的锚点签名。
+        # 锚点是累计漂移门的根基：`_last_sig` 每帧都在往前推（包括被跳过的帧），
+        # 只看相邻差就有一个实在的洞 —— 每帧与前一帧几乎一样、连着几十帧后却已经
+        # 面目全非（逐帧挪动的动画、亮度缓慢漂移），相邻差照样过门，旧 payload 就
+        # 被无限期地当本帧事实发上屏。
+        self._cur_sig: Optional[np.ndarray] = None
+        self._anchor_sig: Optional[np.ndarray] = None
         # 缓存上一帧"识别到的手牌 + 标签"——画面不变时整个 process() 直接复用。
         # 缓存的是 EngineResult.result（dict 序列化形式），不是 EngineResult 对象本身，
         # 因为后者带 cv2 图像，跨调用持有可能让 Chaquopy 释放不及时。
@@ -343,13 +350,29 @@ class _FrameSkipper:
         self._last_top_score: float = 0.0
 
     def diff(self, work_gray: np.ndarray) -> float:
+        self._cur_sig = None            # 算不出来就留在 None：宁可不跳，不拿旧值当“没变”
         cur = _block_diff_signature(work_gray)
+        self._cur_sig = cur
         if self._last_sig is None or self._last_sig.shape != cur.shape:
             self._last_sig = cur
+            self._anchor_sig = cur
             return float("inf")  # 首帧肯定不跳
         diff = float(np.abs(cur - self._last_sig).sum())
         self._last_sig = cur
         return diff
+
+    @property
+    def anchor_drift(self) -> float:
+        """本帧相对锚点（上一次真正识别的帧）累计变了多少。
+
+        没锚点/本帧签名算不出来都返 inf（等于强制完整识别，绝不拿猜的值当“没变”）。
+        这比“最多跳 N 帧”那种按帧数封顶更强：按帧数封顶时，每帧变化量只要刚好低于
+        相邻阈值，100 帧也能始终“看起来没变”；而这里上限就是同一个 3.0，跟帧数无关。"""
+        if self._cur_sig is None or self._anchor_sig is None:
+            return float("inf")
+        if self._cur_sig.shape != self._anchor_sig.shape:
+            return float("inf")
+        return float(np.abs(self._cur_sig - self._anchor_sig).sum())
 
     def set_baseline(self, work_gray: np.ndarray) -> None:
         """把基线签名改写成「本帧真正被识别的那张图」（不返回差值）。
@@ -358,12 +381,26 @@ class _FrameSkipper:
         自愈那一类），本帧的 diff 是在旧朝向裁片上算的，基线也就留在了旧朝向上
         —— 下一帧会拿旧朝向的裁片当参照，凭空再付一次完整识别。补一次基线刷新
         （≈1ms）就把这个尾巴收掉。稳态下验证返回的就是同一张图，这条是纯 no-op。
+
+        锚点跟着一起换：这一帧完整识别过了，它的图就是新的“上次真识过的帧”。
+
+        `_cur_sig` 也必须一起换（实测踩过的坑）：本帧末尾 `remember` 会拿 `_cur_sig`
+        推进锚点，而 `_cur_sig` 还是**旧朝向**裁片的签名 —— 不换的话锚点就被写回
+        成错朝向的图，下一帧的累计漂移是「新朝向 vs 旧朝向」（实测 7000+ 量级），
+        漂移门永远过不去，每次方向自愈之后的所有帧都退化成完整识别。
         """
-        self._last_sig = _block_diff_signature(work_gray)
+        sig = _block_diff_signature(work_gray)
+        self._last_sig = sig
+        self._anchor_sig = sig
+        self._cur_sig = sig
 
     def remember(self, payload: str, top_score: float) -> None:
         self._last_payload = payload
         self._last_top_score = top_score
+        # 这一帧真的被完整识别了，它就成了新的锚点（漂移从零重新计）。
+        # 只在签名新鲜时推进：签名算不出来那一帧 `_cur_sig` 是 None，不能拿旧签名充新。
+        if self._cur_sig is not None:
+            self._anchor_sig = self._cur_sig
 
     @property
     def cached(self) -> Optional[str]:
@@ -597,8 +634,14 @@ def _face_brightness(image: CVImage, rect) -> Optional[float]:
         return None
 
 
-# 帧差去重最多连续跳过多少帧（设为2，保证最多跳过2帧就强制全量重检，绝不滞后）。
-MAX_SKIP_FRAMES = 2
+# 跳帧不按「连续跳过几帧」封顶，而是按**累计漂移**封顶：帧差门只比相邻两帧，而缓慢
+# 漂移（逐帧挪动的动画、亮度渐变）会每帧都刚好低于阈值，无限期复用旧 payload。
+# 所以真正的门在 `_FrameSkipper.anchor_drift`（相对上一次真正识别的那帧也没变过
+# FRAME_SKIP_DIFF_THRESH）。历史上这里是一个叫 `MAX_SKIP_FRAMES = 2` 的常量，
+# 注释写着“最多跳 2 帧就强制全量重检”却从没被任何代码读过——“注释承诺但没接线”
+# 本身就是坑；而按帧数封顶要么逼静止画面周期性重付一次完整识别（发热降频），
+# 要么照样挡不住慢慢漂，于是换成不花额外开销的漂移门。该常量已删除，不许再接回
+# 任何判据（`localtest/test_skip_frame_guard.py` 把它当负契约钉住）。
 
 
 class _HandStabilizer:
@@ -1139,6 +1182,16 @@ def _is_valid_image(img) -> bool:
 # MAX_ORIENT_REPROBES 次，之后停止重探、优雅报告 no_tiles，绝不让"识别不出来"
 # 演变成"程序闪退"。用户可用悬浮窗「旋转」按钮手动指定方向。
 MAX_ORIENT_REPROBES = 2
+
+
+# NOTE: 像素启发式判「自噬」已被实测证伪并移除（见 detect_dingque 上方说明）。
+
+# 缺门花色名（0=万 1=筒 2=条）：徽章读数、手写 override、稳定门共用这一张表。
+DINGQUE_SUIT_NAMES = ('万', '筒', '条')
+
+# 徽章读数的时间稳定窗，单位=**扫描次数**（不是帧数：扫描本身按 4 帧节流，
+# 真机一帧≈25~80ms、一个识别周期≈1s，故 3 次扫描≈最近 3 秒的取区证据）。
+DQ_STABLE_WINDOW = 3
 
 
 def detect_dingque(screen_img: np.ndarray) -> Tuple[Optional[int], Optional[str]]:
@@ -1786,6 +1839,18 @@ class Engine:
         # 表现为建议出得慢。节流后：每 N 帧重检一次，期间直接复用缓存值。
         self._dq_scan_tick: int = 0
         self._dq_scan_cache: Tuple[Optional[int], Optional[str]] = (None, None)
+        # ===== 定缺徽章读数的时间稳定门（面板自噬的次级防线）=====
+        # 自家悬浮窗展开时会压住徽章取区，此时 detect_dingque 读到的是面板 chip 的
+        # 颜色而不是牌桌事实（真机 s2 报筒、s4 报条）。像素层面区分不了二者——那条
+        # 启发式已实测证伪并拆除（见 detect_dingque 上方 NOTE）。还能区分的只剩**时间
+        # 轴**：牌桌徽章一局内恒定，面板内容随牌局逐秒变。于是把最近 DQ_STABLE_WINDOW
+        # 次扫描攒成窗口，窗口内非 None 读数彼此不一致就整体判「没读准」（宁可不报，
+        # 也不让最后那一枪直接上屏——旧写法表现为缺门在万/筒/条之间抽搐）。
+        # 彻底解法是面板矩形事实源（需真机验证），本门只是次级防线，不假装解决它。
+        self._dq_scan_hist: deque = deque(maxlen=DQ_STABLE_WINDOW)
+        self._dq_hist_orient = None      # 窗口是在哪个朝向下攒的（换朝向后读数不可比）
+        self._dq_scan_count: int = 0     # 真正扫了几枪（节流下帧数与枪数不等，诊断靠它）
+        self._dq_unstable_hits: int = 0  # 因分歧被扣下的扫描次数（诊断计数，不上屏）
         self._opdq_scan_tick: int = 0
         self._opdq_cache: List[int] = []
         self._phase_scan_tick: int = 0
@@ -2125,9 +2190,33 @@ class Engine:
         # 副露基数会跨局生效——表现为新一局第一帧就报「下家 打出 …」这种凭空事件。
         self._phase_machine.reset()
         self._hand_diff_discard = None
+        # 新局/回大厅：徽章读数的时间窗口必须一起作废，否则上一局已敲定的缺门会
+        # 顶替本局「还没定缺」的事实（窗口里全是旧值，而稳定门只认窗口内的读数）。
+        self._dq_scan_hist.clear()
+        self._dq_scan_cache = (None, None)
+        self._dq_hist_orient = None
         self._seat_meld_entries = {0: [], 1: [], 2: [], 3: []}
         self.trainer = None
         self._river_future = None
+
+    def _stable_dingque_read(self) -> Tuple[Optional[int], Optional[str]]:
+        """最近几枪徽章扫描的**稳定**读数（判据与存在理由见 _dq_scan_hist 处注释）。
+
+        · 窗口内非 None 读数彼此全等 → 可信，返回该门；
+        · 出现分歧 → 不可信，返回 (None, None)。上层因此走「没读到」的出口：既不上屏、
+          不锁存 `_match_started`，也不会被 match_state 播成「定缺敲定」事件；
+        · 单枪漏读（None）本身不算分歧——徽章一旦敲定就整局常驻，压缩噪声/瞬时遮挡
+          造成的漏读不该抹掉已确立的事实；整窗皆 None 时仍返回 (None, None)。
+        单轮只扫一枪（fresh Engine、评测逐帧独立）时窗口里只有一个值，自然全等→可信，
+        所以这道门不会改变 eval_base 的定缺基准，它只拦「后一枪推翻前一枪」。
+        """
+        seen = [s for s in self._dq_scan_hist if s is not None]
+        if not seen:
+            return None, None
+        if len(set(seen)) != 1:
+            self._dq_unstable_hits += 1
+            return None, None
+        return seen[0], DINGQUE_SUIT_NAMES[seen[0]]
 
     @staticmethod
     def _run_bg_river_and_melds(image, detector, mode, hand_row, platform_key="tencent"):
@@ -4161,6 +4250,9 @@ class Engine:
                 self._warmup_left <= 0
                 and self._frame_skipper.cached is not None
                 and self._cur_frame_diff < FRAME_SKIP_DIFF_THRESH
+                # 累计漂移门：不是“本帧与上一帧像”，而是“本帧与上一次真的识别过的那帧
+                # 像”。两个阈值同一个数，不另造新参数（理由见 `anchor_drift`）。
+                and self._frame_skipper.anchor_drift < FRAME_SKIP_DIFF_THRESH
                 and getattr(self, "_match_started", False)
                 and self._stable_hand_count > 0
                 and not self._hand_stab.pending
@@ -4416,7 +4508,16 @@ class Engine:
             if is_dingque_mode(self.mode):
                 self._dq_scan_tick += 1
                 if self._dq_scan_tick % 4 == 1:
-                    self._dq_scan_cache = detect_dingque(full_for_preview)
+                    # 扫到的只是**原始观测**；能不能当缺门报出去由稳定门决定（r6dq）。
+                    suit = detect_dingque(full_for_preview)[0]
+                    # 朝向变了：同一个归一化取区对应屏幕上另一块像素，窗口里旧读数与
+                    # 本枪不可比 → 作废重攒（单枪不成分歧，因此不会拖慢首次报出）。
+                    if self._dq_hist_orient != self._orient:
+                        self._dq_scan_hist.clear()
+                        self._dq_hist_orient = self._orient
+                    self._dq_scan_hist.append(suit)
+                    self._dq_scan_count += 1
+                    self._dq_scan_cache = self._stable_dingque_read()
             else:
                 self._dq_scan_cache = (None, None)
             # ===== 开局前阶段检测：无死锁门控 + 命中需连续帧确认 =====
@@ -4445,8 +4546,12 @@ class Engine:
                     pick_p = len(cands) >= 2
                 raw_swap = swap_p
                 # ===== 换牌阶段时间迟滞 =====
+                # 迟滞只配吃掉「单帧漏检」，不配延长阶段存在本身。旧值 3：换完牌
+                # 之后还要把画面续在换三张上 3 个检测周期（真机一周期≈1s），面板就
+                # 在「已换完」之后继续播「换三张」——用户说的「不在换牌阶段却显示换牌」。
+                # 现在只续 1 帧，退出另有物理铁证作支撑（见下方张数门控）。
                 if raw_swap:
-                    self._swap_hold_frames = 3
+                    self._swap_hold_frames = 1
                 elif dq_p or pick_p:
                     self._swap_hold_frames = 0
                 elif self._swap_hold_frames > 0:
@@ -4470,15 +4575,28 @@ class Engine:
                 else:
                     self._phase_confirm_frames = 0
 
-                # 摸打物理排他铁律：
-                # 1. 立牌张数 < 13 张（例如碰/杠后的 11、10、7、4 张），物理上 100% 处于摸打阶段，绝不可能处于换牌或定缺阶段。
-                # 2. 已有弃牌或副露时，若无实证定缺盘（not dq_p），绝不允许换三张迟滞或幽灵定缺跨阶段泄露与永久粘连。
+                # ===== 换三张 / 定缺的排他证据：只承认牌局账本，不承认张数推算 =====
+                # 本局已有弃牌/副露账⇒ 已在摸打，两个开局阶段必然已经结束。
+                #
+                # 为什么必须把「立牌 >= 14 张 ⇒ 已摸牌 ⇒ 不在换牌」这条自己立的
+                # 「物理铁律」拆掉（实测而非推理）：37 帧人工标注 GT 里 s_6d33 与
+                # t2 两帧同时是「14 张立牌」与「换三张阶段」（整手 14/14 全对），
+                # 于是该推论在本平台上为假，它把两帧的真实换牌阶段抹成了 ok。
+                # 同理也不得反向用张数肯阶段：换牌弹窗盖住手牌行时只能读到 8 张，
+                # 拿「不足 13 张」当反证就是「阶段来回抽搐」的来源（踩过）。
+                # 张数在开局阶段只能描述「读到多少」，不能推断「在不在某个阶段」。
                 total_discards = sum(self._monotonic_discards.values()) + sum(self._inferred_discards.values())
                 total_melds = sum(self._meld_counts_34)
-                if (0 < curr_raw_n < 13) or ((total_discards > 0 or total_melds > 0) and not dq_p and not getattr(self, "_swap_raw", False)):
+                # 账本必须确认属于本局：`_match_started` 为 False 时这些是上一局的残留，
+                # 而新一局的换三张恰恰要靠连续命中去触发清池，不能被旧账锁死。
+                in_play_by_ledger = (total_discards > 0 or total_melds > 0) \
+                    and getattr(self, "_match_started", False)
+                if in_play_by_ledger:
                     is_swap_phase = False
                     self._swap_hold_frames = 0
                     self._swap_raw = False
+                    # 定缺三色盘是「这一屏正在选门」的直接视觉证据，比张数推算硬，
+                    # 所以它在场时不自此否决。
                     if not dq_p:
                         is_dq_phase = False
                     self._phase_cache = (is_swap_phase, is_dq_phase, is_pick_phase)
@@ -4494,7 +4612,7 @@ class Engine:
                     override = getattr(self, "_dingque_override", None)
                     if override is not None and 0 <= override <= 2:
                         dingque_suit = override
-                        dingque_name = ['万', '筒', '条'][dingque_suit]
+                        dingque_name = DINGQUE_SUIT_NAMES[dingque_suit]
                         self._match_started = True
                     elif len(raw_labels) >= 4 or getattr(self, "_match_started", False):
                         # 复用本帧节流缓存（detect_dingque 已在上方按 4 帧节奏跑过），
@@ -4939,7 +5057,12 @@ class Engine:
                 self._partial_ttl = 0
             else:
                 # 尚未形成新的完整合法手牌（摸打瞬间、手指遮挡、动画突变或真离场）
-                in_active_match = getattr(self, "_match_started", False) and bool(self._stable_hand_mpsz)
+                # 阻尼只看「有没有一个已经提交过的稳定手牌」，不再看 `_match_started`：
+                # 换三张/定缺阶段 `_match_started` 可以是 False，旧口径把这段时间的
+                # 瞬态欠读完全裸露出来——弹窗盖住半排手牌的一帧就直接把 13 张降成
+                # 5 张（用户说的「明明 13 张只显示 5 张」），下一帧又跳回 13 张。稳定
+                # 手牌在 `_reset_game_state` 里会被清空，不会把上一局的牌带进新局。
+                in_active_match = bool(self._stable_hand_mpsz)
                 if in_active_match:
                     # 对局中瞬态阻尼保护：摸打出牌瞬间、手指短暂遮挡或动画跳变时，
                     # 连续 1~3 帧维持上一帧稳定决策与手牌，绝不突发闪烁到 "等待开始" 或 "未检测到手牌"！
@@ -4975,8 +5098,8 @@ class Engine:
                             advice = []
                             best = ""
                             shanten = None
-                elif getattr(self, "_match_started", False) and curr_raw_n >= PARTIAL_MIN_TILES:
-                    # 局中冷启动或连续残缺识别（手牌数 >= 6 张）：提取 partial 兜底展示
+                elif curr_raw_n >= PARTIAL_MIN_TILES:
+                    # 连续残缺识别（手牌数 >= 6 张）：提取 partial 作为降级展示
                     try:
                         partial_now = self._labels_to_mpsz(raw_labels, avail)
                     except Exception:
@@ -5001,8 +5124,27 @@ class Engine:
                         advice = []
                         best = ""
                         shanten = None
+                elif curr_raw_n > 0:
+                    # 读到 1~5 张：这是「读到了、但读不全」，不是「没开局」。旧实现在这
+                    # 一格直接报「等待牌局开始」并把整块手牌藏起来——牌明明在屏幕上，
+                    # 用户看到的是「有手牌却显示等待开局」。partial 会带「手牌仅 N 张」
+                    # 遮挡提示，是当时真实情况的描述。
+                    try:
+                        partial_now = self._labels_to_mpsz(raw_labels, avail)
+                    except Exception:
+                        partial_now = ""
+                    if partial_now:
+                        status = "partial"
+                        tile_count = len(partial_now) // 2
+                        hand_mpsz = partial_now
+                    else:
+                        status = "no_tiles"
+                        message = ""
+                        advice = []
+                        best = ""
+                        shanten = None
                 elif not getattr(self, "_match_started", False):
-                    # 确未开局：干净处于 waiting 状态
+                    # 本帧一张没读到、也没开局：干净处于 waiting 状态
                     self._advice = []
                     self._advice_key = None
                     self._partial_mpsz = ""
@@ -5723,6 +5865,15 @@ class Engine:
                      else f"主推「{_bn}」排名更前：")
                     + str(_n.get("note") or ""))
 
+            # ===== 输出不变量：status 与手牌读数必须自洽 =====
+            # 「等待牌局开始」的定义是本帧一张牌都没读到。只要 hand_mpsz 非空却报
+            # waiting，端上就会出现「牌明明在屏幕上、面板却说没开局」的自相矛盾帧。
+            # 在出口收一次口，悬浮窗就不必自己反推“该不该信这个 waiting”。
+            # 只在「本帧真的读到了牌」时才升级：`curr_raw_n == 0` 而 hand_mpsz 还挂着
+            # 旧串时不能拿它当读数，否则就是把上一帧的牌永久挂屏（反过来错）。
+            if status == "waiting" and hand_mpsz and curr_raw_n > 0:
+                status = "partial"
+                tile_count = len(hand_mpsz) // 2
             # 构建高精度局势感知与下一步战术意图（现在在干什么，准备要干什么）
             phase_label, tactical_badge, tactical_intent = _build_tactical_perception(
                 status=status,

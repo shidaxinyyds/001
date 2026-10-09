@@ -22,6 +22,52 @@ CORE_Y0, CORE_Y1 = 16, 104             # 普通牌的纵向窗口
 CORE_BTN_Y0 = 44                       # 带顶标（癞子/春天）时的纵向上沿
 CORE_W, CORE_H = CORE_X1 - CORE_X0, CORE_Y1 - CORE_Y0     # 56 x 88
 
+# ===== 打分第四刀：粗筛 + 精算（两阶段打分）=====
+# 打分单价 = 核数 × 每核单价，而 `matchTemplate` 的钱 ≈ 输出像素 × 模板像素，
+# 所以想再快一档只有两条路：少扫几核，或让每次比较便宜。本刀把两者串起来：
+#   ① 粗筛：牌面图与**全部候选核**一起等比缩到 PREFILTER_SCALE（像素 1/4），
+#      跑一遍便宜的 NCC 只做排序；
+#   ② 精算：只对上表选出的少数标签跑原来的全尺寸 NCC，最终分数表由此产生。
+# 必须图与核**同比例**缩：只缩模板不缩图，输出窗口反而变大（实测 17×13 → 61×57），
+# 便宜不了多少（口径来自 `localtest/probe_prefilter.py`）。
+#
+# 代价与收益（实测 `build/prefilter_gt.txt`：37 帧 verified GT 的**真实调用序列**
+# 738 次打分，手牌行/牌河/副露/救援重扫全部包含在内，每次 110 核）：
+#   全量扫 11.26ms/枚 → 两阶段 5.71ms/枚（-49.3%；粗筛单枚 4.09ms = 全量的 36.4%，
+#   精算平均 4.1 个标签 / 16.2 枚核 = 1.62ms）；
+#   「全量 argmax 标签落进精算集」738/738，「过完 `_decide` 的最终 (label, score)
+#   与全量逐字全等」738/738。
+# 为什么判据看 argmax 召回而不是只看最终一致（这条是硬道理，不是保守）：只要
+# 全量 argmax 落在精算集里，它拿的就是精确全尺寸分，于是精算集内的 argmax 与
+# 全量 argmax 同类同分（集外标签的全量分不可能更高，否则它就才是 argmax），再
+# 加上相邻类闭包让 7 条结构判决的输入分也都精确 ⇒ **最终输出由构造保证一致**。
+# 反过来「最终一致 100% 但 argmax 召回不足」是靠运气（被挤掉的类恰好被隔壁捞
+# 回来），那种绿不许上线：K=2 时最终一致同样 100%，但粗筛召回只有 99.3%。
+PREFILTER_SCALE = 0.5
+PREFILTER_TOP_K = 3        # 粗筛前 K 名进精算集
+# 与粗筛第一名分差小于这个带的标签**全部**进精算集：粗筛自己都分不清高下时，
+# 就没资格替精算做淘汰。0.06 不是新调的参数——`_decide` 判「NCC 分不出 2m/3m」
+# 用的就是同一个 0.06（第 1~3 条裁决），这里只是把同一把尺子用到筛选上。它在
+# 本批 738 次调用里平均只多放进 0.3 个标签（见上表的 K=3/Δ=0 vs Δ=0.06 两行），
+# 买的是陌生牌风/遮挡/低置信帧上「排序整体失稳」时的自我退化。
+PREFILTER_MARGIN = 0.06
+
+# `_decide` 里成对出现的形近类。精算集必须对它做**闭包**：任一方入围就把另一方
+# 也拉进来，否则 `scores.get("3m", 0.0)` 会读成 0，那条结构判决整条被跳过——这不
+# 是理论担心，是写这份代码时必须防住的唯一一条真实失真路径。
+# 新增/删除 `_decide` 里的判决时**必须同步这张表**，守卫
+# `localtest/test_prefilter_consistency_guard.py` 会从 `_decide` 源码里把成对标签
+# 抽出来比对（漏改在离线就被拦下，不等真机认错牌）。
+ADJACENT_PAIRS: Tuple[Tuple[str, str], ...] = (
+    ("2m", "3m"), ("2s", "3s"), ("2p", "3p"), ("4p", "5p"),
+    ("6p", "8p"), ("6s", "9s"), ("4s", "5s"),
+)
+
+ADJACENCY: Dict[str, Tuple[str, ...]] = {}
+for _a, _b in ADJACENT_PAIRS:
+    ADJACENCY.setdefault(_a, []).append(_b)
+    ADJACENCY.setdefault(_b, []).append(_a)
+
 # 附加平台风格 bank 清单：(模块名, 风格名)。提成模块常量是为了让离线评测
 # 能按名字关掉某一个 bank，做「加/不加」对照（见 localtest/calibrate_shots.py
 # 的 --disable-bank）——新增平台时在这里加一行即可。
@@ -66,6 +112,24 @@ STYLE_PLATFORM_WHITELIST: Dict[str, Tuple[str, ...]] = {
     "weile": ("weile",),
     # 指尖牌风与途游/蜀山同为“血流”系且都被探针误路由过，限平台以免串味。
     "zj": ("zj_sichuan",),
+}
+
+# 风格 -> 明确不允许它的平台 key（只在白名单之外再做减法）。没出现在任何一张表里
+# 的风格 = 全平台可用（历史行为）。
+# 为什么蜀山只在「用户声明腾讯」时踢掉，而不是收进它自己的平台：
+# 试过整条限平台（"shushan": ("shushan",)），代价是真的：
+# `localtest/test_eval_alignment.py` 的 zj#08（LOFO 剔掉本帧 zj 模板）那一格七筒
+# 本来是被**蜀山核**抢回来的，限平台后变成 6p；`test_skip_probe_guard.py` 同时变红。
+# 那是「本家 bank 覆盖不够时跨家捞一把」的救援池，不该被我为了省时间剥掉。
+# 而腾讯这一家不同：它是默认平台、也是真机在用的平台，蜀山核在这里是**纯花费**
+# ——A/B（`localtest/ab_style_cores.py`，37 帧 verified GT，逐帧 fresh Engine）
+# 裁掉 shushan 后 hand/status/dingque 逐帧差异 0，单帧均值
+# 654.6ms → 447.6ms（-31.6%，原始输出 build/ab_none.txt 与
+# build/ab_drop_shushan.txt）；普查脚本 `localtest/core_census.py` 量到腾讯
+# 平台 + 川麻候选集每片参与 matchTemplate 的核从 186 降到 110（逐平台表见它的输出）。
+# 所以减法只做在这一家，其它平台的跨家救援一律保持原样。
+STYLE_PLATFORM_DENYLIST: Dict[str, Tuple[str, ...]] = {
+    "shushan": ("tencent",),
 }
 
 # 手牌**重叠排布**（后一张压住前一张，节距 ≈ 0.0547*屏宽）的平台；不在表里的
@@ -171,6 +235,24 @@ def resolve_candidate_tiles(avail=None, mode_tiles=None, full_honors: bool = Fal
     return cand or (_BASE_TILES | {"7z"})
 
 
+def _prefilter_core(entry):
+    """把一枚全尺寸核等比缩到粗筛尺寸，字段顺序与 `self._cores` 逐字一致。
+
+    用 INTER_AREA 而不是默认的双线性：它在缩小方向上做面积平均，与
+    `extract_face`/`canonical_canvas` 归一模板时同一个插子 —— 两处缩放口径不同，
+    粗筛分数与精算分数就不再是同一张牌面的两个尺度。"""
+    out = [entry[0], entry[1]]
+    for k in entry[2:]:
+        if k is None:
+            out.append(None)
+            continue
+        kh, kw = k.shape[:2]
+        out.append(cv2.resize(k, (max(1, int(kw * PREFILTER_SCALE)),
+                                  max(1, int(kh * PREFILTER_SCALE))),
+                              interpolation=cv2.INTER_AREA))
+    return tuple(out)
+
+
 class TencentGridDetector(Detector):
     # 类属性兜底：没调用过 set_platform_styles 时（比如牌河探针、离线单测直接
     # new 实例）语义等于“不放开字牌”，与历史行为一致。
@@ -183,6 +265,11 @@ class TencentGridDetector(Detector):
     # 留着不是为了生产，是为了让守卫能对拍“跳探针到底有没有改变输出”
     # （`localtest/test_skip_probe_guard.py`），以及真机怀疑排布表错时一键退回旧行为。
     probe_when_declared: bool = False
+    # 调试/对照口子：True = 声明平台后仍给「张数候选」每档都切一整行（旧行为）。
+    # 与 `probe_when_declared` 同一用途：守卫靠它对拍「序贯早停有没有改变输出」
+    # （`localtest/test_hand_count_seq_guard.py`，41 帧逐格对拍），真机怀疑节距估错
+    # 时一键退回。默认 False = 生产走早停，这条默认值由该守卫钉住。
+    hand_count_dual: bool = False
 
     def __init__(self, templates_dir: Optional[str] = None):
         super().__init__({})
@@ -242,6 +329,14 @@ class TencentGridDetector(Detector):
         # 关掉它就退回逐枚串行——同一条打分码路，结果必须逐枚全等，
         # 所以它是纯粹的调试/对照开关，不是行为开关（守卫靠它做 A/B）。
         self.parallel_classify = True
+        # 逐枚打分是否走「粗筛+精算」两阶段（收益/风险与本开关的存在理由见
+        # `PREFILTER_SCALE` 上方那段）。关掉它就退回全量扫——同一条打分码路，
+        # 最终 (label, score) 必须逐枚全等，所以它和 `parallel_classify` 一样是
+        # 纯粹的对照/逃生开关，不是行为开关（新守卫靠它做 A/B）。
+        self.prefilter = True
+        # 半尺寸粗筛核轨：(_src, _coarse)。_src 是当时那份 `self._cores` 的**对象引用
+        # 快照**，用来判断这一轨还对不对得上当前的全尺寸核（见 `_coarse_track`）。
+        self._coarse_pair: Optional[Tuple[List, List]] = None
         self._pool: Optional[ThreadPoolExecutor] = None
         self._pool_lock = threading.Lock()
         self._load_templates()
@@ -515,6 +610,13 @@ class TencentGridDetector(Detector):
             owners = STYLE_PLATFORM_WHITELIST.get(style)
             if owners is None or platform_key in owners:
                 allowed.add(style)
+        # 定点减法（见 `STYLE_PLATFORM_DENYLIST`）：只踢「用户已经声明了这一家、
+        # 却还在扫别家牌风」的那一组，其它平台的跨家救援原样保留。
+        # 保底风格「tencent」永不被踢：它是主 bank，踢空会让 scores 为空、
+        # classify_tile 退化成「报任意标签 0 分」，整行判废。
+        for style, denied in STYLE_PLATFORM_DENYLIST.items():
+            if platform_key in denied and style != "tencent":
+                allowed.discard(style)
         self.active_styles = allowed
         self.full_honors = platform_key in PLATFORM_FULL_HONORS
 
@@ -555,6 +657,93 @@ class TencentGridDetector(Detector):
         own = allowed - {"tencent"}   # 声明平台的专属 bank（未建 bank 的平台为空）
         return inter if own <= set(styles) else allowed
 
+    # ------------------------------------------------------------------ 两阶段打分
+    @staticmethod
+    def _core_of(entry, is_grey: bool, has_btn: bool) -> Optional[np.ndarray]:
+        """按「灰/彩 × 有/无顶标」四种组合取本次要用的那一枚核。
+
+        单独成一个函数是为了让粗筛与精算**走同一个取法**：两边取的组合不一样，
+        粗筛排序就与最终分数无关，它的淘汰理由全是编的。"""
+        _lbl, _style, core_btn, core_plain, gcore_btn, gcore_plain = entry
+        if is_grey:
+            return gcore_btn if has_btn else gcore_plain
+        return core_btn if has_btn else core_plain
+
+    def _coarse_tracks(self) -> Tuple[List, List]:
+        """与全尺寸核**逐项同序**的半尺寸粗筛核轨；核一变就重建。
+
+        为什么不能在 `_build_cores` 里算完就当它永远不变（本刀最阴的一个坑）：离线
+        评测会在运行时就地替换 `det._cores`（LOFO 剔模板：`test_eval_alignment.py`、
+        `eval_new_material.py`、`test_skip_probe_guard.py`、`ab_style_cores.py` 等 6
+        处），粗筛轨若只在建核时算一次，就会与新的全尺寸轨**逐项错位** —— 拿 A 类
+        的粗筛分数去精算 B 类，比不缩还错，而且错得很体面（分数照样很高）。
+        校验只用逐元素 `is` 比对象身份，不比内容：numpy 数组的 `==` 返回数组，
+        `bool()` 会直接抛 ValueError。
+        返回的是快照本身而不是 `self._cores`：并行打分（`_classify_batch`）下即使
+        另一线程重建了这一轨，本次调用拿到的那一对也自洽（粗筛核与全尺寸核同序）。
+        """
+        pair = self._coarse_pair
+        if pair is not None:
+            src, coarse = pair
+            if len(src) == len(self._cores) and all(
+                    a is b for a, b in zip(src, self._cores)):
+                return src, coarse
+        coarse = [_prefilter_core(c) for c in self._cores]
+        pair = (list(self._cores), coarse)
+        self._coarse_pair = pair
+        return pair
+
+    def _scan_full(self, img: np.ndarray, entries: List, is_grey: bool,
+                   has_btn: bool) -> Dict[str, float]:
+        """全尺寸 NCC：label -> 该标签全部变体/风格里的最高分（与历史逐字一致）。"""
+        scores: Dict[str, float] = {}
+        for e in entries:
+            src = self._core_of(e, is_grey, has_btn)
+            s = float(cv2.matchTemplate(img, src, cv2.TM_CCOEFF_NORMED).max())
+            if s > scores.get(e[0], 0.0):
+                scores[e[0]] = s
+        return scores
+
+    def _scan_coarse(self, c_img: np.ndarray, coarse_entries: List, is_grey: bool,
+                     has_btn: bool) -> Tuple[Dict[str, float], Set[str]]:
+        """粗筛：便宜的缩小版 NCC，只服务排序。
+
+        返回 (label->粗分, 必须强行进精算集的标签)。强进的那批是**缩过之后放不下
+        打分窗口**的核：它们没被排序过，就不能当「落后」而被淘汰（否则就是「粗筛
+        漏看」撑成「精算拿不到分」，分数会凭空消失而不是变低，那种错最难查）。
+        """
+        scores: Dict[str, float] = {}
+        forced: Set[str] = set()
+        for e in coarse_entries:
+            k = self._core_of(e, is_grey, has_btn)
+            if k is None or k.shape[0] > c_img.shape[0] or k.shape[1] > c_img.shape[1]:
+                forced.add(e[0])
+                continue
+            s = float(cv2.matchTemplate(c_img, k, cv2.TM_CCOEFF_NORMED).max())
+            if s > scores.get(e[0], 0.0):
+                scores[e[0]] = s
+        return scores, forced
+
+    @staticmethod
+    def _refine_labels(coarse: Dict[str, float], forced: Set[str],
+                       top_k: int = PREFILTER_TOP_K,
+                       margin: float = PREFILTER_MARGIN) -> Set[str]:
+        """精算集标签 = 粗筛前 top_k ∪ 与第一名分差 < margin 的带 ∪ 它们的相邻类 ∪ forced。
+
+        相邻类闭包不是可选项：`_decide` 会在分数表上读对家的分做结构裁决，把对家
+        淘汰掉等于让那条判决整条失效（`scores.get("3m", 0.0)` 读成 0），而那恰恰是
+        本刀唯一会造成**错判**而不是**慢**的地方。判据与实测见 `PREFILTER_SCALE` 上方。
+        """
+        ranked = sorted(coarse.items(), key=lambda kv: -kv[1])
+        seeds = {lbl for lbl, _ in ranked[:top_k]}
+        if ranked:
+            lead = ranked[0][1]
+            seeds |= {lbl for lbl, s in coarse.items() if s > lead - margin}
+        out = set(seeds) | set(forced)
+        for lbl in seeds:
+            out.update(ADJACENCY.get(lbl, ()))
+        return out
+
     def _score_crop(self, crop: np.ndarray, avail=None, styles=None):
         """从原始检测框到分数表：先抠牌面，再走 `_score_face`。
 
@@ -565,7 +754,12 @@ class TencentGridDetector(Detector):
         return self._score_face(self.extract_face(crop), avail, styles)
 
     def _score_face(self, face: np.ndarray, avail=None, styles=None):
-        """已对好的牌面 → (face, label->最高分, 候选集)。核窗口与变体取法与历史一致。"""
+        """已对好的牌面 → (face, label->最高分, 候选集)。核窗口与变体取法与历史一致。
+
+        走不走「粗筛+精算」由 `self.prefilter` 决定，两条路必须给出**同一份最终裁决**
+        （判据、实测与为什么只能这么判，见 `PREFILTER_SCALE` 上方的那一整段；逐枚对拍
+        由 `localtest/test_prefilter_consistency_guard.py` 钉住）。
+        """
         styles = self._resolve_styles(styles)
         hsv = cv2.cvtColor(face, cv2.COLOR_BGR2HSV)
         is_grey = (np.mean(hsv[:, :, 1]) < 35)
@@ -575,27 +769,45 @@ class TencentGridDetector(Detector):
         y_start = 38 if has_btn else 10
 
         c_face = face[y_start:110, 6:74]
-        scores: Dict[str, float] = {}
 
         valid_tiles = resolve_candidate_tiles(avail, self._mode_tiles, self.full_honors)
 
         if is_grey:
-            c_face_g = cv2.normalize(cv2.cvtColor(c_face, cv2.COLOR_BGR2GRAY), None, 0, 255, cv2.NORM_MINMAX)
-            for lbl, style, core_btn, core_plain, gcore_btn, gcore_plain in self._cores:
-                if lbl not in valid_tiles or (styles is not None and style not in styles):
-                    continue
-                src = gcore_btn if has_btn else gcore_plain
-                s = float(cv2.matchTemplate(c_face_g, src, cv2.TM_CCOEFF_NORMED).max())
-                if s > scores.get(lbl, 0.0):
-                    scores[lbl] = s
+            img = cv2.normalize(cv2.cvtColor(c_face, cv2.COLOR_BGR2GRAY), None, 0, 255, cv2.NORM_MINMAX)
         else:
-            for lbl, style, core_btn, core_plain, _gb, _gp in self._cores:
-                if lbl not in valid_tiles or (styles is not None and style not in styles):
-                    continue
-                src = core_btn if has_btn else core_plain
-                s = float(cv2.matchTemplate(c_face, src, cv2.TM_CCOEFF_NORMED).max())
-                if s > scores.get(lbl, 0.0):
-                    scores[lbl] = s
+            img = c_face
+
+        # 候选集 + 风格过滤：全尺寸轨与粗筛轨同序筛出来，两道才能用同一份候选集说话。
+        if self.prefilter:
+            src, coarse_src = self._coarse_tracks()
+        else:
+            src, coarse_src = self._cores, None
+        entries: List = []
+        coarse_entries: List = []
+        for i, e in enumerate(src):
+            if e[0] not in valid_tiles or (styles is not None and e[1] not in styles):
+                continue
+            entries.append(e)
+            if coarse_src is not None:
+                coarse_entries.append(coarse_src[i])
+
+        # 退回全量扫的三种情况：开关关了（A/B 对照与逃生口）、候选标签本来就不到
+        # K 个（精算集不可能更小，粗筛只是白付一次排序）、以及粗筛一枚都没排上。
+        # 前两种必须与不走两阶段时**逐字同路**，才对得起“对照开关”四个字。
+        if coarse_src is None or len({e[0] for e in entries}) <= PREFILTER_TOP_K:
+            scores = self._scan_full(img, entries, is_grey, has_btn)
+        else:
+            ih, iw = img.shape[:2]
+            c_img = cv2.resize(img, (max(1, int(iw * PREFILTER_SCALE)),
+                                     max(1, int(ih * PREFILTER_SCALE))),
+                               interpolation=cv2.INTER_AREA)
+            coarse, forced = self._scan_coarse(c_img, coarse_entries, is_grey, has_btn)
+            if not coarse:
+                scores = self._scan_full(img, entries, is_grey, has_btn)
+            else:
+                keep = self._refine_labels(coarse, forced)
+                scores = self._scan_full(
+                    img, [e for e in entries if e[0] in keep], is_grey, has_btn)
         return face, scores, valid_tiles
 
     def classify_tile(self, crop: np.ndarray, avail=None, styles=None) -> Tuple[str, float]:
@@ -855,14 +1067,27 @@ class TencentGridDetector(Detector):
         orange_mask = ((hsv[:, :, 0] >= 8) & (hsv[:, :, 0] <= 32) & (hsv[:, :, 1] >= 75) & (hsv[:, :, 2] >= 90)).astype(np.uint8) * 255
         blue_mask = ((hsv[:, :, 0] >= 95) & (hsv[:, :, 0] <= 130) & (hsv[:, :, 1] >= 100) & (hsv[:, :, 2] >= 100)).astype(np.uint8) * 255
 
+        # 色盘尺寸按取区宽度归一，不用绝对面积。旧写法「400 <= area <= 10000」在
+        # 2000x899 真机帧上把筒盘（实测外接框 159x162、轮廓面积 12763）挡在门外，
+        # 于是「定缺中」三色盘明明在屏幕中央，is_dingque_phase 却返回 False
+        # （逐轮廓取证见 localtest/_diag_dq_disc.py）。
+        # 改成「外接框边长 = 取区宽的 3.5%~22%」后与分辨率无关：条盘 117x142、
+        # 筒盘 159x162 双双落窗，碎点与整片桌布仍然出局。
+        side_lo = max(20.0, sub.shape[1] * 0.035)
+        side_hi = max(60.0, sub.shape[1] * 0.22)
+
         def get_main_center(mask):
             cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             valid = []
             for c in cnts:
                 area = cv2.contourArea(c)
-                if not (400 <= area <= 10000):
+                if area < 400:
                     continue
                 bx, by, bw, bh = cv2.boundingRect(c)
+                if bw <= 0 or bh <= 0:
+                    continue
+                if not (side_lo <= bw <= side_hi and side_lo <= bh <= side_hi):
+                    continue
                 aspect = bw / float(bh)
                 if not (0.65 <= aspect <= 1.45):
                     continue
@@ -945,33 +1170,77 @@ class TencentGridDetector(Detector):
 
 
     def is_swap_phase(self, image_bgr: np.ndarray) -> bool:
-        """检测腾讯欢乐麻将「换牌中...」换三张阶段。
-        真实特征：换牌交互区【同时】出现金黄色「换牌」圆按钮（中心 x≈65%）与其
-        右侧青色「过」圆按钮（中心 x≈73%）。
-        旧实现只看 x:65%~85% 这一宽区的金黄占比，会被蜀山/腾讯局中的金色
-        「杠/碰/胡」动作按钮（中心 x≈75%，整片实心金黄）刷高 gold_ratio 而误报，
-        进而把本帧已识别到的手牌吞进换牌分支、面板退化为「等待牌局开始/未检测到手牌」。
-        现收紧到换牌金按钮专属左区（x:61%~73%），并要求右侧青色过按钮共存，
-        双条件同时满足才判定换牌阶段；杠/碰/胡动作按钮落在更右侧且不伴随青过按钮，被排除。"""
+        """检测腾讯欢乐麻将「换三张·选牌中」阶段（金色「换牌」圆按钮）。
+
+        ## 为什么把取区下移、并且不再要求青色「过」按钮
+
+        旧判据「金按钮区 y56%~76% × x61%~73% **且** 右侧青色『过』按钮共存」在真机上
+        把两个时刻**用了个反向**（四帧真机图实测，见 localtest/shots_tuyou_select）：
+
+          换三张选牌中：gold=0.0979（过线）cyan=**0.0000**（不过线）⇒ 判 False【漏判】
+          局中可杠时  ：gold=0.1787           cyan=0.0254          ⇒ 判 True 【误判】
+
+        两件事各自错在哪：
+          1) 青色「过」按钮是**局中动作按钮**（杠/碰/胡 配一个「过」）的证据，从来不是
+             换牌阶段的证据——换牌弹窗只有单个金色「换牌」按钮，压根没有「过」。把它当
+             必要条件，等于要求「画面里同时存在局中动作按钮」才算换牌阶段。
+          2) 取区 y56%~76% 把局中动作按钮（实测中心 y≈0.678）**整个包住**，却把换牌按钮
+             （实测中心 y≈0.760，在手牌行正上方）**切掉一半**。金区因此对局中更敏感。
+
+        窗口因此改成实测可分的 y74%~88% × x64%~78%（只覆盖「手牌行正上方」这一条
+        低带，物理含义就是换牌按钮的专属位置；动作按钮在牌河中带，落在窗外）。
+
+        ## 但「占比」单独用仍然不够：还得是那个按钮的形状（41 帧真图实测）
+
+        只用占比门槛 0.05 时，一局**加载界面**（沙滩 + 遮阳伞，非牌桌）在同一条低带上
+        量到 gold=0.0673 —— 越过门槛，于是引擎对着一个还没进桌面的画面报「换三张」。
+        这就是用户说的「明明不在换牌阶段却显示换牌」。占比这条线在真换牌帧上是
+        0.0946~0.1000（12 帧实测，散布只有 ±0.003），离 0.0673 太近，调门槛解决不了：
+        抬到 0.07 只是把「沙滩」和「换牌按钮」之间那 1.4 倍裕度留着，下一次换张壁纸
+        就没了。
+
+        真正分得开的是**形状**：换牌按钮是低带里一个孤立的扁圆盘，而沙滩是一整片
+        连通到带边的背景。41 帧（37 帧 GT + 4 帧真机）逐帧量最大金色连通域：
+
+          12 帧真换牌   宽高比 2.77~2.90   外接框填充率 0.651~0.675   高/带高 0.333~0.349
+          加载界面(沙滩) 宽高比 15.23      外接框填充率 0.922         高/带高 0.103
+          局中可杠帧    宽高比 5.60       外接框填充率 0.636         高/带高 0.040
+
+        三个窗口 [1.8,4.5] / [0.55,0.75] / [0.20,0.60] 把 12 帧真换牌**全部**收进来
+        （无一漏），把加载界面三项**全部**打出格。校验脚本见
+        localtest/_validate_swap_shape.py。
+
+        视觉在这里只能当「可能」，不能当「一定」：排他证据在 engine 侧（本帧必须真的
+        读到手牌、且牌局账本还没进入摸打），见 process 里的开局阶段门控。
+        """
         if image_bgr is None or image_bgr.size == 0:
             return False
         ih, iw = image_bgr.shape[:2]
-        y0, y1 = int(ih * 0.56), int(ih * 0.76)
-        # 换牌金按钮专属左区：杠/碰/胡动作按钮位于更右侧，不落入此区
-        gold_zone = image_bgr[y0:y1, int(iw * 0.61):int(iw * 0.73)]
-        # 过按钮青区：真实换牌阶段必有青色「过」按钮与金按钮并存
-        cyan_zone = image_bgr[y0:y1, int(iw * 0.70):int(iw * 0.80)]
-        if gold_zone.size == 0 or cyan_zone.size == 0:
+        # 换牌按钮专属低带：紧贴手牌行上方；杠/碰/胡动作按钮在牌河中带（y≈0.68），在窗外
+        gold_zone = image_bgr[int(ih * 0.74):int(ih * 0.88), int(iw * 0.64):int(iw * 0.78)]
+        if gold_zone.size == 0 or gold_zone.shape[0] < 10 or gold_zone.shape[1] < 10:
             return False
+        bh, bw = gold_zone.shape[:2]
         hsv_g = cv2.cvtColor(gold_zone, cv2.COLOR_BGR2HSV)
-        gold = (hsv_g[:, :, 0] >= 14) & (hsv_g[:, :, 0] <= 35) & (hsv_g[:, :, 1] >= 120) & (hsv_g[:, :, 2] >= 150)
-        hsv_c = cv2.cvtColor(cyan_zone, cv2.COLOR_BGR2HSV)
-        # 明亮青色过按钮：高饱和高亮，排除偏暗青绿桌布
-        cyan = (hsv_c[:, :, 0] >= 85) & (hsv_c[:, :, 0] <= 102) & (hsv_c[:, :, 1] >= 120) & (hsv_c[:, :, 2] >= 150)
-        gold_ratio = float(np.mean(gold))
-        cyan_ratio = float(np.mean(cyan))
-        # 真实换牌阶段：金按钮占比 ~11%、青过按钮占比 ~1.2%；杠/碰误报：两者均 ~0
-        return gold_ratio >= 0.05 and cyan_ratio >= 0.008
+        gold = ((hsv_g[:, :, 0] >= 14) & (hsv_g[:, :, 0] <= 35)
+                & (hsv_g[:, :, 1] >= 120) & (hsv_g[:, :, 2] >= 150)).astype(np.uint8) * 255
+        # 真机实测：换牌阶段 0.0946~0.1000，局中杠按钮同窗口 0.0027
+        total = int(np.count_nonzero(gold))
+        if total == 0 or total / float(bw * bh) < 0.05:
+            return False
+        # 占比过线只说明「这一带有金色」，不说明「那是按钮」。接着量形状。
+        n_lab, _lab, st, _c = cv2.connectedComponentsWithStats(gold, 8)
+        if n_lab <= 1:
+            return False
+        i = int(np.argmax(st[1:, cv2.CC_STAT_AREA])) + 1
+        area = int(st[i, cv2.CC_STAT_AREA])
+        sw = int(st[i, cv2.CC_STAT_WIDTH])
+        sh = int(st[i, cv2.CC_STAT_HEIGHT])
+        if area <= 0 or sw <= 0 or sh <= 0:
+            return False
+        return (1.8 <= sw / float(sh) <= 4.5
+                and 0.55 <= area / float(sw * sh) <= 0.75
+                and 0.20 <= sh / float(bh) <= 0.60)
 
     def is_pick_phase(self, image_bgr: np.ndarray) -> bool:
         """检测腾讯欢乐麻将「请任选一张牌」弹窗或选牌确定界面。"""
@@ -1114,6 +1383,10 @@ class TencentGridDetector(Detector):
         # 否则守卫会把上一帧的分支当成本帧的证据。
         self.last_layout_branch = None
         self.last_pitch_candidates = None
+        # 每档候选的均分留档（一次 `_try_counts` 一组）。它不参与任何判定，只服务
+        # 剖析与守卫：「要不要给第二档候选也切一整行」这种减成本的决定，必须能用
+        # 真帧数据证明第二档赢不了，而不是靠肉眼相信几何估计够准。
+        self.last_count_runs: List[List[Tuple[int, float]]] = []
         if image_bgr is None or image_bgr.size == 0 or not self.is_available:
             return []
 
@@ -1236,6 +1509,9 @@ class TencentGridDetector(Detector):
             cand_counts = (c_tec if overlap else c_adj)
             probe_styles = self.active_styles
             self.last_layout_branch = f"table-{'tec' if overlap else 'adj'}"
+            # 只走第一档（几何最近档），失手交给下面那条全量重扫：上面「只关探针」的
+            # 理由同样适用于这里——本改动只关**冗余**的那一整行，不关兜底。
+            seq_first = not self.hand_count_dual
         else:
             # 未声明平台（用户没说、或调试口子拨回旧行为）：探针才有权路由。
             pcx = int(bx + bw / 2)
@@ -1268,6 +1544,10 @@ class TencentGridDetector(Detector):
             else:
                 cand_counts, probe_styles = list(dict.fromkeys(c_adj + c_tec)), None
                 self.last_layout_branch = "probe-both"
+            # 探针分支不早停：探针本身就是「不确定」的那条路，候选可能有 4 档，
+            # 少跑一档就是拿正确率换速度，而这条路上没有「用户已声明平台」这个
+            # 硬事实顶着（实测微乐帧 13 探针误路由腾讯就是把 6m/7m 读成 3m 的）。
+            seq_first = False
 
         # 两套候选一并留档：守卫要靠它判断「查表」与「探针猜」是否真的做了同一个决定，
         # 而不是等帧输出碰巧相同才以为接线正确（同形是常态，见 __init__ 处的实测说明）。
@@ -1310,6 +1590,7 @@ class TencentGridDetector(Detector):
             best_dets: List[Tuple[Rect, str, float]] = []
             best_mean = -1.0
             best_geo = None
+            run: List[Tuple[int, float]] = []
             pos = 0
             for k, tw, rects, crops in plans:
                 # zip 按格位装回：保序是这条路能开并行的前提（见 _classify_batch）。
@@ -1318,14 +1599,27 @@ class TencentGridDetector(Detector):
                     in zip(rects, scored[pos:pos + len(crops)])]
                 pos += len(crops)
                 mean_sc = float(np.mean([d[2] for d in dets])) if dets else 0.0
+                run.append((k, mean_sc))
                 if mean_sc > best_mean:
                     best_mean = mean_sc
                     best_dets = dets
                     best_geo = (float(bx), float(tw), int(k))
+            self.last_count_runs.append(run)
             return best_dets, best_mean, best_geo
 
-        best_standing_dets, best_standing_mean, grid = _try_counts(cand_counts, probe_styles)
+        first_cands = [cand_counts[0]] if (seq_first and len(cand_counts) > 1) else list(cand_counts)
+        best_standing_dets, best_standing_mean, grid = _try_counts(first_cands, probe_styles)
         self.last_hand_grid = grid
+
+        # 第一档不达标就只走下面那条全候选全模板重扫，**不插「只补第二档」这一级**。
+        # 补跑第二档看着像省时间（第二档过了 0.55 就能躲开六档重扫），41 帧实测一次
+        # 都没省到：第二档赢的 3 帧均分只有 0.469/0.289/0.249，全都不达标，照旧进重扫，
+        # 补跑只是在已经很慢的帧上再多切一整行（+13 枚）。
+        # 而重扫的候选集 `c_adj + c_tec + c_geo` 是本档候选集的**超集**，风格集在已声明
+        # 平台时与 probe_styles 是同一个（`_resolve_styles`：None → 平台白名单），所以
+        # 逐格分数完全相同、胜者不会更差。把补跑整条关掉后 41 帧输出仍与双档逐格全等
+        # （`localtest/test_hand_count_seq_guard.py` 的变异检验就是这么量的），所以不留
+        # 这条从未生效过的分支——「写了但从未触发过的兜底」本身就是本次要清的坑。
 
         # 探针路由失误（风格误判/尺度失配致整行低分）→ 全候选全模板重扫一次
         if best_standing_mean < 0.55 and probe_styles is not None:

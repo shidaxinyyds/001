@@ -924,17 +924,30 @@ class TestMutationControls(unittest.TestCase):
 
 
 class TestDampingSourceContract(unittest.TestCase):
-    """源码契约：瞬态阻尼不得再把「读到 0 张」漏在门外。"""
+    """源码契约：瞬态阻尼不得再把「读到 0 张」漏在门外，也不得再绑 `_match_started`。"""
 
     def test_damping_gate_does_not_require_nonzero_read(self):
         line = damping_gate_line(ENGINE_SRC)
         self.assertIsNotNone(line,
-                             "找不到瞬态阻尼入口（`in_active_match = getattr(...)` 之后那条 "
+                             "找不到瞬态阻尼入口（`in_active_match = ...` 之后那条 "
                              "`if in_active_match`）：检查器已经失去对照物")
         self.assertNotIn(
             "curr_raw_n", line,
             "阻尼入口又变成了「%s」：换牌弹窗盖住手牌行（raw==0，最常见的瞬态形状）"
             "会直接掉进 no_tiles → 面板「等待牌局开始」" % line)
+
+    def test_damping_gate_does_not_require_match_started(self):
+        """阻尼入口不得再要求 `_match_started`（真机反馈「13 张只显示 5 张」的根因）。
+
+        换三张/定缺阶段 `_match_started` 可以是 False，旧口径把这段时间的瞬态欠读
+        裸露出来：弹窗盖住半排手牌的一帧直接把 13 张降成 5 张，下一帧又跳回去。
+        阻尼唯一该看的是「有没有已提交的稳定手牌」，而它在 `_reset_game_state`
+        里会被清空，不会把上一局的牌带进新局。
+        """
+        assign = damping_assign_line(ENGINE_SRC)
+        self.assertIsNotNone(assign, "找不到阻尼入口的赋值行：结构变了")
+        self.assertNotIn("_match_started", assign,
+                         "阻尼又绑回 `_match_started`：%s" % assign)
 
 
 ENGINE_PY = os.path.join(REPO, "android", "app", "src", "main", "python",
@@ -952,7 +965,7 @@ def damping_gate_line(src: str):
     """
     lines = src.splitlines()
     for i, ln in enumerate(lines):
-        if not ln.strip().startswith('in_active_match = getattr'):
+        if not ln.strip().startswith('in_active_match = '):
             continue
         for nxt in lines[i + 1:i + 12]:
             s = nxt.strip()
@@ -968,6 +981,19 @@ def damping_gate_regressed(src: str) -> bool:
     """阻尼入口那行是否又带上了「raw 非空才阻尼」的前置条件。"""
     line = damping_gate_line(src)
     return line is not None and 'curr_raw_n' in line
+
+
+def damping_assign_line(src: str):
+    """取阻尼入口的赋值行本体（`in_active_match = ...`），找不到返回 None。
+
+    与 `damping_gate_line` 分开：一个管「入口后面那条判断」，一个管「入口自己
+    由什么条件算出来」——后者才是 `_match_started` 回潮的落点。
+    """
+    for ln in src.splitlines():
+        s = ln.strip()
+        if s.startswith('in_active_match = '):
+            return s
+    return None
 
 
 if __name__ == "__main__":

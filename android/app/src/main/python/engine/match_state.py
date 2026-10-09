@@ -222,7 +222,8 @@ class MatchPhaseMachine:
         # 折算自检计数：全部进 payload.evidence。出问题时端上能直接看到
         # "是脏读被挡了 N 次"，而不是"神秘地没播报"。
         self._rejected = {"river_over_cap": 0, "meld_group_cap": 0,
-                          "non_monotonic": 0, "event_cap": 0, "clock_back": 0}
+                          "non_monotonic": 0, "event_cap": 0, "clock_back": 0,
+                          "dingque_conflict": 0}
 
     # ------------------------------------------------------------------ 主入口
 
@@ -562,9 +563,12 @@ class MatchPhaseMachine:
         """本家立牌张数 → 轮到我(True) / 候牌(False) / 对不上(None)。
 
         基数 = 13 - 本家副露扣掉的张数（碰/吃 3、杠 4），只认两个合法读数：
-          张数 = 基数   ⇒ 已出完，等他家；
+          张数 = 基数   ⇒ 手上没有多余的牌，本轮不到你出牌；
           张数 = 基数+1 ⇒ 已摸进一张，轮到你出牌；
           其余          ⇒ 与副露对不上（漏读/多读），明确报"待对齐"，不硬猜。
+        「等于基数」只能推出于「轮不到你」，推不出「你刚打完一张」：开局庄家还未
+        摸牌时本家也是 13 张，此时并没有发生过「出完一张」这件事。旧口径写成
+        「已出完等下一轮」，是在把牌局里没有发生过的事当成事实报给用户。
         旧口径 `count % 3 == 2` 在有杠时会把"轮到你"永久误判成"候牌中"；而光把同余
         式里的 13 换成校正后的基数又会把“比基数多 3 张”这种明显不对的读数糊成
         “候牌中”（多出来的牌不会凭空出现：要么漏读、要么副露还没跟上）。唯一的
@@ -574,7 +578,7 @@ class MatchPhaseMachine:
             return None, "手牌张数尚未确认"
         base = self.base_hand - self._self_meld_removed
         if count == base:
-            return False, f"立牌 {count} 张：等于基数 {base}，已出完等下一轮"
+            return False, f"立牌 {count} 张：等于基数 {base}，手上没有多余的牌可出"
         if count == base + 1:
             return True, f"立牌 {count} 张：基数 {base} + 已摸 1 张"
         if now < self._meld_settle_ms:
@@ -600,8 +604,20 @@ class MatchPhaseMachine:
         if suit is None:
             self._dingque.observe(None, now, confirm)
             return
-        if self._dingque.committed is None and self._dingque.observe(suit, now, confirm):
-            name = str(obs.get("dingque_name") or obs.get("dingque_recommend") or "")
+        if self._dingque.committed is not None:
+            # 缺门一局至多变一次。锁存后再读到不同值，只计不播：同一屏里先说
+            # 「缺筒」再说「缺条」比不播更糟，而把这个冲突留在 evidence.rejected
+            # 里才能事后查清是徽章误读还是真的跨了局。
+            if suit != self._dingque.committed:
+                self._rejected["dingque_conflict"] += 1
+            return
+        if self._dingque.observe(suit, now, confirm):
+            # 事件里的缺门只能来自 dingque_suit 本身（牌桌徽章或用户手动指定），
+            # 不得回落到 `dingque_recommend`：那是引擎按张数算出来的建议，玩家还没选。
+            # 把建议播成「定缺敲定：X」是在牌局里凭空造一个事实。
+            name = str(obs.get("dingque_name") or "")
+            if not name:
+                name = {0: "万", 1: "筒", 2: "条"}.get(int(suit), "")
             self._push("dingque", 0, None, now, note=name)
 
     def _off_table(self, now: int) -> str:
@@ -685,7 +701,9 @@ class MatchPhaseMachine:
             if last and last.get("kind") in ("draw", "discard", "discard_other",
                                              "pong", "kong", "added_kong"):
                 return f"等他家行牌 · 最近：{last['text']}"
-            return "已出完这一张，等他家行牌"
+            # 没有可引荐的上一次行动时，只说能确定的那半句：现在轮不到本家。
+            # 不能说「已出完这一张」（开局等庄家摸牌时本家一张还没打过）。
+            return "还没轮到你，等他家行动"
         if phase == "irregular":
             return basis
         return PHASE_LABEL.get(phase, "")

@@ -36,11 +36,23 @@
 ④ 静默期逐帧 payload 与改动前**逐字一致**（剥掉天生每帧不同的计时字段）
    ①说的「零精度代价」必须是可证的：跳帧帧返回的本来就是上一帧状态。
 
-变异检验（`TestMutationControls`，随主守卫一起跑，也可单跑）：
+⑤ 缓慢漂移不得无限期复用旧 payload（累计漂移门）
+   ①~④ 全部建立在「相邻帧差小 = 画面没变」这个假设上，而它有个实在的漏洞：
+   `diff()` 每帧（**包括被跳过的帧**）都把 `_last_sig` 往前推，于是「每帧只比上一帧
+   动一点点」可以永远过门 —— 逐帧挪动的动画、亮度缓慢漂移，连着几十帧后画面已经
+   面目全非，面板却还在播第一帧的结论。这条把漏洞钉成不变量：
+   **凡是跳帧的帧，它相对「上一次真识别过的那帧」的累计变化必须 < 阈值。**
+   夹具不自标定不出真幅度就直接判红（ROI 会裁掉上半屏、降采样会抹平小块，写死
+   幅度最容易调出一个「签名根本不变」的假夹具，那 ⑤ 就在测空气）。
+   配套还钉「锚点真的被识别帧重置」：重识别后的下一帧必须能重新跳帧（哪怕它
+   相对最初那张图已漂过阈值），且串尾同一帧连喂两遍第二遍必静默 ——
+   `remember`/`set_baseline` 里推进锚点那两行只要断一条，这里就红。
+
+变异检验（`TestMutationControls` + `TestDriftGateSourceMutants`，随主守卫一起跑，也可单跑）：
     py -3.10 -X utf8 localtest/test_skip_frame_guard.py --mutate
-  两个变异体是**正向对照**——把生产顺序换成坏顺序，断言它确实坏成 ① / ③ 禁止的
-  那个样子（跳帧帧照付识别 / 翻转不再自愈）。若哪天有人把 ① 或 ③ 削弱成空断言，
-  这两条会与主守卫互相矛盾而报红。
+  变异体是**正向对照**——把生产顺序换成坏顺序、把累计漂移门摘掉，断言它确实坏成
+  ① / ③ / ⑤ 禁止的那个样子（跳帧帧照付识别 / 翻转不再自愈 / 漂移画面被当没变）。
+  若哪天有人把 ① ③ ⑤ 削弱成空断言，这些会与主守卫互相矛盾而报红。
 
 运行：py -3.10 -X utf8 localtest/test_skip_frame_guard.py
 """
@@ -55,6 +67,7 @@ import time
 import unittest
 
 import cv2
+import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -181,6 +194,16 @@ class FrameLog:
         self.orient = eng._orient
         self.diff = float(getattr(eng, "_cur_frame_diff", float("inf")))
         self.image = getattr(res, "image", None) if res is not None else None
+        # 跳帧门里除帧差之外的其余门项（⑤ 要靠它们做因果归因：一帧没跳，到底是
+        # 哪一项拦的）。
+        # ⚠ 这些是 `process()` **返回之后**读的：跳帧帧在门处就早退了、状态没被动过，
+        # 读到的等于门检时的值；被识别的那帧 `pending` 可能已被消费，故 ⑤ 只看
+        # 前一帧（那帧必然被跳过）的值。
+        self.pending = bool(eng._hand_stab.pending)
+        self.match_started = bool(getattr(eng, "_match_started", False))
+        self.stable_count = int(getattr(eng, "_stable_hand_count", 0))
+        self.warmup_left = int(getattr(eng, "_warmup_left", 0))
+        self.cached = eng._frame_skipper.cached is not None
 
     def norm_payload(self):
         p = dict(self.payload)
@@ -234,6 +257,19 @@ def settle_never_verify(eng):
     eng._settle_orientation = settled
 
 
+def neutralize_drift_gate(eng):
+    """变异体（**勿接回生产**）：摘掉累计漂移门 —— 退回改动前的语义。
+
+    只把 `anchor_drift` 这个读数抹成 0.0，等价于「门里那一项被删掉了」，但状态一个
+    不动（缓存/基线/锚点都还在）。必须用 `__class__` 就地换子类：`anchor_drift` 是一
+    个 property（data descriptor），直接写实例属性 `eng._frame_skipper.anchor_drift = 0`
+    会被它挡住，看起来装了变异体、实际什么都没改 —— 那又是一条在测空气的对照。
+    """
+    sk = eng._frame_skipper
+    sk.__class__ = type("MutantSkipperNoDrift", (type(sk),),
+                        {"anchor_drift": property(lambda self: 0.0)})
+
+
 def warm_until_skip(eng, img, name, full_h, limit=24):
     """连续喂同一帧直到出现跳帧帧；返回跳帧开始前的日志列表。"""
     log = []
@@ -243,6 +279,100 @@ def warm_until_skip(eng, img, name, full_h, limit=24):
         if rec.skipped:
             return log
     return log
+
+
+# ------------------------------------------------- ⑤ 慢漂移夹具（幅度自标定）
+DRIFT_STEPS = 12                # 漂移帧数：够让累计量跨过阈值几次
+DRIFT_TONE = 255.0              # 单调往纯白漂：不会来回抵消累计漂移
+# 单步幅度占阈值的比例：上限必须 **远低于 1.0**（否则相邻门本帧就拦下了，测不到
+# 慢漂移），下限又得让 12 帧能把累计量推到阈值的 3 倍以上。
+DRIFT_STEP_FRAC = (0.10, 0.40)
+DRIFT_STEP_AIM_FRAC = 0.35      # 单步目标：既留足「连跳几帧」的空隙，又靠实跨阈值
+
+# 跳帧门里读累计漂移那一项（⑤ 的接线契约与变异体都拿它当对照物）
+DRIFT_GATE_TERM = "and self._frame_skipper.anchor_drift < FRAME_SKIP_DIFF_THRESH"
+ANCHOR_ADVANCE = "self._anchor_sig = self._cur_sig"
+
+
+def _sig_of(eng, img):
+    """与生产同一口径算一帧的块均值签名：`diff()` 吃的就是这张图。"""
+    import engine.engine as E
+    return E._block_diff_signature(eng._frame_diff_source(eng._apply_hand_roi(img)))
+
+
+def _l1(a, b) -> float:
+    if a is None or b is None or a.shape != b.shape:
+        return float("inf")
+    return float(np.abs(a - b).sum())
+
+
+def _drift_threshold() -> float:
+    import engine.engine as E
+    return float(E.FRAME_SKIP_DIFF_THRESH)
+
+
+def _patch_region(base, rect, alpha):
+    y0, y1, x0, x1 = rect
+    out = base.copy()
+    patch = out[y0:y1, x0:x1].astype(np.float32)
+    out[y0:y1, x0:x1] = np.clip(patch * (1.0 - alpha) + DRIFT_TONE * alpha,
+                                 0.0, 255.0).astype(np.uint8)
+    return out
+
+
+def _drift_plan(eng, base):
+    """标定「每帧只比上一帧动一点、连着看却明显变了」的补丁位置与幅度。
+
+    必须实测标定：`_apply_hand_roi` 会把上半屏裁掉，`_frame_diff_source` 又会降
+    采样，写死一个 rect/alpha 很容易调出「签名根本不变化」的假夹具。返回
+    `(plan, tried)`：`plan` 是 `(rect, alpha, 单步差值)`，标定不出就返 None。
+
+    取「最靠近目标单步」的那一组而不是「第一个落在窗口里」的：单步 0.10×阈值与
+    0.40×阈值都算「窗口内」，前者 12 帧只漂到 1.2×阈值（一旦中间有一帧因其它原因
+    重识别、锚点被重置，就再也跳不过去了），后者能漂到 4.8× —— 同一个断言，
+    一个靠擦线一个不靠。
+    """
+    h, w = base.shape[:2]
+    thr = _drift_threshold()
+    sig0 = _sig_of(eng, base)
+    tried = []
+    for fy in (0.72, 0.86, 0.55, 0.30, 0.06, 0.95):
+        y0 = max(0, min(h - 15, int(h * fy)))
+        for (hh, ww) in ((10, 40), (6, 24), (14, 64)):
+            rect = (y0, min(h, y0 + hh), 4, min(w, 4 + ww))
+            for alpha in (0.01, 0.02, 0.03, 0.05, 0.08, 0.12, 0.20, 0.30):
+                step = _l1(sig0, _sig_of(eng, _patch_region(base, rect, alpha)))
+                tried.append((rect, alpha, round(step, 3)))
+    ok = [t for t in tried
+          if DRIFT_STEP_FRAC[0] * thr <= t[2] <= DRIFT_STEP_FRAC[1] * thr]
+    if not ok:
+        return None, tried
+    return min(ok, key=lambda t: abs(t[2] - DRIFT_STEP_AIM_FRAC * thr)), tried
+
+
+def _drift_series(base, rect, alpha, n=DRIFT_STEPS):
+    """第 k 帧 = 原图在 rect 上往纯白漂了 (k+1)*alpha。漂移量对 alpha 线性，
+    所以每帧的**相邻**变化差不多大、**累计**变化却一路长。"""
+    return [_patch_region(base, rect, alpha * (k + 1)) for k in range(n)]
+
+
+def _run_drift(eng, base, series, name, full_h):
+    """喂慢漂移帧，逐帧返回 `(本帧相对锚点的累计漂移, FrameLog)`。
+
+    锚点自己跟着推（与生产同语义：只有一帧真被识别了，它才成为新锚点），否则
+    「这一帧的门检到底是哪一项拦的」无法归因。签名在 `process()` 之前算，拿到的
+    就是门检当时看到的量。起点锚 = `base`（调用方已拿 base 热身到静默）。
+    """
+    out = []
+    anchor = _sig_of(eng, base)
+    for i, f in enumerate(series):
+        sig = _sig_of(eng, f)
+        drift = _l1(sig, anchor)
+        rec = FrameLog(f"{name}/drift#{i}", eng, f, full_h)
+        if rec.calls >= 1:             # 真识别了 → 锚点换成本帧
+            anchor = sig
+        out.append((drift, rec))
+    return out
 
 
 class TestSkipFrameGuard(unittest.TestCase):
@@ -381,6 +511,103 @@ class TestSkipFrameGuard(unittest.TestCase):
                              f"#{i} payload 两侧不同（已剥 diag.perf 计时）")
             self.assertEqual(a.preview_sig(), b.preview_sig(), f"#{i} 预览两侧不同")
 
+    # ---- ⑤ 缓慢漂移不得无限期复用旧 payload ---------------------------
+    def test_slow_drift_cannot_keep_a_stale_payload(self):
+        """每帧只比上一帧动一点、连着看已经明显变了：必须在若干帧内重识别。
+
+        钉的是一条无条件不变量：**跳帧 ⇒ 相对锚点的累计漂移 < 阈值**。
+        旧语义（只看相邻差）下这条必然被破：`diff()` 每帧都推基线，慢漂移可以永远
+        过门，面板就永远停在第一帧的结论上（用户口中的「不更新了」）。
+        """
+        thr = _drift_threshold()
+        eng = quiet_engine()
+        warm_until_skip(eng, self.img0, self.name0, self.full_h)
+        plan, tried = _drift_plan(eng, self.img0)
+        self.assertIsNotNone(
+            plan,
+            f"标定不出「单步小幅但累计能跨阈值」的补丁幅度（试了 {len(tried)} 组，"
+            f"最大累计才 {max([t[2] for t in tried]) * DRIFT_STEPS:.2f}）：⑤ 在测空气")
+        rect, alpha, step = plan
+        series = _drift_series(self.img0, rect, alpha)
+
+        # 夹具诚实性：相邻差一直过门，累计量却把阈值跨了几次 —— 否则本测试拦的
+        # 不是漂移门，只是又一条普通帧差门。
+        sig_base = _sig_of(eng, self.img0)
+        sigs = [_sig_of(eng, f) for f in series]
+        adj = [_l1(sigs[0], sig_base)] + [_l1(sigs[i], sigs[i - 1])
+                                          for i in range(1, len(sigs))]
+        cum = [_l1(s, sig_base) for s in sigs]
+        self.assertLess(max(adj), thr,
+                        f"夹具的相邻帧差 {max(adj):.2f} 已经超阈值 {thr}：这不是慢漂移")
+        self.assertGreaterEqual(cum[-1], 3.0 * thr,
+                                f"累计只漂了 {cum[-1]:.2f}，没把阈值跨过去（擦线运气）")
+        self.assertGreaterEqual(len([c for c in cum if c > cum[0]]), DRIFT_STEPS // 2,
+                                "漂移不是单调的（往回飘会互相抵消，累计门量不到东西）")
+
+        rows = _run_drift(eng, self.img0, series, self.name0, self.full_h)
+        skipped = [(d, r) for d, r in rows if r.skipped]
+        forced = [(i, d, r) for i, (d, r) in enumerate(rows) if r.calls >= 1]
+        self.assertTrue(skipped, "整串慢漂移帧一个都没跳：那①的省钱前提在本夹具里不成立")
+        self.assertGreaterEqual(len(skipped), 2,
+                                "只跳过一帧就重识别：那和「按帧数封顶」没区别，量不出慢漂移")
+        self.assertTrue(forced,
+                        f"画面已经累计漂了 {cum[-1]:.2f}（阈值 {thr}）却没有一帧重识别："
+                        "旧 payload 被当成事实无限期上屏")
+        # 主体不变量：跳帧帧相对锚点的累计漂移必须小于阈值
+        for d, r in skipped:
+            self.assertLess(d, thr,
+                            f"{r.name} 相对「上一次真识别过的那帧」已累计漂移 {d:.2f} "
+                            f"≥ 阈值 {thr}，却仍复用旧 payload（慢漂移拿相邻差当「没变」）")
+
+        # 因果归因：第一个被重识别的帧，其余门项全都是「允许跳」的形状，
+        # 相邻差也照样过门 —— 唯一没过的那项只能是累计漂移。
+        i, d0, r0 = forced[0]
+        self.assertGreaterEqual(i, 1,
+                                "第一帧漂移就被重识别：夹具没造出「相邻像、累计不像」")
+        prev = rows[i - 1][1]
+        self.assertTrue(prev.skipped,
+                        f"#{i} 前一帧就付了完整识别（{prev.calls} 次）：锚点早就换过，"
+                        "再拿它当漂移门的对照就是量错了对象")
+        self.assertLess(r0.diff, thr,
+                        f"#{i} 相邻差 {r0.diff:.2f} 本身就超阈值：那它是被帧差门拦的，"
+                        "不是漂移门（本断言在测另一东西）")
+        self.assertGreaterEqual(d0, thr,
+                                f"#{i} 没跳，可累计漂移只有 {d0:.2f} < {thr}：那它也不是"
+                                "被漂移门拦的，⑤ 的因果链断了")
+        self.assertFalse(r0.non_table, f"#{i} 走的是「非牌桌」早退，不是漂移门")
+        self.assertGreater(prev.stable_count, 0, "其余门项 `stable_count>0` 在前一帧就不过："
+                                                 "那本帧不跳是这一项拦的，与漂移无关")
+        self.assertTrue(prev.match_started, "同上：`_match_started` 在跳帧帧上是 False，"
+                                           "本测试的因果归因无从谈起")
+        self.assertFalse(prev.pending, "同上：稳定器本来就挂着待确认变化")
+        self.assertLessEqual(prev.warmup_left, 0, "热身未完，本帧不跳与漂移门无关")
+        self.assertTrue(prev.cached, "没有缓存 payload 就根本进不了跳帧分支")
+
+        # 锚点确实被识别帧重置了：重识别之后的下一帧能重新跳帧，哪怕它相对最初
+        # 那张 base 已经漂过阈值（锚点不跟着识别帧走的话，这一帧会永远漂在阈值外，
+        # 方向自愈/重识别之后的静默期逐帧都要付一次完整识别）。
+        conv = [(k, d, r) for k, (d, r) in enumerate(rows)
+                if k > i and r.skipped and cum[k] >= thr]
+        self.assertTrue(
+            conv,
+            f"重识别（#{i}）之后的漂移帧再没跳过，或都没漂过最初那张 base：锚点没被"
+            f"识别帧推进（累计列 {['%.2f' % c for c in cum]}）")
+        k, dk, rk = conv[0]
+        self.assertLess(dk, thr,
+                        f"#{k} 相对当时锚点只有 {dk:.2f} 却本不该跳：归因不成立")
+        self.assertEqual(rk.calls, 0, f"#{k} 是跳帧帧却付了 {rk.calls} 次识别")
+
+        # 再把串尾那一帧连喂两遍：第二遍必须静默（`remember` 的锚点推进在跑）。
+        # 第一遍喂下去可能仍会重识别（相对当时锚点确实又漂了一段），那不是缺陷。
+        tail = series[-1]
+        first = FrameLog(f"{self.name0}/tail#0", eng, tail, self.full_h)
+        again = FrameLog(f"{self.name0}/tail#1", eng, tail, self.full_h)
+        self.assertTrue(again.skipped,
+                        f"同一帧连喂两遍还在重识别（first calls={first.calls} "
+                        f"adj={first.diff:.2f} / again calls={again.calls} "
+                        f"adj={again.diff:.2f}）：识别帧没把锚点推进到自己")
+        self.assertEqual(again.calls, 0, f"静默后的同一帧仍付了 {again.calls} 次识别")
+
 
 class TestMutationControls(unittest.TestCase):
     """变异检验的正向对照：两个变异体必须让上面的断言成立不了。"""
@@ -447,10 +674,141 @@ class TestMutationControls(unittest.TestCase):
                          "连喂 4 帧同一张错朝向图都没收敛回静默：那 ③ 的"
                          "「翻转后第二帧该跳」就没有对照了")
 
+    def test_mutant_without_drift_gate_keeps_skipping_a_drifting_screen(self):
+        """变异体「摘掉累计漂移门」必须让 ⑤ 的不变量成立不了（即复现老 bug）。
+
+        装上它，同一串慢漂移帧应重新出现「画面已经漂多了、却还在播旧 payload」；
+        若摘掉门它反而不发生了，说明 ⑤ 测的不是漂移（可能连基线都推错了）。
+        """
+        thr = _drift_threshold()
+        eng = quiet_engine()
+        warm_until_skip(eng, self.img0, self.name0, self.full_h)
+        plan, tried = _drift_plan(eng, self.img0)
+        self.assertIsNotNone(plan, f"标定不出漂移幅度（试了 {len(tried)} 组）：⑤ 的对照在测空气")
+        rect, alpha, _step = plan
+        series = _drift_series(self.img0, rect, alpha)
+        neutralize_drift_gate(eng)
+        self.assertEqual(float(eng._frame_skipper.anchor_drift), 0.0,
+                         "变异体没装上（`anchor_drift` 还是真读数）：那 ⑤ 就没得对照")
+        rows = _run_drift(eng, self.img0, series, self.name0, self.full_h)
+        stale = [(d, r) for d, r in rows if r.skipped and d >= thr]
+        self.assertTrue(
+            stale,
+            "摘掉漂移门后它仍然会因为累计漂移而重识别：那 ⑤ 拦的是一个不存在的缺陷"
+            f"（门项写在了别处，或根本没读漂移）")
+        for d, r in stale:
+            self.assertLess(r.diff, thr,
+                            f"{r.name} 相邻差 {r.diff:.2f} 本来就超阈值：那是帧差门的"
+                            "事，不能拿来当漂移门的对照")
+        print(f"[mutate] 无漂移门：{len(stale)} 帧累计漂移 ≥{thr} 仍复用旧 payload"
+              f"（首帧 {stale[0][0]:.2f}，其中相邻差最大 {max(r.diff for _d, r in stale):.2f}）")
+
+
+# ---------------------------------------------------- ⑤ 的接线契约（只查源码）
+ENGINE_PY = os.path.join(REPO, "android", "app", "src", "main", "python",
+                         "engine", "engine.py")
+with open(ENGINE_PY, encoding="utf-8") as _fp:
+    ENGINE_SRC = _fp.read()
+
+# `set_baseline` 里必须同步刷新本帧签名（否则帧末尾 `remember` 会把锚点写回
+# 旧朝向的图，③ 已实测过：方向自愈后的每一帧都退化成完整识别）
+SET_BASELINE_SYNC = "self._cur_sig = sig"
+
+
+def drift_gate_wired(src: str) -> bool:
+    """跳帧门里是否真在读累计漂移（必须恰好一项：多了是重复门，少了是没接）。"""
+    return src.count(DRIFT_GATE_TERM) == 1
+
+
+def frame_cap_live(src: str) -> bool:
+    """`MAX_SKIP_FRAMES` 是否还活在**代码**里（历史说明注释不算）。
+
+    只排除 `#` 开头的整行注释：那个名字现在只作为「为什么不用按帧封顶」的历史
+    说明存在；把它从注释里也一起禁掉，只会逼下一轮改动删掉这段有价值的缘由。
+    """
+    for line in src.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        if "MAX_SKIP_FRAMES" in line.split("#", 1)[0]:
+            return True
+    return False
+
+
+class TestDriftGateContracts(unittest.TestCase):
+    """累计漂移门的接线契约：这三处只要断一条，⑤ 就只是一段能跑但不保事的代码。"""
+
+    def test_gate_reads_the_cumulative_drift_exactly_once(self):
+        self.assertTrue(drift_gate_wired(ENGINE_SRC),
+                        f"跳帧门里没在读累计漂移（或不止一处）：{DRIFT_GATE_TERM!r}")
+
+    def test_recognized_frame_advances_the_anchor(self):
+        """锚点必须被「真的识别过的那帧」推进：否则它只会越漂越远，静默期每帧都付钱。"""
+        self.assertEqual(ENGINE_SRC.count(ANCHOR_ADVANCE), 1,
+                         f"`remember` 里推进锚点的那行({ANCHOR_ADVANCE!r})不见了或不止一处")
+        self.assertIn("if self._cur_sig is not None:", ENGINE_SRC,
+                      "推进锚点不再要求签名新鲜：签名算不出那一帧会拿旧签名充新")
+        self.assertIn(SET_BASELINE_SYNC, ENGINE_SRC,
+                      "`set_baseline` 没同步 `_cur_sig`：帧末 `remember` 会把锚点写回"
+                      "未归一那张图（实测 ③ 的翻转帧之后全部退化成完整识别）")
+
+    def test_diff_leaves_signature_none_when_it_cannot_compute(self):
+        self.assertIn("self._cur_sig = None", ENGINE_SRC,
+                      "`diff()` 不再先清空本帧签名：算不出时会拿上一帧的签名当「没变」")
+
+    def test_dead_frame_count_cap_stays_dead(self):
+        """负契约：`MAX_SKIP_FRAMES` 这个「注释承诺却从没被读过」的死常量不许回来。
+
+        它的坑不是「少了一个参数」而是「注释写着一件事、代码做的是另一件事」：
+        按帧数封顶要么逼静止画面周期性重付一次完整识别，要么挡不住慢漂移。
+        口径是「代码里不得出现」，历史说明注释不在射程内（见 `frame_cap_live`）。
+        """
+        self.assertFalse(frame_cap_live(ENGINE_SRC),
+                         "MAX_SKIP_FRAMES 又回到了代码里：它曾只活在注释里，"
+                         "从未参与任何判定")
+        self.assertIn("MAX_SKIP_FRAMES", ENGINE_SRC,
+                       "连历史说明注释也没了：下一个人会把同一个坑重新挖回来")
+
+
+class TestDriftGateSourceMutants(unittest.TestCase):
+    """契约层的变异对照：把门项/锚点推进拆掉，上面的契约必须报错。"""
+
+    def test_mutant_gate_line_removed_breaks_the_contract(self):
+        mutated = ENGINE_SRC.replace(DRIFT_GATE_TERM + "\n", "\n", 1)
+        self.assertNotEqual(mutated, ENGINE_SRC, "变异无效：那行拆不掉（引擎形态已不读漂移）")
+        self.assertFalse(drift_gate_wired(mutated),
+                         "拆掉一行后门里仍在读漂移：契约在测别的东西")
+        self.assertTrue(drift_gate_wired(ENGINE_SRC))
+
+    def test_mutant_anchor_advance_removed_breaks_the_contract(self):
+        mutated = ENGINE_SRC.replace(ANCHOR_ADVANCE + "\n", "\n", 1)
+        self.assertNotEqual(mutated, ENGINE_SRC, "变异无效：锚点推进那行拆不掉")
+        self.assertNotIn(ANCHOR_ADVANCE, mutated,
+                         "拆掉一行后仍能在原文里找到它：契约定位不唯一")
+        self.assertIn(ANCHOR_ADVANCE, ENGINE_SRC)
+
+    def test_mutant_stale_cur_sig_in_set_baseline_breaks_the_contract(self):
+        mutated = ENGINE_SRC.replace(SET_BASELINE_SYNC + "\n", "\n", 1)
+        self.assertNotEqual(mutated, ENGINE_SRC, "变异无效：`set_baseline` 里那行拆不掉")
+        self.assertNotIn(SET_BASELINE_SYNC, mutated)
+        self.assertIn(SET_BASELINE_SYNC, ENGINE_SRC)
+
+    def test_mutant_reintroducing_a_frame_cap_breaks_the_negative_contract(self):
+        """负契约也要有对照：把死常量接回代码，检查器必须括住。"""
+        anchor = DRIFT_GATE_TERM
+        self.assertEqual(ENGINE_SRC.count(anchor), 1, "契约定位不唯一")
+        mutated = ENGINE_SRC.replace(anchor, "MAX_SKIP_FRAMES < 2 " + anchor, 1)
+        self.assertTrue(frame_cap_live(mutated),
+                        "检查器拦不住旧常量回到代码里，负契约在测空气")
+        self.assertFalse(frame_cap_live(ENGINE_SRC), "现行源码已经不干净了")
+
 
 if __name__ == "__main__":
     if MUTATE:
-        print("[mutate] 只跑变异对照：两个变异体必须「如期坏掉」")
-        unittest.main(argv=[sys.argv[0], "TestMutationControls"], exit=False, verbosity=2)
+        print("[mutate] 只跑变异对照：三个行为变异体 + 四个源码变异体必须「如期坏掉」")
+        loader = unittest.TestLoader()
+        suite = unittest.TestSuite()
+        for tc in (TestMutationControls, TestDriftGateSourceMutants):
+            suite.addTests(loader.loadTestsFromTestCase(tc))
+        unittest.TextTestRunner(verbosity=2).run(suite)
     else:
         unittest.main()

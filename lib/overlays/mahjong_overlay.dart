@@ -4082,10 +4082,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       final List<dynamic> advice = _shownAdvice;
       final String best = _shownBest;
       final String status = (result?['status'] as String?) ?? '';
-      final String discards = (result?['discards'] as String?) ?? '';
-      final bool isDingquePhase = (result?['dingque_phase'] == true || status == 'dingque');
-      final bool isSwapPhase = (result?['swap_phase'] == true || status == 'swap') && (count >= 13) && discards.isEmpty;
-      final bool isPickPhase = (result?['pick_phase'] == true || status == 'pick');
+      // 这里不再各算一份 dingque/swap/pick 阶段标志：手牌块的呈现闸门已改成只看
+      // 「引擎是否报出了牌」（见下方手牌块），算了却不读只会变成下一条没接线的死读数。
+      // 迷你胶囊那条链有它自己的同名局部量，与本作用域无关。
       // inMatch：对局已进行中（有手牌且不是等待状态），不再要求 remaining_matrix（swap/pick阶段无牌河）
       final bool inMatch = status != 'waiting' &&
           status != 'no_tiles' &&
@@ -4299,8 +4298,14 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                         //    避免同义/矛盾文案叠加。
                         _adviceSection(advice, best, count),
                         const SizedBox(height: 5),
-                        // 2. 当前手牌（仅在确认对局内或定缺阶段才显示，杜绝大厅与非对局干扰）
-                        if (hand.isNotEmpty && count > 0 && (inMatch || isDingquePhase || isSwapPhase || isPickPhase)) ...[
+                        // 2. 当前手牌。闸门只看「引擎确实报出了牌」。
+                        //    旧口径额外要求 inMatch 或某个特殊阶段，于是在「读到 2~3 张」
+                        //    这类低张数帧上把整块手牌藏起来（count<4 ⇒ inMatch=false，
+                        //    而三个阶段标志又都不成立），用户看到的就是「牌明明在屏幕上，
+                        //    面板却空着甚至显示等待开局」。引擎出口现已保证
+                        //    status=='waiting' 时必定没报出牌，这里只需排除它，
+                        //    不再自行二次否决引擎的读数。
+                        if (hand.isNotEmpty && count > 0 && status != 'waiting') ...[
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
                             decoration: BoxDecoration(

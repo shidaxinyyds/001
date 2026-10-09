@@ -31,6 +31,20 @@ sys.path.insert(0, PYROOT)
 
 import engine.engine as ee  # noqa: E402
 ee.load_mode = lambda: "sc_hz"  # 强制川麻血流红中模式（本地无 Java 模式文件）
+
+# 平台也必须显式声明：本地没有 Java 推进来的 mahjong_platform.json，Engine 会退回
+# platforms.DEFAULT_PLATFORM="tencent"，于是这份「蜀山门禁」一直在拿**腾讯的手牌
+# ROI + 腾讯的牌风白名单**读蜀山帧——名字写着蜀山，跑的是腾讯口径。
+# 实测两种口径都是 82/84、红的都是同一格 s4（GT 注释里已登记的那两枚 3m→2m 真
+# 失误），所以这条声明不是救火，只是把这道门禁接到它自己声称的平台上：下次腾讯
+# 侧再收窄牌风白名单（v1.7.2 就干过一次，见 recognition/tencent_grid_detector.py
+# 的 STYLE_PLATFORM_DENYLIST），这份夹具不会再靠「侥幸挂在腾讯名单里」悄悄活下来。
+# 这里只改内存态，绝不写 mahjong_platform.json：那份文件一旦留下「shushan」，
+# eval_base（腾讯口径）会被静默污染成同一个平台，两条门禁就都在测空气了。
+# 口径与上面的 load_mode 一致：process() 每帧走 `self.platform = load_platform()`
+# （engine.py），所以要改的是 engine 命名空间里绑定的那个符号；改 platforms 里的
+# 模块变量无效（实测：改了 _EXPLICIT_PLATFORM/_PLATFORM_CACHE 后逐帧读数一字不变）。
+ee.load_platform = lambda: "shushan"  # noqa: E402
 from engine.engine import Engine  # noqa: E402
 
 SHOT_DIR = os.path.join(REPO, "localtest", "shots_shushan")

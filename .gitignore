@@ -101,3 +101,7 @@ public/
 null
 
 
+
+# A/B 对拍的 HEAD 快照工作区（本地临时，绝不入库）
+.base_head/
+localtest/shots_tuyou_select/
