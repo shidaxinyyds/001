@@ -46,6 +46,7 @@ try:
               f"手牌={len((d.get('hand') or '')) // 2:2d}  "
               f"river_zones={json.dumps(dg.get('river_zones'), ensure_ascii=False)} "
               f"discards={d.get('discard_count')}  "
+              f"river_error={json.dumps(dg.get('river_error'), ensure_ascii=False)}  "
               f"perf.river={json.dumps((dg.get('perf') or {}).get('river'))}")
 finally:
     E.load_platform, E.load_mode = orig_lp, orig_lm
