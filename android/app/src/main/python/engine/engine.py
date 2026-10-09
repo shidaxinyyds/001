@@ -1512,6 +1512,12 @@ RIVER_SCAN_MAX_TILES = 24
 # 重扫只会在它们身上把成本乘以四。
 RIVER_FALLBACK_MIN_SCORE = 0.30
 
+# 牌河事件源（主检测器的整桌框）采信线。与轮廓法的 0.42 不是同一个量：那边是
+# 模板 NCC 得分，这边是目标检测置信度，两者不可比。这个值必须先拿真机帧量过
+# 才能定（`localtest/probe_river_events.py`）；量不了之时就宁可保守，宁可少读
+# 不成把头像/按钮当成弃牌写进记账——账本只增不减，一张误读会留一整局。
+RIVER_EVENT_CONF = 0.45
+
 
 def _tile_content_key(tile_crop: np.ndarray):
     """切片内容指纹（8x8 缩略 hash）：牌河未变时同一切片命中缓存 → 零分类。"""
@@ -1888,6 +1894,9 @@ class Engine:
         # 牌河最近一次的接线错误（None = 正常）。「空牌河」可以是牌局事实，也可以
         # 是接线断了，两者必须在 diag 上分得开。
         self._river_error: Optional[str] = None
+        # 本帧事件源（主检测器整桌牌河框）交出的条目数。0 且无扫描结果 = 牌河真的
+        # 没读数；而长期为 0 但牌局在跑，就说明事件源不可用（主检测器不是 YOLO）。
+        self._river_event_n: int = 0
         # 提交/认领各计一次。没这两个数，「river_zones 全 0」就分不清三种故障：
         # 根本没提交（门一直关着）、提交了但从未被认领（异步链断）、认领了但确实
         # 为空（牌局事实）。三者修法完全不同。
@@ -2430,6 +2439,102 @@ class Engine:
             self._dq_unstable_hits += 1
             return None, None
         return seen[0], DINGQUE_SUIT_NAMES[seen[0]]
+
+    def _river_event_detector(self):
+        """牌河事件源用的检测器：要的是「整桌牌框」，不是「能 NCC 分类」。
+
+        优先用主检测器（设备上是 YOLO，它本来就是每帧跳的那一个）；拿不到
+        `detect_river_strips` 时退回影子对比用的那个实例。两个都不行就返回 None
+        （事件路自动失效，回到旧的后台扫描，不会“看似的有了牌河”）。
+        """
+        for det in (self._detector, getattr(self, "_yolo_shadow", None)):
+            if det is not None and det is not False and hasattr(det, "detect_river_strips"):
+                return det
+        try:
+            det = self.get_detector()
+        except Exception:
+            return None
+        return det if det is not None and hasattr(det, "detect_river_strips") else None
+
+    def _river_from_events(self, image):
+        """弃牌的事件源：主检测器每帧已经算出的牌河条带框 → [(牌, 区)]。
+
+        为什么必须换掉「后台全表 NCC 扫描」这一条单一入口（实测，2026-10）：
+        那条路一次冷扫描要 7~10 秒纯 CPU，而在连续识别的进程里 28 秒墙钟都抢不到
+        跑完（`localtest/probe_river_repeat.py`）。任务不报错、不降级，只是永远
+        不被认领 → 牌河永远为空 → 记牌器空白、三家 `tenpai_prob` 全等于先验 0.5。
+        YOLO 本来每帧就跑，牌河框是它的副产品，拿这个当牌河源几乎不再花额外开销。
+
+        只做三件事：过采信线、按**平台自己的分区几何**归家（而不是 YOLO 内部写死的
+        区）、保留中央骰子盒排除——这三条任何一条偷懒都会把“别的东西”当成弃牌。
+        读数仍需两帧确认才进账本（`_update_visual_ledger`），所以单帧误框不会
+        污染记牌器。
+        """
+        if image is None or getattr(image, "size", 0) == 0:
+            return []
+        det = self._river_event_detector()
+        if det is None:
+            return []
+        try:
+            dets = det.detect_river_strips(image)
+        except Exception:
+            return []
+        try:
+            ih, iw = image.shape[:2]
+            zones = [(z[0], int(iw * z[1]), int(ih * z[2]), int(iw * z[3]), int(ih * z[4]))
+                     for z in get_river_zones(self.platform)]
+        except Exception:
+            return []
+        out: List[Tuple[str, str]] = []
+        cx_lo, cx_hi = RIVER_CONF["center_x"]
+        cy_lo, cy_hi = RIVER_CONF["center_y"]
+        for rect, lbl, conf in dets:
+            if not lbl or conf < RIVER_EVENT_CONF:
+                continue
+            try:
+                x, y, w, h = rect[0], rect[1], rect[2], rect[3]
+            except Exception:
+                continue
+            cx, cy = x + w / 2.0, y + h / 2.0
+            # 中央骰子盒/倒计时不算弃牌（与轮廓法同一道排除，不得一边有一边没有）
+            if (cx_lo * iw <= cx <= cx_hi * iw) and (cy_lo * ih <= cy <= cy_hi * ih):
+                continue
+            for zn, x1, y1, x2, y2 in zones:
+                if x1 <= cx <= x2 and y1 <= cy <= y2:
+                    out.append((lbl, zn))
+                    break
+        return out
+
+    def _apply_river_entries(self, entries, avail):
+        """把 (牌, 区) 列表入账：分区计数 + “谁打的”归属 + 返回牌面列表。
+
+        抽成一个方法是为了让**两个牌河来源走同一个口径**：后台 NCC 扫描与事件源
+        （主检测器整桌框）。分叉的话很容易一个更新了 `river_zones`、另一个只更新
+        牌面，面板上就变成“记牌器有牌但三家归属全空”，而这种不一致比单纯为空更难查。
+        玩法闸门（`in avail`）也只能住在这里：两条路共用，不会出现一路把字牌推进账本。
+        """
+        zone_counts: Dict[str, int] = {"bottom": 0, "top": 0, "left": 0, "right": 0}
+        zone_to_seat = {"right": 1, "top": 2, "left": 3}
+        seat_discards: Dict[int, List[int]] = {1: [], 2: [], 3: []}
+        discards: List[str] = []
+        for cd, zn in entries or []:
+            if not cd:
+                continue
+            try:
+                t34 = mpsz_to_tile34_index(cd)
+            except Exception:
+                continue
+            if t34 not in avail:
+                continue
+            discards.append(cd)
+            if zn in zone_counts:
+                zone_counts[zn] += 1
+            seat = zone_to_seat.get(zn)
+            if seat and t34 < 27:
+                seat_discards[seat].append(t34)
+        self._river_zone_counts = zone_counts
+        self._opponent_discards = seat_discards
+        return discards
 
     @staticmethod
     def _run_bg_river_and_melds(image, detector, mode, hand_row, platform_key="tencent"):
@@ -4906,7 +5011,7 @@ class Engine:
                 try:
                     bg_river_entries, bg_meld_entries = rf.result()
                     # 「牌河为空」必须能区分两件事：场上真没人打牌，与分类链断了。
-                    # 后者曾因为 `hasattr` 兑底而静默了几百帧，不记就只会留下
+                    # 后者曾因为 `hasattr` 兜底而静默了几百帧，不记就只会留下
                     # “记牌器怎么是空的”这一谜题。判据用提交时存下的那个检测器。
                     _rdet = getattr(self, "_river_det", None)
                     if not bg_river_entries and not hasattr(_rdet, "classify_tile"):
@@ -4917,23 +5022,9 @@ class Engine:
                     else:
                         self._river_error = None
                     if bg_river_entries:
-                        bg_zone_counts: Dict[str, int] = {"bottom": 0, "top": 0, "left": 0, "right": 0}
-                        bg_discards = []
-                        zone_to_seat = {"right": 1, "top": 2, "left": 3}
-                        seat_discards: Dict[int, List[int]] = {1: [], 2: [], 3: []}
-                        for cd, zn in bg_river_entries:
-                            if cd and mpsz_to_tile34_index(cd) in avail:
-                                bg_discards.append(cd)
-                                if zn in bg_zone_counts:
-                                    bg_zone_counts[zn] += 1
-                                seat = zone_to_seat.get(zn)
-                                if seat:
-                                    t34 = mpsz_to_tile34_index(cd)
-                                    if t34 < 27:
-                                        seat_discards[seat].append(t34)
-                        self._river_zone_counts = bg_zone_counts
-                        self._opponent_discards = seat_discards
-                        bg_seen = bg_discards
+                        # 入账口径全部收进 `_apply_river_entries`：事件源走同一个方法，
+                        # 两个来源不可能出现“一个更新了分区归属、另一个只更新牌面”。
+                        bg_seen = self._apply_river_entries(bg_river_entries, avail)
                     if bg_meld_entries:
                         # bottom 也在表内：本家副露原本被丢掉，导致「你碰了/你杠了」
                         # 永远播不出，而且杠过之后算不出正确的立牌基数。
@@ -5003,7 +5094,7 @@ class Engine:
                     # 提交前先把要用的检测器定下来：用**本帧已解析好的手牌通道检测器**，
                     # 不用 `self._detector`。真机上主检测器是 YOLODetector，它没有
                     # `classify_tile`，而牌河/副露路径自己做分区轮廓扫描、唯一需要的就是
-                    # 分类；`_classify_tile_fast` 外层那句 hasattr 兑底于是把每张静默成
+                    # 分类；`_classify_tile_fast` 外层那句 hasattr 兜底于是把每张静默成
                     # (None, 0.0) → 牌河永远为空 → 记牌器空白、三家听牌概率全等于先验 0.5。
                     # 实测（`localtest/probe_river_gates.py`）：同一帧四区 8 个候选，主检测器
                     # 打分全 0.0，网格检测器立刻给出 0.178~0.463。
@@ -5096,6 +5187,19 @@ class Engine:
             # 刚凑上的两帧确认抹回 0。网格类识别器只回手牌行（牌行路径恒空），那样
             # 等于“视觉牌河整局永远确认不上 → 记牌器空转”。合成口径 = 逐型取较大值
             # （两路各自报同一张牌的实际张数，相加会把一次弃牌双计）。
+            # 牌河事件源：主检测器每帧已经算出的整桌牌河框（几乎不再花额外开销）。
+            # 后台 NCC 扫描仍照旧提交（它还供副露账本），但「牌河有没有读数」不再
+            # 取决于那个 7~10 秒的任务能否被认领 —— 那正是记牌器空白的根因。
+            # 只在扫描本帧没给出条目时才用事件结果覆盖分区归属：扫描路给了东西，
+            # 它就是更权威的轮廓读数，事件路不能反过来把它冲掉。
+            try:
+                _ev_entries = self._river_from_events(full_for_preview)
+            except Exception:
+                _ev_entries = []
+            self._river_event_n = len(_ev_entries)
+            if _ev_entries and not bg_seen:
+                bg_seen = self._apply_river_entries(_ev_entries, avail)
+
             if run_river_scan or bg_seen:
                 if bg_seen and discard_labels:
                     _c_bg, _c_row = Counter(bg_seen), Counter(discard_labels)
@@ -6335,6 +6439,8 @@ class Engine:
                     # 牌河的接线错误（None = 本轮没出错）。空表与断链必须可分：前者是
                     # 牌局事实，后者是接线问题（传错检测器时它静默了几百帧）。
                     "river_error": getattr(self, "_river_error", None),
+                    # 本帧事件源交出的条目数（0 且无扫描结果 = 牌河真的没读数）
+                    "river_events": int(getattr(self, "_river_event_n", 0)),
                     # 提交/认领计数：把「没提交」「没认领」「认领了但确实为空」分开。
                     "river_submits": int(getattr(self, "_river_submits", 0)),
                     "river_consumes": int(getattr(self, "_river_consumes", 0)),

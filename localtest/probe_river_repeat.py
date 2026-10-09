@@ -54,6 +54,7 @@ try:
               f"手牌={len((d.get('hand') or '')) // 2:2d}  "
               f"river_zones={json.dumps(dg.get('river_zones'), ensure_ascii=False)} "
               f"discards={d.get('discard_count')}  "
+              f"events={dg.get('river_events')}  "
               f"river_error={json.dumps(dg.get('river_error'), ensure_ascii=False)}  "
               f"submits={dg.get('river_submits')} consumes={dg.get('river_consumes')}  "
               f"perf.river={json.dumps((dg.get('perf') or {}).get('river'))}")
