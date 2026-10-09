@@ -1592,6 +1592,26 @@ def _classify_tile_fast(detector, tile_crop, avail, pref_rots, cache):
     return result
 
 
+def _sort_hand_mpsz(mpsz: str) -> str:
+    """把平铺手牌串按「万→筒→条→字、同门按数字」排好。
+
+    只供展示：所有计算走多重集，排不排序不影响任何结论。屏上顺序直接上屏就是
+    用户报的「手牌不排序」（实测见过「中 4条 3条 9条 4条 7条 6筒」）。
+    读不出的张（None/空）一律排到末尾，不假装它是「什么都没有」。
+    """
+    if not mpsz:
+        return ""
+    labels = [mpsz[i:i + 2] for i in range(0, len(mpsz) - 1, 2)]
+    suit_rank = {"m": 0, "p": 1, "s": 2, "z": 3}
+
+    def key(lbl: str):
+        if len(lbl) != 2 or lbl[1] not in suit_rank:
+            return (9, 9, lbl)      # 读不出/未知牌放最后，不丢信息也不插队
+        return (suit_rank[lbl[1]], int(lbl[0]) if lbl[0].isdigit() else 9, lbl)
+
+    return "".join(sorted(labels, key=key))
+
+
 def detect_river_discards(image: np.ndarray, detector, mode: str = "4p", hand_row=None, platform_key: str = "tencent") -> List[Tuple[str, str]]:
     """高精度牌桌弃牌检测：严格排除中央骰子盒、倒计时、房间名及头像，
     支持多牌相连自适应切片与多角度归一化，精准提取全场四方牌河弃牌。
@@ -6517,6 +6537,57 @@ class Engine:
                 "elapsed": round(time.time() - start_time, 3),
                 "frame_skipped": False,
             }
+
+            # ===== D 层语义收口：同一帧不得交两套事实 =====
+            # D19~D24、D27、D30 看着是十条文案问题，其实全是「互斥状态同时下发」：
+            # 换牌阶段谈点炮、定缺信息跟「进听冲刺」同屏、0 进张还给「若摸到 X 将改打」、
+            # 广东玩法里讲川麻断门……收在一处做比在十个渲染点各打补丁可靠：
+            # 下游 UI 无论怎么渲染，拿到的就已经是自洽的。
+            _dq_mode = is_dingque_mode(self.mode)
+            # D23/D20 玩法没有定缺规则，就不能出现任何定缺信息。旧行为只在
+            # `opponents_dingque` 上门了，本家 `dingque`/`dingque_suit` 与定缺阶段没门
+            # → 广东玩法里照样冒出「下家缺万」。
+            if not _dq_mode:
+                result["dingque"] = None
+                result["dingque_suit"] = None
+                result["opponents_dingque"] = []
+                result["dingque_phase"] = False
+            _special = bool(result.get("swap_phase") or result.get("pick_phase")
+                            or result.get("dingque_phase"))
+            # D21 换牌/选牌/定缺阶段与无牌帧都不存在「摸」这个动作。
+            if _special or int(result.get("count") or 0) <= 0:
+                result["is_drawing"] = False
+                result["drawing_tile"] = None
+            # D24 换牌/选牌阶段不给「点炮高危/改打安全牌」类建议：那时手上的牌不是
+            # 打出去的牌，拿防守口径讲进攻选择就是把用户往错方向推。
+            if result.get("swap_phase") or result.get("pick_phase"):
+                result["advice"] = []
+                result["best"] = ""
+            # D22 0 进张不得同时给「若摸到 X 将改打」：那张牌不会让牌型前进一步，
+            # 两个文案摆在一起就是自相矛盾。
+            # D22 「0 进张仍出建议、且与『若摸到 X 将改打』矛盾」——本轮尝试过在
+            # ukeire==0 时剥掉改打行，但这个前提被自己的守卫直接证伪：
+            # `test_realtime_blanks.test_flip_line_matches_the_simulated_group` 的夹具里，
+            # ukeire=0 的条目**可以合法地带改打行**（摸进那张牌改变的是「打哪张」，
+            # 不是「能不能进张」）。剥掉它会把正确信息删掉。
+            # 因此 D22 本轮不交，且已记入台账：真正要查的是面板把「无进张」与
+            # 「有改打盼头」用什么口径并列写出，而不是数据本身矛盾。
+
+            # D27 非法张数必须说出来：本家手牌只能是 13n+1 或 13n+2（副露每组少 3 张）。
+            # 不在集合里 = 漏读/多读/副露没读到，无论哪种都不能默默当正常手牌算。
+            _n = int(result.get("count") or 0)
+            result["hand_count_suspect"] = bool(
+                _n > 0 and _n not in {1, 2, 4, 5, 7, 8, 10, 11, 13, 14})
+            # D30 玩法选错的逐帧提醒：屏上读到了本玩法牌集里没有的牌，就是直接证据。
+            _conf = list(result.get("hand_gate_conflict") or [])
+            result["mode_suspect"] = ({
+                "mode": self.mode,
+                "tiles": _conf[:8],
+                "text": (f"屏上有 {'、'.join(str(t) for t in _conf[:4])}，但当前玩法不含这些牌："
+                         f"玩法可能选错（现用：{result.get('mode_name')}）"),
+            }) if _conf else None
+            # D26 排序只供展示，原始屏上顺序仍以 `hand` 交出，不丢信息。
+            result["hand_sorted"] = _sort_hand_mpsz(result.get("hand") or "")
 
             # 牌河 YOLO 影子对比（默认关；只写 diag/日志，不影响任何显示与建议；
             # 必须在 json.dumps 之前，diag 结果才能随帧送到接料/日志）

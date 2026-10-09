@@ -2907,10 +2907,11 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final String tier = (evGauge['tier'] as String?) ?? _equityTierWord(level);
     // 未标定又无模型：本块没有任何可测量的东西，只能当文本说明，不能当仪表。
     final bool degrade = pureAnalytical && !calibrated;
-    final String degradeLabel = (pureAnalytical
-            ? '纯解析式评估 · 牌势 $tier'
-            : '牌势评估 · $tier') +
+    final String degradeLabel = '牌势 $tier' +
         (note.isEmpty ? '' : ' · $note');
+    // D28：上面那句以前写成「纯解析式评估 · 牌势 X」，而同一块的标题已经是
+    // 「纯解析式评估」（见上方 title）——同一帧把同一句说两遍。降级标签只留
+    // 「牌势档位 + 降级原因」，口径名称由标题负责，不重复。
 
     Color primaryColor;
     Color gradientStart;
@@ -3657,14 +3658,27 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         );
       }
       final String hint;
+      // D19：原来只要 count>0 就说「手牌解析中」，而同一帧上面那块已经摆出
+      // 「手牌(N张)」——用户看到的是「一边有牌一边还在解析」。解析其实早就成功了，
+      // 真正的原因是别的，必须按真实原因分别说（数据全部来自引擎，不编）。
+      final int _missing = (result?['hand_missing'] as num?)?.toInt() ?? 0;
+      final bool _carried = result?['hand_carried_over'] == true;
+      final bool _dim = result?['hand_dim'] == true;
       if (status == 'waiting' || (!inMatch && count == 0)) {
         hint = '等待对局接入 · 实时感知待命';
       } else if (status == 'animation' ||
           status == 'py_error' ||
           status == 'decode_error') {
         hint = '画面帧流同步中…';
+      } else if (_dim) {
+        hint = '画面被弹窗或暗层压住 · 本帧不给建议';
+      } else if (_carried) {
+        hint = '本帧未读到牌 · 正在沿用上一帧手牌';
+      } else if (_missing > 0) {
+        hint = '有 $_missing 张没读到 · 本帧结论不可靠';
       } else if (count > 0) {
-        hint = '手牌解析中 · 决策核推演中…';
+        // 牌读全了、只是本帧没有可改的打法：说「无更优选择」而不是「解析中」。
+        hint = '当前阵型已是最优解 · 本帧无更优换牌';
       } else {
         hint = '检索有效手牌中 · 边缘自适应对齐';
       }
