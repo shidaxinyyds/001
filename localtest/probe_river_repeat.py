@@ -26,6 +26,9 @@ if hasattr(sys.stdout, "reconfigure"):
 import engine.engine as E  # noqa: E402
 
 name = sys.argv[1] if len(sys.argv) > 1 else "zj_play_03.jpg"
+# 后台牌河扫描实测要 1~3s，而重复喂同一帧只要几百毫秒：帧数太短时「牌河为空」
+# 只能说明**没等到**，不能说明**没扫到**。所以帧数可调，默认给到足够跨过一次扫描。
+n_frames = int(sys.argv[2]) if len(sys.argv) > 2 else 20
 img = cv2.imread(os.path.join(HERE, "localtest", "shots_batch3", name))
 if img is None:
     # 读不到图时不能继续往下喂：`process(None)` 会回一条 decode_error，看起来像
@@ -38,7 +41,7 @@ E.load_mode = lambda *a, **k: "sc_hz"
 try:
     eng = E.Engine()
     eng.get_hand_detector()
-    for i in range(6):
+    for i in range(n_frames):
         with __import__("contextlib").redirect_stdout(__import__("io").StringIO()):
             d = json.loads(eng.process(img).result)
         dg = d.get("diag") or {}
@@ -47,6 +50,7 @@ try:
               f"river_zones={json.dumps(dg.get('river_zones'), ensure_ascii=False)} "
               f"discards={d.get('discard_count')}  "
               f"river_error={json.dumps(dg.get('river_error'), ensure_ascii=False)}  "
+              f"submits={dg.get('river_submits')} consumes={dg.get('river_consumes')}  "
               f"perf.river={json.dumps((dg.get('perf') or {}).get('river'))}")
 finally:
     E.load_platform, E.load_mode = orig_lp, orig_lm

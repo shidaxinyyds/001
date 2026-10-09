@@ -96,11 +96,14 @@ KNOWN_STREAM_DEFECTS = {
     # A9 的直接现象：牌河一条没读到，却仍把三家听牌报成“高”（先验 0.5 当结论）。
     # 根因是下面那条 river_always_empty；修好它之后这条应能自动转绿并删除。
     "tenpai_band_without_evidence": ["高"],
-    # A9 源头：牌河检测跑完了（future 正常返回 tuple）但**一条弃牌都没检出**，
-    # 于是 `opponents_dingque` 之外没有任何一家有牌河证据，三家 `tenpai_prob`
-    # 全落在同一个先验 0.5、`top_held` 全是 0.42 —— 面板上就是“三家都高危听牌、
-    # 危险牌一模一样”。实测：同一帧连喂 6 次，四区计数始终 0（`probe_river_repeat.py`），
-    # 而两个门都是开的（`probe_river_gate.py`）。
+    # A9 源头（已两次改写，下面这版是实测出来的）：牌河后台检测**提交了但结果从未
+    # 被认领**：同一帧连喂 25 次，diag 上 river_submits=1、river_consumes=0，四区计数
+    # 始终 0（`localtest/probe_river_repeat.py`）。所以不是“扫了没扫到”，而是异步认领
+    # 这一环断了（认领块里 rf.result() 若抛异常会被外层 except 吞掉，与“从未 done”
+    # 在面板上长得一模一样）。
+    # 曾经写过的两个错归因，记在这里免得下一个人重踩：
+    #   × 「future 正常返回 tuple，但区内检不出」——实际 consumes=0，根本没走到那步；
+    #   × 「主检测器没有 classify_tile 就是根因」——它是必要条件（接线已修），不充分。
     "river_always_empty:zj_play_03.jpg": {"bottom": 0, "top": 0, "left": 0, "right": 0},
     # A8：牌河为空、且屏上处于换三张阶段（手牌没有任何「缺」角标），
     # 面板已经报出“seat 1 定缺了”。缺门证据不存在，这个值是凭空的。

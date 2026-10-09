@@ -1855,6 +1855,16 @@ class Engine:
         # 检测攒下的帧数。None / 大值 → 下一帧强制检测（开局/新局/牌桌切换后先扫一次）。
         self._river_scan_sig: Optional[np.ndarray] = None
         self._river_scan_wait: int = RIVER_SCAN_MAX_INTERVAL
+        # 本帧提交给后台牌河检测的是哪个检测器（只供错误归因，不参与任何判定）
+        self._river_det = None
+        # 牌河最近一次的接线错误（None = 正常）。「空牌河」可以是牌局事实，也可以
+        # 是接线断了，两者必须在 diag 上分得开。
+        self._river_error: Optional[str] = None
+        # 提交/认领各计一次。没这两个数，「river_zones 全 0」就分不清三种故障：
+        # 根本没提交（门一直关着）、提交了但从未被认领（异步链断）、认领了但确实
+        # 为空（牌局事实）。三者修法完全不同。
+        self._river_submits: int = 0
+        self._river_consumes: int = 0
         self._river_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self._river_future: Optional[concurrent.futures.Future] = None
         # 副露独立账本（34 型）：碰/杠是全场可见信，但不入牌河，避免污染弃牌计数；
@@ -4860,6 +4870,18 @@ class Engine:
             if rf is not None and rf.done():
                 try:
                     bg_river_entries, bg_meld_entries = rf.result()
+                    self._river_consumes = getattr(self, "_river_consumes", 0) + 1
+                    # 「牌河为空」必须能区分两件事：场上真没人打牌，与分类链断了。
+                    # 后者曾因为 `hasattr` 兑底而静默了几百帧，不记就只会留下
+                    # “记牌器怎么是空的”这一谜题。判据用提交时存下的那个检测器。
+                    _rdet = getattr(self, "_river_det", None)
+                    if not bg_river_entries and not hasattr(_rdet, "classify_tile"):
+                        self._river_error = (
+                            "牌河拿到的检测器没有分类接口（"
+                            f"{type(_rdet).__name__ if _rdet is not None else 'None'}），"
+                            "牌河不可能有读数")
+                    else:
+                        self._river_error = None
                     if bg_river_entries:
                         bg_zone_counts: Dict[str, int] = {"bottom": 0, "top": 0, "left": 0, "right": 0}
                         bg_discards = []
@@ -4942,12 +4964,26 @@ class Engine:
                 # 异步派发全图牌河与副露检测至独立后台线程池，主线程零等待立即返回（单帧耗时从 1~3s 压减至 0ms）
                 cur_rf = getattr(self, "_river_future", None)
                 if (cur_rf is None or cur_rf.done()) and hand_row and (len(hand_row) >= 4 or len(hand_mpsz) >= 4):
+                    # 提交前先把要用的检测器定下来：用**本帧已解析好的手牌通道检测器**，
+                    # 不用 `self._detector`。真机上主检测器是 YOLODetector，它没有
+                    # `classify_tile`，而牌河/副露路径自己做分区轮廓扫描、唯一需要的就是
+                    # 分类；`_classify_tile_fast` 外层那句 hasattr 兑底于是把每张静默成
+                    # (None, 0.0) → 牌河永远为空 → 记牌器空白、三家听牌概率全等于先验 0.5。
+                    # 实测（`localtest/probe_river_gates.py`）：同一帧四区 8 个候选，主检测器
+                    # 打分全 0.0，网格检测器立刻给出 0.178~0.463。
+                    # 为什么不在这里现取一个新检测器：`get_hand_detector()` 是懒构造，
+                    # 在评测/守卫里会顺手把真实网格检测器建出来并顶掉调用方自己的假
+                    # 检测器（实测会把手牌通道从 Fake 切到真的，账本、牌墙、双策略全变）。
+                    river_det = hand_detector
+                    self._river_det = river_det
                     try:
                         img_bg = full_for_preview.copy()
                         h_row_bg = list(hand_row) if hand_row else None
                         self._river_future = self._river_executor.submit(
-                            self._run_bg_river_and_melds, img_bg, self._detector, self.mode, h_row_bg, self.platform
+                            self._run_bg_river_and_melds, img_bg, river_det,
+                            self.mode, h_row_bg, self.platform
                         )
+                        self._river_submits = getattr(self, "_river_submits", 0) + 1
                     except Exception:
                         pass
 
@@ -6255,6 +6291,12 @@ class Engine:
                         getattr(self, "_orient_reprobe_count", 0)),
                     # 四区牌河归属计数（"谁打的"展示）。
                     "river_zones": dict(getattr(self, "_river_zone_counts", {})),
+                    # 牌河的接线错误（None = 本轮没出错）。空表与断链必须可分：前者是
+                    # 牌局事实，后者是接线问题（传错检测器时它静默了几百帧）。
+                    "river_error": getattr(self, "_river_error", None),
+                    # 提交/认领计数：把「没提交」「没认领」「认领了但确实为空」分开。
+                    "river_submits": int(getattr(self, "_river_submits", 0)),
+                    "river_consumes": int(getattr(self, "_river_consumes", 0)),
                     # 分阶段耗时（ms）：decode/detect/river/advice 各自 avg/max，
                     # 悬浮窗诊断行直接可见当前瓶颈段（跳帧帧不重跑，值不变）。
                     "perf": self._perf_snapshot(),

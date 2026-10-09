@@ -136,15 +136,22 @@ def first_frame_valid_tiles(img, platform, mode):
     只取第一次 `_score_face`：那才是「第一帧」的真实状态。抓多次会把 reload 之后
     的正确状态混进来，等于替被守卫的 bug 打掩护。
 
-    v1.7.5 之后这里不再需要「旁路纠正」之类的实验条件：引擎不替用户换玩法，
-    声明什么牌集就按什么牌集识别，② 要的窄闸门对照直接走生产链路就能跑出来。
+    只认「没传 avail」的那批调用：牌河/副露现在也用同一个网格检测器分类，而
+    `detect_river_discards` 会显式传 `avail=available_set(mode)`；手牌通道不传 avail
+    （用 `_mode_tiles`）。不按这个区分，`seen[0]` 会随机变成牌河那一次，① 与它的
+    变异体就都在测一个不确定的东西。
+
+    为什么不用「主线程」过滤：试过，错得更隐蔽——检测器内部本身就是多线程打分
+    （`PARALLEL_WORKERS`），按线程筛会把**所有**手牌调用也剔掉，`seen` 直接空掉。
+    这是修测试的口径，不是放宽断言。
     """
     seen = []
     orig = TencentGridDetector._score_face
 
     def spy(self, face, avail=None, styles=None):
         out = orig(self, face, avail, styles)
-        seen.append(set(out[2]))
+        if avail is None:
+            seen.append(set(out[2]))
         return out
 
     orig_lp, orig_lm = E.load_platform, E.load_mode
