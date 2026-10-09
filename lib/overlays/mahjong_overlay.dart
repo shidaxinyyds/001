@@ -2599,7 +2599,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final int wallOnly = (chance?['wall_only'] as num?)?.toInt() ?? 0;
     final int chanceTotal = (chance?['total_unseen'] as num?)?.toInt() ?? totalRemaining;
     final bool oppKnown = chance?['opp_known'] == true;
-    final String chanceText = (chance?['text'] ?? '') as String;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 5),
@@ -2866,7 +2865,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final bool calibrated = (evGauge['calibrated'] as bool?) ?? false;
     final String band = (evGauge['band'] as String?) ?? _equityBandWord(level);
     final String basis = (evGauge['equity_basis'] as String?) ?? 'analytical';
-    final String note = (evGauge['note'] as String?) ?? '';
     final String evUnit = (evGauge['net_ev_unit'] as String?) ?? '分';
     final double? rawEquity =
         winEquity ?? (evGauge['win_equity'] as num?)?.toDouble();

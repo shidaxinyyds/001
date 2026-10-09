@@ -340,7 +340,9 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
                             color: AppTokens.ink,
                             letterSpacing: 0.8),
                       ),
-                      const SizedBox(height: AppTokens.s6),
+                      // 间距阶梯（AppTokens）只给 4/8/12/14/16/20/24，没有 6/10 这两档：
+                      // 这两处贴最近档，别再写 s6/s10（CI 的 flutter analyze 会当场红）。
+                      const SizedBox(height: AppTokens.s8),
                       Text(
                         prompt,
                         textAlign: TextAlign.center,
@@ -396,7 +398,7 @@ class _LicenseGateState extends State<LicenseGate> with WidgetsBindingObserver {
                             color: AppTokens.ink),
                       ),
                       if (st?.message != null && !isExpired && !isRefused) ...[
-                        const SizedBox(height: AppTokens.s10),
+                        const SizedBox(height: AppTokens.s12),
                         Text(
                           st!.message!,
                           style: const TextStyle(
