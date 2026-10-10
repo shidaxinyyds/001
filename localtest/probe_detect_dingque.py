@@ -14,6 +14,18 @@
   A) 只在 is_dingque_phase 为真时才采纳 detect_dingque 的结果（用阶段做上下文门）
   B) 读出后按"一局只发生一次"锁存，并给锁存一个可靠的释放条件
 
+⚠ 方案 A 已试过并被数据证伪（本轮），不要再走：
+  实现后同时打破两样东西：
+    · `test_dingque_stability_guard` 的「新一局不得继承」——它的"新局"场景并不走
+      _reset_game_state，锁存会泄漏；
+    · **`eval_base` 37 帧底座直接红** —— 因为**局中的缺门读数本来就是合法的**：
+      玩家选定后，自己手牌上会带「缺」角标，detect_dingque 读到的是那个角标，
+      不是方位盘。"只在定缺页采纳"会把合法读数一并砍掉。
+  所以真正的残留问题不是定缺读数本身，而是**开局等待页/结算页被当成了局中**
+  （nongame_lobby_01 读出筒、两张结算页读出万 —— 那些屏上根本没有角标）。
+  那就是场景/牌桌识别的问题（`_is_mahjong_table` 对三张非牌局帧全返回 True），
+  修它需要的是"非牌局屏"判据 —— 现在夹具里已经有 3 张可用作正反例。
+
 用法: py -3.10 -X utf8 localtest/probe_detect_dingque.py
 """
 from __future__ import annotations
