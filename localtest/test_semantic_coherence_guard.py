@@ -217,11 +217,31 @@ class TestSemanticCoherence(unittest.TestCase):
         if shown > raw:
             self.assertTrue(d.get("hand_carried_over"),
                             f"本帧读到 {raw} 张却下发 {shown} 张，沿用标记为假")
-            self.assertTrue(str(d.get("message") or "").startswith("沿用"),
-                            f"沿用旧读数时 message 不再明说沿用：{d.get('message')!r}")
+            # 「包含」而不是「开头」：message 现在可以同时并列多件本帧事实
+            #（暗层压住 / 张数存疑 / 玩法可能选错 / 沿用），拼在一起才是完整真相。
+            self.assertIn("沿用", str(d.get("message") or ""),
+                          f"沿用旧读数时 message 不再明说沿用：{d.get('message')!r}")
         else:
             self.assertFalse(d.get("hand_carried_over"),
                              "本帧读数已足够，却报成沿用（标记不能反向说谎）")
+
+
+    def test_suspect_facts_reach_the_rendered_message(self):
+        """D27/D30 上屏：面板本来就在渲染 `message`，所以上述两件事实必须出现在里面。
+
+        只交 payload 字段而不上屏等于没修：用户看不到，下一轮又会被当成“ mysterious
+        的旧行为”。同时反向往返：没有任何存疑时，不得凭空把提醒塞进 message。
+        """
+        d = payload_for(_find("queshen_play_03.jpg"), "gd_queshen", "sc_hz")
+        msg = str(d.get("message") or "")
+        if d.get("mode_suspect"):
+            self.assertIn("玩法", msg,
+                          f"mode_suspect 有值却没上屏：{msg!r}")
+        if d.get("hand_count_suspect"):
+            self.assertIn("不是合法手牌数", msg,
+                          f"张数存疑却没上屏：{msg!r}")
+        if not d.get("mode_suspect") and not d.get("hand_count_suspect"):
+            self.assertNotIn("玩法可能选错", msg, "没有证据却报了“玩法可能选错”")
 
 
 class TestMutationControls(unittest.TestCase):

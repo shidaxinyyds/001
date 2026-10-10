@@ -6625,6 +6625,17 @@ class Engine:
                 "text": (f"屏上有 {'、'.join(str(t) for t in _conf[:4])}，但当前玩法不含这些牌："
                          f"玩法可能选错（现用：{result.get('mode_name')}）"),
             }) if _conf else None
+            # D27/D30 上屏：面板本来就在渲染 `message`，把这两件事实折进去就不必
+            # 新增常驻控件（项目约束：悬浮窗不得加常驻控件），也不改任何布局。
+            _extra = []
+            if result["hand_count_suspect"]:
+                _extra.append(f"本帧读到 {_n} 张，不是合法手牌数（应为 13n+1 或 13n+2）："
+                              "可能漏读/多读或副露未识")
+            if result["mode_suspect"]:
+                _extra.append(result["mode_suspect"]["text"])
+            if _extra:
+                _base = (result.get("message") or "").strip()
+                result["message"] = " · ".join(([ _base ] if _base else []) + _extra)
             # D26 排序只供展示，原始屏上顺序仍以 `hand` 交出，不丢信息。
             result["hand_sorted"] = _sort_hand_mpsz(result.get("hand") or "")
 
@@ -6638,9 +6649,11 @@ class Engine:
             _shown_n = int(result.get("count") or 0)
             if _shown_n > _raw_n:
                 result["hand_carried_over"] = True
-                if not (result.get("message") or "").startswith("沿用"):
-                    result["message"] = (f"沿用上一帧手牌（本帧读到 {_raw_n} 张，"
-                                         f"仍展示 {_shown_n} 张）")
+                _note = (f"沿用上一帧手牌（本帧读到 {_raw_n} 张，仍展示 {_shown_n} 张）")
+                _msg = (result.get("message") or "").strip()
+                # 追加而不是覆盖：上面刚折进来的「张数存疑 / 玩法可能选错」也是本帧
+                # 事实，覆盖就义把它们抹了（那就是“后一个门赢了前一个门”的假自洽）。
+                result["message"] = (_msg + " · " + _note) if _msg and _note not in _msg else _note
 
             # 牌河 YOLO 影子对比（默认关；只写 diag/日志，不影响任何显示与建议；
             # 必须在 json.dumps 之前，diag 结果才能随帧送到接料/日志）
