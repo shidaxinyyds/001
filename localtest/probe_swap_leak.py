@@ -30,14 +30,21 @@ if hasattr(sys.stdout, "reconfigure"):
 
 import engine.engine as E  # noqa: E402
 
-FRAME = os.path.join(HERE, "shots_multi", "tuyou_swap_01.jpg")
+# 可指帧：两张用户截图都出现过“局中却显示换三张博弈”，都要能单独复验。
+_NAME = sys.argv[1] if len(sys.argv) > 1 else "tuyou_swap_01.jpg"
+_PLAT = sys.argv[2] if len(sys.argv) > 2 else "tuyou"
+FRAME = os.path.join(HERE, "shots_multi", _NAME)
+if not os.path.exists(FRAME):
+    FRAME = os.path.join(HERE, "shots_batch3", _NAME)
+if not os.path.exists(FRAME):
+    FRAME = os.path.join(HERE, "shots_report", _NAME)
 
 img = cv2.imread(FRAME)
 if img is None:
     sys.exit(f"读不到夹具 {FRAME}——本判定不成立，别把它当引擎行为")
 
 orig_lp, orig_lm = E.load_platform, E.load_mode
-E.load_platform = lambda *a, **k: "tuyou"
+E.load_platform = lambda *a, **k: _PLAT
 E.load_mode = lambda *a, **k: "sc_hz"
 try:
     eng = E.Engine()
