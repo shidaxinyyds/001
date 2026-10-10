@@ -6869,6 +6869,19 @@ class Engine:
                 # 事实，覆盖就义把它们抹了（那就是“后一个门赢了前一个门”的假自洽）。
                 result["message"] = (_msg + " · " + _note) if _msg and _note not in _msg else _note
 
+            # A8 剩下那一半：对手断门要**连续两帧同一读数**才下发。
+            # 上一轮用 `is_swap_phase` 做门，单张换三张帧确实拦住了，但连帧序列里
+            # 阶段首帧仍漏：阶段本身需要连续帧确认才成立，门控却要求“阶段已成立”，
+            # 两者拼在一起就是「阶段切换的第一帧永远拦不住」。
+            # 定缺是一局至多变一次的事实，拿“跳帧一致”做门槛不依赖任何阶段判定，
+            # 因此阶段首帧也能拦住。与牌河账本的「两帧确认」同一口径，不另造机制。
+            _cur_dq = tuple(sorted(int(s) for s in (result.get("opponents_dingque") or [])
+                                   if str(s).lstrip("-").isdigit()))
+            _prev_dq = getattr(self, "_opdq_pub_prev", None)
+            if _cur_dq and _cur_dq != _prev_dq:
+                result["opponents_dingque"] = []
+            self._opdq_pub_prev = _cur_dq
+
             # A2：依赖本家手牌的推算块，必须与面板上那张手牌**同一年龄**。
             # 旧行为：手牌沿用上一帧（本帧没读到），而 `hand_ranges`/`ting_chance`/
             # `ev_gauge` 这些每帧重算 —— 面板于是同时展示“旧手牌”与“根据这副手牌

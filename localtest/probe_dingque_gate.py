@@ -37,6 +37,9 @@ from modes import is_dingque_mode  # noqa: E402
 from platforms import set_platform_explicit  # noqa: E402
 
 CASES = [
+    ("zj_swap_03.jpg", "zj_sichuan"),
+    ("shushan_swap_01.jpg", "shushan"),
+    ("tuyou_swap_02.jpg", "tuyou"),
     ("shushan_dingque_03.jpg", "shushan"),
     ("zj_dingque_02.jpg", "zj_sichuan"),
     ("shushan_settle_01.jpg", "shushan"),
