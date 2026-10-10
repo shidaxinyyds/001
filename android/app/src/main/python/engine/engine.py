@@ -6794,6 +6794,23 @@ class Engine:
                 result["dingque_suit"] = None
                 result["opponents_dingque"] = []
                 result["dingque_phase"] = False
+            # A4/A6 收尾不变量：**一帧都没读到手牌时，不得声称处于任何「需要手持牌」
+            # 的阶段**。实测两张结算页被判成 status=swap（结算画面摊开的三组牌很像
+            # 「换三张」的三张候选），而换三张物理上必然手里有 13 张 —— count=0 与
+            # 这些阶段不可能同时成立。留着它会让面板在结算页上画一套换牌 UI。
+            # （逐帧数据见 `localtest/probe_nongame_features.py`）
+            if int(result.get("count") or 0) <= 0 and (
+                    result.get("swap_phase") or result.get("pick_phase")
+                    or result.get("dingque_phase")):
+                result["swap_phase"] = False
+                result["pick_phase"] = False
+                result["dingque_phase"] = False
+                result["status"] = ("waiting"
+                                    if not getattr(self, "_match_started", False)
+                                    else "no_tiles")
+                _msg0 = result.get("message")
+                _note0 = "未读到手牌 · 不判定阶段"
+                result["message"] = (_msg0 + " · " + _note0) if _msg0 else _note0
             _special = bool(result.get("swap_phase") or result.get("pick_phase")
                             or result.get("dingque_phase"))
             # D21 换牌/选牌/定缺阶段与无牌帧都不存在「摸」这个动作。
