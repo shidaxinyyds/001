@@ -94,8 +94,8 @@ class OpponentState:
         """
         # 1. 巡目自然成长曲线 (S型 Logistic)
         effective_turn = turn if turn is not None else (len(self.discards) or total_turn)
-        effective_turn = max(1, effective_turn)
-        # 巡目节点：第 6 巡约 20%，第 10 巡约 50%，第 14 巡约 80%
+        effective_turn = max(0, effective_turn)
+        # 巡目节点：第 0 巡约 6%，第 6 巡约 20%，第 10 巡约 50%，第 14 巡约 80%
         base_logit = 0.28 * (effective_turn - 10.0)
         p_base = 1.0 / (1.0 + math.exp(-base_logit))
 
@@ -103,15 +103,21 @@ class OpponentState:
         num_melds = len(self.melds) // 3
         meld_boost = num_melds * 0.20
 
-        # 3. 晚巡弃牌特征：后半程连续出中心生张（4/5/6），表明已成型听牌
+        # 3. 弃牌特征加成：出中心张（4/5/6）表明手牌搭子已趋饱满，晚巡加成更高
         late_danger_discards = 0
+        early_mid_discards = 0
         if len(self.discards) >= 6:
             for d in self.discards[-3:]:
                 if tile_number(d) in (4, 5, 6):
                     late_danger_discards += 1
-        discard_boost = late_danger_discards * 0.08
+        elif self.discards:
+            for d in self.discards:
+                if tile_number(d) in (3, 4, 5, 6, 7):
+                    early_mid_discards += 1
+        discard_boost = late_danger_discards * 0.08 + min(0.04, early_mid_discards * 0.015)
+        dq_boost = 0.015 if self.dingque_suit is not None else 0.0
 
-        prob = p_base + meld_boost + discard_boost
+        prob = p_base + meld_boost + discard_boost + dq_boost
         return max(0.05, min(0.95, prob))
 
 

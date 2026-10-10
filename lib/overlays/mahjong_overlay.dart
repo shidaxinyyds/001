@@ -254,7 +254,8 @@ class HandChipRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final tiles = _mpszToTiles(hand);
+    final tiles = _mpszToTiles(hand)
+      ..sort((a, b) => _tileSortKey(a).compareTo(_tileSortKey(b)));
     if (tiles.isEmpty) {
       return const SizedBox.shrink();
     }
@@ -276,6 +277,15 @@ class HandChipRow extends StatelessWidget {
   }
 }
 
+int _tileSortKey(String t) {
+  if (t.length < 2) return 999;
+  final int rank = int.tryParse(t.substring(0, t.length - 1)) ?? 9;
+  final String suit = t.substring(t.length - 1);
+  final int sOrder = suit == 'm'
+      ? 0
+      : (suit == 'p' ? 100 : (suit == 's' ? 200 : 300));
+  return sOrder + rank;
+}
 
 /// 把 "1m2m3p4p5z" 拆成 ["1m","2m","3p","4p","5z"]。
 List<String> _mpszToTiles(String mpsz) {
@@ -543,9 +553,9 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     _requestResetMatch();
   }
 
-  // 默认小巧面板：宽度 220dp，高度 210dp
+  // 默认小巧面板：宽度 220dp，高度 260dp（保证建议卡与手牌区同屏可见）
   double panelW = 220;
-  double panelH = 210;
+  double panelH = 260;
 
   // 展开态独立垂直滚动控制器
   final ScrollController _panelScrollController = ScrollController();
@@ -1068,8 +1078,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
     final Color c =
         _kFlashColor[ev?['kind'] as String? ?? ''] ?? const Color(0xFF4DB6AC);
     return Positioned(
-      left: 8,
-      bottom: 20,
+      top: 46,
+      right: 8,
       child: IgnorePointer(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 140),
@@ -2359,9 +2369,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       return const SizedBox.shrink();
     }
     // 合法麻将立牌张数：1/2 (碰4次), 4/5 (碰3次), 7/8 (碰2次), 10/11 (碰1次), 13/14 (门清)
-    // 仅在引擎确认为 partial 异常残缺（如 3, 6, 9, 12 张且持续未恢复）时才提示遮挡，杜绝摸打瞬态闪烁误报
+    // 当张数不合法（如 3, 6, 9, 12 张）或引擎标记 hand_count_suspect 时，提示遮挡/漏识并禁止标摸牌
     final bool isLegalStanding = const {1, 2, 4, 5, 7, 8, 10, 11, 13, 14}.contains(count);
-    final bool partial = (status == 'partial') && count > 0 && !isLegalStanding;
+    final bool countSuspect = result?['hand_count_suspect'] == true || !isLegalStanding;
+    final bool partial = count > 0 && (status == 'partial' || countSuspect);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
       child: Column(
@@ -2397,7 +2408,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
           HandChipRow(
             hand: hand,
             chipSize: 20,
-            drawingTile: result?['is_drawing'] == true
+            drawingTile: (result?['is_drawing'] == true && !countSuspect)
                 ? (result?['drawing_tile'] as String?)
                 : null,
             defenseMap: result?['defense_map'] as Map<String, dynamic>?,
@@ -3758,8 +3769,6 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         tacticalWidget,
-        if (evGaugeWidget != null) evGaugeWidget,
-        if (handRangesWidget != null) handRangesWidget,
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 7.5, vertical: 5),
           decoration: BoxDecoration(
@@ -4116,6 +4125,10 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
             ],
           ),
         ),
+        if (evGaugeWidget != null || handRangesWidget != null)
+          const SizedBox(height: 3),
+        if (evGaugeWidget != null) evGaugeWidget,
+        if (handRangesWidget != null) handRangesWidget,
       ],
     );
   }
@@ -4382,7 +4395,8 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                                         letterSpacing: 0.3,
                                       ),
                                     ),
-                                    if (result?['is_drawing'] == true) ...[
+                                    if (result?['is_drawing'] == true &&
+                                        result?['hand_count_suspect'] != true) ...[
                                       const SizedBox(width: 6),
                                       Container(
                                         padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 0.5),
@@ -4394,6 +4408,25 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                                           '摸牌中',
                                           style: TextStyle(
                                             color: Colors.white,
+                                            fontSize: 7.5,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                    if (result?['hand_count_suspect'] == true) ...[
+                                      const SizedBox(width: 6),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0.5),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFFE65100).withAlpha(60),
+                                          borderRadius: BorderRadius.circular(2.5),
+                                          border: Border.all(color: const Color(0xFFFFB74D), width: 0.5),
+                                        ),
+                                        child: const Text(
+                                          '张数存疑·可能漏识',
+                                          style: TextStyle(
+                                            color: Color(0xFFFFD54F),
                                             fontSize: 7.5,
                                             fontWeight: FontWeight.bold,
                                           ),

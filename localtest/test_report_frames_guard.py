@@ -89,38 +89,15 @@ TRUTH = [
 # 已知缺陷台账（双向棘轮）。key = 文件，value = 当前引擎的**错误**输出。
 # 每一条都写着「错在哪、为什么还没修」——修好后必须删条目，否则本守卫报红。
 KNOWN_HAND_DEFECTS = {
-    # 检测层漏框（不是分类）：第 14 张「發」压根没进手牌行。
-    # 真身已量到：不是 `drawn_box` 那条 `sc_d >= 0.48`（那条已能救），而是
-    # `detect_hand_strip` 里的**张数候选打分**：`_try_counts` 比 13/14 哪个假设均分高，
-    # 而第 14 张在川麻门内只有 0.37 → 把 14 档的均分拉下去 → 选了 13 档。
-    # 实测：同一帧全牌玩法 14 框、川麻玩法 13 框（`probe_geometry_purity.py`）。
-    # 要动的是全仓最承重、守卫最密的那个函数，不能顺手改；改完必须逐格对拍。
-    "queshen_play_03.jpg": ["1p", "1z", "3s", "4z", "4z", "5s", "6p", "6s",
-                            "8p", "9p", "9p", "9p", "9s"],
     # 全屏弹窗（“购买麻卡解锁记牌器”）压暗手牌带 → 一个框都没检出。
     # 本轮修的是“不说谎”：这一帧现在报「画面被弹窗或暗层压住，本帧读不到手牌」
     # 而不是「等待牌局开始」（见下面的 test_dim_frame_says_why_it_cannot_read）。
-    # 真把暗层下的牌读出来需要自适应归一化，那会动牌面掩膜本身，未做。
     "zj_popup_01.jpg": [],
 }
 KNOWN_PHASE_DEFECTS = {
-    # 屏上是换三张（「选择三张同花色手牌」+ 右侧圆形换牌按钮），引擎没认出来：
-    # 现有 `is_swap_phase` 只认腾讯那块低带金色扁圆盘，蜀山的按钮在右侧中部。
-    #
-    # 为什么本轮没直接加一条“跨平台几何通路”：拿“桌面中带里的白色近圆盘”试过，
-    # **被实测否证**（`localtest/sweep_swap_button.py`，67 帧）：同一形状在 10 帧
-    # 非换牌帧上照样出现（蜀山定缺帧 3 个、蜀山局中帧 3 个、JJ 局中帧 1 个，
-    # 位置与真那个换牌按钮几乎重叠，如 shushan_play_03 的 (0.691,0.641) vs
-    # shushan_swap_02 的 (0.672,0.638)）。拿它上屏就是把“不在换牌却显示换牌”
-    # 亲手造出来——那正是用户报的第 ② 条。剩下的可用差异只有按钮里那两个字，
-    # 需要 OCR 或模板，不是调阈值能得到的。
-    "shushan_swap_01.jpg": "play",
-    # 同上：同一局的另一帧换三张（带圆形换牌按钮），一样漏判。
-    "shushan_swap_02.jpg": "play",
     # 全屏弹窗（“购买麻卡解锁记牌器”）+ 结算画面：引擎读不出手牌。
     # 本轮修的是“不说谎”：阶段仍报 waiting，但消息从「等待牌局开始」改成
     # 「画面被弹窗或暗层压住，本帧读不到手牌」（见 ⑤ 与 engine 的 `HAND_BAND_DIM_V`）。
-    # 把牌真读出来需要自适应归一化（会动牌面掩膜本身），未做。
     "zj_popup_01.jpg": "waiting",
 }
 # 上一轮台账里的「蜀山定缺圆盘召回」已删：那是一条**假缺陷**——我把一帧换三张误标成
@@ -255,10 +232,10 @@ def _phase_of(d):
     st = d.get("status")
     if st == "waiting":
         return "waiting"
-    ph = (d.get("match_phase") or {}).get("key") or ""
+    ph = (d.get("match_phase") or {}).get("phase") or (d.get("match_phase") or {}).get("key") or ""
     if st == "dingque" or "dingque" in ph:
         return "dingque"
-    if "swap" in ph:
+    if st == "swap" or "swap" in ph:
         return "swap"
     return "play"
 

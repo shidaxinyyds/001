@@ -493,6 +493,41 @@ def _find_phase_gold_buttons(image_bgr: np.ndarray) -> List[Dict[str, float]]:
         if not (_PHASE_BTN_Y[0] <= cy <= _PHASE_BTN_Y[1]):
             continue
         out.append({"x": cx, "y": cy, "ar": ar, "area": area * inv * inv})
+    if not out and ih >= 100 and iw >= 100:
+        # 1) 蜀山换三张：左右两家对向 3 张绿背牌堆 + (本家已摆 3 张绿背牌堆 或 金色提示横幅 + 银色圆按钮)
+        sub_l = cv2.cvtColor(image_bgr[int(ih * 0.31):int(ih * 0.49), int(iw * 0.30):int(iw * 0.38)], cv2.COLOR_BGR2HSV)
+        sub_r = cv2.cvtColor(image_bgr[int(ih * 0.31):int(ih * 0.49), int(iw * 0.62):int(iw * 0.70)], cv2.COLOR_BGR2HSV)
+        gl = float(np.mean((sub_l[:, :, 0] >= 55) & (sub_l[:, :, 0] <= 78) & (sub_l[:, :, 1] >= 75) & (sub_l[:, :, 2] >= 115)))
+        gr = float(np.mean((sub_r[:, :, 0] >= 55) & (sub_r[:, :, 0] <= 78) & (sub_r[:, :, 1] >= 75) & (sub_r[:, :, 2] >= 115)))
+        if gl >= 0.25 and gr >= 0.25:
+            sub_b = cv2.cvtColor(image_bgr[int(ih * 0.56):int(ih * 0.68), int(iw * 0.44):int(iw * 0.56)], cv2.COLOR_BGR2HSV)
+            gb = float(np.mean((sub_b[:, :, 0] >= 55) & (sub_b[:, :, 0] <= 78) & (sub_b[:, :, 1] >= 75) & (sub_b[:, :, 2] >= 115)))
+            if gb >= 0.35:
+                out.append({"x": 0.50, "y": 0.62, "ar": 2.5, "area": 1000.0})
+            else:
+                sub_txt = cv2.cvtColor(image_bgr[int(ih * 0.58):int(ih * 0.69), int(iw * 0.35):int(iw * 0.60)], cv2.COLOR_BGR2HSV)
+                sub_cir = cv2.cvtColor(image_bgr[int(ih * 0.56):int(ih * 0.72), int(iw * 0.62):int(iw * 0.72)], cv2.COLOR_BGR2HSV)
+                g_txt = float(np.mean((sub_txt[:, :, 0] >= 12) & (sub_txt[:, :, 0] <= 35) & (sub_txt[:, :, 1] >= 80) & (sub_txt[:, :, 2] >= 160)))
+                s_cir = float(np.mean((sub_cir[:, :, 1] <= 45) & (sub_cir[:, :, 2] >= 150)))
+                if g_txt >= 0.04 and s_cir >= 0.25:
+                    out.append({"x": 0.67, "y": 0.64, "ar": 1.0, "area": 1000.0})
+        # 2) 指尖换三张：居中银白色「同意(N)」扁矩按钮 + 上方半透明深色提示条
+        if not out:
+            sub_btn = cv2.cvtColor(image_bgr[int(ih * 0.58):int(ih * 0.70), int(iw * 0.41):int(iw * 0.59)], cv2.COLOR_BGR2HSV)
+            s_btn = ((sub_btn[:, :, 1] <= 35) & (sub_btn[:, :, 2] >= 170)).astype(np.uint8) * 255
+            if float(np.mean(s_btn > 0)) >= 0.50:
+                n_s, _ls, st_s, _cs = cv2.connectedComponentsWithStats(s_btn, 8)
+                if n_s > 1:
+                    idx_s = int(np.argmax(st_s[1:, cv2.CC_STAT_AREA])) + 1
+                    bw_s = float(st_s[idx_s, cv2.CC_STAT_WIDTH])
+                    bh_s = float(st_s[idx_s, cv2.CC_STAT_HEIGHT])
+                    area_s = float(st_s[idx_s, cv2.CC_STAT_AREA])
+                    if bw_s > 0 and bh_s > 0 and 2.5 <= bw_s / bh_s <= 4.5 and area_s / (bw_s * bh_s) >= 0.75:
+                        sub_hdr = cv2.cvtColor(image_bgr[int(ih * 0.48):int(ih * 0.57), int(iw * 0.36):int(iw * 0.64)], cv2.COLOR_BGR2HSV)
+                        v_med = float(np.median(sub_hdr[:, :, 2]))
+                        txt_hi = float(np.mean((sub_hdr[:, :, 1] <= 45) & (sub_hdr[:, :, 2] >= 170)))
+                        if 40.0 <= v_med <= 115.0 and 0.05 <= txt_hi <= 0.35:
+                            out.append({"x": 0.50, "y": 0.64, "ar": bw_s / bh_s, "area": area_s})
     return out
 
 
@@ -1685,6 +1720,16 @@ class TencentGridDetector(Detector):
                     if len(valid_cols) >= 20:
                         refined_x = x + int(valid_cols[0])
                         refined_bw = int(valid_cols[-1] - valid_cols[0] + 1)
+                        # 单张摸牌右侧紧挨矮副露（如碰牌面高仅≈0.48*bh）时，低阈值会把副露列并进摸牌框，
+                        # 撑过 1.4*std_w 后触发整行错误合并（实测 zj_play_04）。对疑似「单张+矮边」做半高二段修剪。
+                        std_w_est = bh / 1.35 if bh >= 30 else 50.0
+                        if not wide_block and std_w_est * 1.35 < refined_bw < std_w_est * 2.0:
+                            vc_hi = np.where(col_counts >= max(thresh, int(bh * 0.50)))[0]
+                            if len(vc_hi) >= 20:
+                                rx_hi = x + int(vc_hi[0])
+                                rbw_hi = int(vc_hi[-1] - vc_hi[0] + 1)
+                                if std_w_est * 0.75 <= rbw_hi <= std_w_est * 1.25:
+                                    refined_x, refined_bw = rx_hi, rbw_hi
                         win_boxes.append((refined_x, y + win_y_min, refined_bw, bh))
                     else:
                         win_boxes.append((x, y + win_y_min, bw, bh))
@@ -1903,7 +1948,12 @@ class TencentGridDetector(Detector):
             db_top = max(0, db_bot - expected_h)
             col_strip = image_bgr[db_top:db_bot, dbx:dbx + dbw]
             lbl_d, sc_d = self.classify_tile(col_strip)
-            if sc_d >= 0.48:
+            keep_drawn = sc_d >= 0.48
+            if not keep_drawn and self._mode_tiles is not None and len(self._mode_tiles) < 34:
+                _lbl_all, _sc_all = self.classify_tile(col_strip, avail=set(range(34)))
+                if _sc_all >= 0.78:
+                    keep_drawn = True
+            if keep_drawn:
                 rect_d: Rect = (dbx, db_top, dbw, db_bot - db_top)
                 all_dets.append((rect_d, lbl_d, sc_d))
                 self.last_drawn_tile = lbl_d

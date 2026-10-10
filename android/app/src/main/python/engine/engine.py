@@ -974,7 +974,14 @@ def _build_tactical_perception(
 
     if is_turn:
         # 我方摸牌轮 / 待打决断
-        if shanten == 0:
+        if bool(top_adv.get("is_dingque")):
+            phase_label = "摸牌决断 · 清缺优先"
+            tactical_badge = "必打定缺"
+            if best_cn:
+                tactical_intent = f"手牌尚有缺门牌，建议先切【{best_cn}】清净缺门"
+            else:
+                tactical_intent = "手牌尚有缺门牌，必须优先打完定缺门"
+        elif shanten == 0:
             phase_label = "摸牌决断 · 听牌决胜"
             tactical_badge = "听牌决胜"
             ting_tiles = top_adv.get("ting_tiles", [])
@@ -1014,7 +1021,11 @@ def _build_tactical_perception(
                     tactical_intent = "牌型尚在布局，优先保留可控搭子、拆去孤张"
     else:
         # 候牌轮 / 手牌 13 张等摸或等碰
-        if shanten == 0:
+        if bool(top_adv.get("is_dingque")):
+            phase_label = "清缺待命 · 候牌中"
+            tactical_badge = "待清定缺"
+            tactical_intent = "手牌尚有缺门牌，摸牌后优先打完定缺门"
+        elif shanten == 0:
             phase_label = "听牌守株 · 待胡中"
             tactical_badge = "已下叫"
             t_list = []
@@ -1546,6 +1557,10 @@ RIVER_FALLBACK_MIN_SCORE = 0.30
 # 才能定（`localtest/probe_river_events.py`）；量不了之时就宁可保守，宁可少读
 # 不成把头像/按钮当成弃牌写进记账——账本只增不减，一张误读会留一整局。
 RIVER_EVENT_CONF = 0.45
+
+# 同型牌的实物上限（一整副麻将每种 4 张）。事件源单帧读数超过这个数就必然不是
+# 弃牌，直接丢弃该型本帧的读数（理由见 `_river_from_events` 里的物理剪枝）。
+TILE_MAX_COPIES = 4
 
 
 def _tile_content_key(tile_crop: np.ndarray):
@@ -2552,6 +2567,19 @@ class Engine:
                 if x1 <= cx <= x2 and y1 <= cy <= y2:
                     out.append((lbl, zn))
                     break
+        # 物理上限剪枝：一整副麻将同型只有 4 张，所以**单帧**牌河里同一型出现超过 4 次
+        # 必然不是弃牌（实测：途游一帧内 1p×15、2s×7、3p×6 —— 牌桌的圆形装饰与
+        # 轮盘被当成弃牌读了）。
+        # 不剪的后果不是“多报几张”：牌河账本跳帧只增不减，一次误读会整局留在账上，
+        # 直接把守恒硬门顶到「同型已见 5 张」→ 之后每一帧都判脏、永久不给建议。
+        # 宁可丢掉这一型本帧的读数（下一帧还能再读），也不能让账本被凭空撑爆。
+        _per = Counter(l for l, _z in out)
+        _bad = {l for l, n in _per.items() if n > TILE_MAX_COPIES}
+        if _bad:
+            self._river_event_rejected = sum(_per[l] for l in _bad)
+            out = [t for t in out if t[0] not in _bad]
+        else:
+            self._river_event_rejected = 0
         return out
 
     def _apply_river_entries(self, entries, avail):
@@ -2581,6 +2609,14 @@ class Engine:
             seat = zone_to_seat.get(zn)
             if seat and t34 < 27:
                 seat_discards[seat].append(t34)
+        prev_zones = getattr(self, "_river_zone_counts", None) or {}
+        prev_opp = getattr(self, "_opponent_discards", None) or {}
+        for zn in zone_counts:
+            if zone_counts[zn] < prev_zones.get(zn, 0):
+                zone_counts[zn] = prev_zones[zn]
+        for seat in (1, 2, 3):
+            if len(seat_discards[seat]) < len(prev_opp.get(seat, [])):
+                seat_discards[seat] = list(prev_opp[seat])
         self._river_zone_counts = zone_counts
         self._opponent_discards = seat_discards
         return discards
@@ -5305,10 +5341,15 @@ class Engine:
             # 取决于那个 7~10 秒的任务能否被认领 —— 那正是记牌器空白的根因。
             # 只在扫描本帧没给出条目时才用事件结果覆盖分区归属：扫描路给了东西，
             # 它就是更权威的轮廓读数，事件路不能反过来把它冲掉。
-            try:
-                _ev_entries = self._river_from_events(full_for_preview)
-            except Exception:
+            if getattr(self, "_swap_raw", False) or is_dq_phase or is_pick_phase:
                 _ev_entries = []
+                self._river_zone_counts = {"bottom": 0, "top": 0, "left": 0, "right": 0}
+                self._opponent_discards = {1: [], 2: [], 3: []}
+            else:
+                try:
+                    _ev_entries = self._river_from_events(full_for_preview)
+                except Exception:
+                    _ev_entries = []
             self._river_event_n = len(_ev_entries)
             if _ev_entries and not bg_seen:
                 bg_seen = self._apply_river_entries(_ev_entries, avail)
@@ -6583,6 +6624,9 @@ class Engine:
                     "river_error": getattr(self, "_river_error", None),
                     # 本帧事件源交出的条目数（0 且无扫描结果 = 牌河真的没读数）
                     "river_events": int(getattr(self, "_river_event_n", 0)),
+                    # 本帧被物理上限剪掉的事件源读数张数。必须可见：它等于“事件源
+                    # 把多少非弃牌当成了弃牌”，不报就只能等账本被撑爆才发现。
+                    "river_event_rejected": int(getattr(self, "_river_event_rejected", 0)),
                     # 清屏熔丝本帧的输入（curr_raw_n / raw_labels / pick / streak / warmup）。
                     # 「不打了还挂旧手牌」必须能一眼看出是数没攒够还是阶段拦住了它。
                     "fuse": dict(getattr(self, "_fuse_dbg", {}) or {}),
@@ -6703,6 +6747,9 @@ class Engine:
             _n = int(result.get("count") or 0)
             result["hand_count_suspect"] = bool(
                 _n > 0 and _n not in {1, 2, 4, 5, 7, 8, 10, 11, 13, 14})
+            if result["hand_count_suspect"]:
+                result["is_drawing"] = False
+                result["drawing_tile"] = None
             # D30 玩法选错的逐帧提醒：屏上读到了本玩法牌集里没有的牌，就是直接证据。
             _conf = list(result.get("hand_gate_conflict") or [])
             result["mode_suspect"] = ({
