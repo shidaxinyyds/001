@@ -4563,6 +4563,16 @@ class Engine:
 
             start_time = time.time()
 
+            # ===== 冷启动递减（必须在帧的最开头）=====
+            # 本来的递减在函数尾部，而 swap/pick 这些分支会在它之前就 return ——
+            # 实测（`localtest/diag_fuse_state.py`）：静止的非牌局画面被误锁进 pick
+            # 阶段后，`_warmup_left` 永远停在 1；而清屏熔丝的前置条件之一是
+            # `warmup <= 0`，于是「不打了还挂着旧手牌」（A6）结构性地永远不会被清。
+            # 它的本义就是「每处理一帧扣一次」，与这一帧最终走哪条出口无关，
+            # 所以放到帧首：任何提前 return 都再也错不过它。
+            if self._warmup_left > 0:
+                self._warmup_left -= 1
+
             # ===== 帧差去重 =====
             # 工作区域（与识别器同一份降采样逻辑）作为帧差基线。
             # 这里用纯 numpy 算一个粗签名，代价 ≈ 1ms，比一次完整识别快 100x。
@@ -6276,11 +6286,10 @@ class Engine:
                 self._orient_zerocount = 0
                 self._orient_reprobe_count = 0
 
-            # ===== 冷启动递减 =====
-            # 每完整识别一帧（命中"实际跑了 _detect_once"的路径），递减；扣到 0 后
-            # _MotionGuard / _FrameSkipper 才开始按正常策略工作。
-            if self._warmup_left > 0:
-                self._warmup_left -= 1
+            # ===== 冷启动递减：已上移到帧首（见 process 开头 `start_time` 之后）=====
+            # 放在这里会被 swap/pick 分支的提前 return 跳过，实测把 `_warmup_left`
+            # 永久卡在 1，连带让清屏熔丝永远不满足前置条件（`warmup <= 0`）。
+            # 别再把它搬回来。
 
             # 区分每行的角色（手牌行 vs 牌河行），供 UI 渲染与调试。
             rows_out = []
