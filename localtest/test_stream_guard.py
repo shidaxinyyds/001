@@ -238,6 +238,32 @@ class TestStaleAdviceClearedOnEmptyFrames(unittest.TestCase):
             self.assertTrue(d.get("hand_carried_over"),
                             f"广告页第 {i} 帧沿用了旧读数却没标 carried_over")
 
+    def test_derived_blocks_share_the_hand_age(self):
+        """A2：手牌是沿用时，依赖它的推算块不得继续刷新。
+
+        钉两件事：① 沿用帧必须标 `derived_carried_over`；② 它发出的推算值要与
+        上一次**真读到牌**那帧一致 —— 否则就是拿“本帧没看到的手牌”算出“实时结论”，
+        面板上就是“手牌块冻住、其他块照旧在更新”。
+        """
+        seq = ["zj_play_03.jpg", "zj_play_03.jpg", "ad_screen_01.jpg",
+               "ad_screen_01.jpg", "ad_screen_01.jpg"]
+        payloads = feed(seq)
+        live = payloads[1]
+        self.assertFalse(live.get("hand_carried_over"),
+                         "前提不成立：第二帧牌局帧应是本帧真读到的")
+        self.assertTrue(live.get("hand_ranges"),
+                        "前提不成立：真读帧没有对手推算块，本用例无从判定")
+        checked = 0
+        for i, d in enumerate(payloads[2:], start=3):
+            if not d.get("hand_carried_over"):
+                continue
+            checked += 1
+            self.assertTrue(d.get("derived_carried_over"),
+                            f"第 {i} 帧沿用了手牌却把推算块当实时值下发（A2 复发）")
+            self.assertEqual(live.get("hand_ranges"), d.get("hand_ranges"),
+                             f"第 {i} 帧手牌是旧的、对手推算却变了（两块年龄不一致）")
+        self.assertGreater(checked, 0, "没有任何沿用帧：本用例已空转")
+
 
 if __name__ == "__main__":
     unittest.main()

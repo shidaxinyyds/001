@@ -6869,6 +6869,26 @@ class Engine:
                 # 事实，覆盖就义把它们抹了（那就是“后一个门赢了前一个门”的假自洽）。
                 result["message"] = (_msg + " · " + _note) if _msg and _note not in _msg else _note
 
+            # A2：依赖本家手牌的推算块，必须与面板上那张手牌**同一年龄**。
+            # 旧行为：手牌沿用上一帧（本帧没读到），而 `hand_ranges`/`ting_chance`/
+            # `ev_gauge` 这些每帧重算 —— 面板于是同时展示“旧手牌”与“根据这副手牌
+            # 算出的新结论”。用户看到的就是“手牌块冻住、其他块照旧在更新”。
+            # 更严地说：那些结论是从一副我们这一帧根本没看到的牌算出来的，
+            # 不该以“实时”的名义展示。沿用期间就发上一次真读到那帧的同一批值。
+            _derived_keys = ("hand_ranges", "ting_chance", "ev_gauge",
+                             "win_equity", "danger_flow", "mood")
+            if result.get("hand_carried_over"):
+                _live = getattr(self, "_live_derived", None)
+                if _live:
+                    for _k in _derived_keys:
+                        if _k in _live:
+                            result[_k] = _live[_k]
+                    result["derived_carried_over"] = True
+            else:
+                # 只缓存“本帧真读到牌”的那一批，沿用帧不得反过来污染它。
+                self._live_derived = {_k: result.get(_k) for _k in _derived_keys}
+                result["derived_carried_over"] = False
+
             # 牌河 YOLO 影子对比（默认关；只写 diag/日志，不影响任何显示与建议；
             # 必须在 json.dumps 之前，diag 结果才能随帧送到接料/日志）
             self._maybe_yolo_shadow(full_for_preview, result)
