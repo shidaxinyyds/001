@@ -3489,6 +3489,21 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         ? _buildBayesianHandRangesWidget(handRangesData)
         : null;
 
+    // D25：手牌块不得因为进入某个阶段而消失。三个阶段专用 UI 以前各自整块
+    // return，把手牌行挤掉了 —— 用户报的「手牌块被挤掉、时有时无」（#17/#20 无、
+    // #18 有）就是这里。统一构造一次，三处都插在战术条之后。
+    // 用 Flexible 包裹：宁可收缩也不越界（本层无 SDK 可目视，不能拿布局去赌）。
+    final String handStr = (result?['hand'] as String?) ?? '';
+    final Widget? handRowWidget = handStr.isEmpty
+        ? null
+        : Flexible(
+            child: HandChipRow(
+              hand: handStr,
+              chipSize: 20,
+              defenseMap: result?['defense_map'] as Map<String, dynamic>?,
+            ),
+          );
+
     // ===== 1. 换牌阶段专用 UI =====
     if (isSwapPhase) {
       final msg = (result?['message'] as String?) ?? '换牌建议推演中…';
@@ -3496,6 +3511,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           tacticalWidget,
+          if (handRowWidget != null) handRowWidget,
           if (swapWidget != null)
             swapWidget
           else
@@ -3540,6 +3556,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           tacticalWidget,
+          if (handRowWidget != null) handRowWidget,
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
             decoration: BoxDecoration(
@@ -3611,6 +3628,7 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           tacticalWidget,
+          if (handRowWidget != null) handRowWidget,
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
             decoration: BoxDecoration(

@@ -116,6 +116,24 @@ class TestUiWording(unittest.TestCase):
         self.assertIn("final modes = GameMode.allModes;", self.overlay,
                       "悬浮窗菜单的列表来源变了")
 
+    def test_hand_row_survives_every_phase_ui(self):
+        """D25：三个阶段专用 UI 都不得把手牌块挤掉。
+
+        本机没有 Flutter SDK，改不了也看不了布局，所以从 Python 侧钉源码级契约：
+        换牌/选牌/定缺三个分支各自都要插入 `handRowWidget`。以前它们整块 return，
+        面板在那些阶段就完全看不到手牌（用户报的「手牌块被挤掉、时有时无」）。
+        数量也钉住：少于 3 处 = 某个阶段又把手牌丢了；多于 3 处 = 插入点跑到了
+        其他分支，会变成重复渲染。
+        """
+        with open(OVERLAY, encoding="utf-8") as fh:
+            src = fh.read()
+        n = src.count("if (handRowWidget != null) handRowWidget,")
+        self.assertEqual(n, 3,
+                         f"阶段专用 UI 里手牌行插入点应为 3 处（换牌/选牌/定缺），实为 {n}")
+        self.assertIn("final Widget? handRowWidget", src,
+                      "手牌行的统一构造被删了：三处插入会变成三份不一致的实现")
+        self.assertIn("Flexible(", src, "手牌行插入丢了 Flexible：可能撑溢出")
+
     def test_engine_honors_the_declared_mode(self):
         """④ 引擎对每个平台的非房卡玩法都原样返回，并把它报成 off_catalog。"""
         for key, p in PLATFORMS.items():
