@@ -354,7 +354,7 @@ class BayesianHandRangeReader:
         summaries = []
         for opp in opponents:
             dist = cls.calculate_hand_distribution(opp, pool_remaining)
-            tenpai_p = opp.estimate_tenpai_probability()
+            tenpai_p = opp.estimate_tenpai_probability(turn=len(opp.discards))
 
             # 找出该对手持有概率最高的 Top 3 牌
             ranked = sorted(enumerate(dist), key=lambda x: -x[1])

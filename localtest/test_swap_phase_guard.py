@@ -47,7 +47,6 @@ from platforms import set_platform_explicit  # noqa: E402
 # 断言变成「所有 swap 帧必须命中」。
 KNOWN_SWAP_MISSES = {
     "shots_multi/tencent_swap_01.jpg",
-    "shots_multi/tuyou_swap_01.jpg",
     "shots_report/shushan_swap_01.jpg",
     "shots_report/shushan_swap_02.jpg",
     "shots_batch3/zj_swap_03.jpg",
@@ -68,6 +67,16 @@ KNOWN_SWAP_FALSE_POSITIVES = {
     "shots_batch3/jj_play_03.jpg": "jj",
     "shots_batch3/zj_play_03.jpg": "zj_sichuan",
     "shots_report/zj_play_02.jpg": "zj_sichuan",
+    # 2026-10 看图核对：`tuyou_swap_01.jpg` 名字叫 swap，实际是**途游局中帧**——
+    # 中央是定缺轮盘，屏上写「大家在等您出牌哦(2)」，本家 14 张带番型徽章
+    # （连七对/清一色/三节高），牌河已有弃牌。`is_swap_phase` 返回 False 是对的，
+    # 我上一轮把它记成漏判同样是标签错。它作为“局中不得误报成换牌”的硬样本。
+    #
+    # 但这帧同时暴露一条新缺陷（归入 A4/D21 一类，尚未修）：引擎面板在这帧上
+    # 显示「换三张 准备换出【7条、8条、8条】」与「【换三张博弈】」——局中播换牌
+    # 建议，就是用户说的「不在换牌阶段却显示换牌」。换牌建议的渲染不得依赖
+    # `swap_phase` 之外的条件，这一条待查。
+    "shots_multi/tuyou_swap_01.jpg": "tuyou",
 }
 
 # 已经命中的换三张帧：判据若退化到连它们都不认，必须立刻红。
