@@ -3538,7 +3538,17 @@ class Engine:
         )
 
     def _build_skip_result(self, image: CVImage, prev_payload: str) -> EngineResult:
-        """画面无变化时复用上一帧结果，但保持 EngineResult 的合约。"""
+        """画面无变化时复用上一帧结果，但保持 EngineResult 的合约。
+
+        2026-10 量过一件事，免得下一个人在这里走弯路：曾假设 A6（静止的非牌局
+        画面永远被当成实时牌局回放）是因为这条回放路径不做牌桌复核。拿
+        `localtest/diag_clear_screen.py` 实测：**该假设不成立** —— 加牌桌复核后
+        那 10 帧的输出逐字未变（status=pick、count=11），说明这些帧**根本没走跳过
+        路径**，它们每一帧都在跑真识别。真正的阻塞在 `_empty_hand_fuse` 的三个
+        前置条件上（实测：`curr_raw_n=0`、`streak=1`、`warmup=1` 就每帧不变，
+        而帧末直读实例却是 `warmup=0`）——计数器为什么在帧内被留在 1，尚未查明。
+        没查明之前不动这里，也不去调 EMPTY_HAND_RESET_FRAMES。
+        """
         try:
             data = json.loads(prev_payload)
         except Exception:
@@ -4894,6 +4904,19 @@ class Engine:
                     self._empty_hand_streak = 0
             else:
                 self._empty_hand_streak = 0
+            # 把熔丝的输入当成可见事实交出去。理由与牌河那三个计数器同一个：
+            # 「不打了还挂着旧手牌」这种现象，只靠最终 payload 看不出是谁拦住了
+            # 清屏——`curr_raw_n`、`len(raw_labels)`、阶段、复位前后的 streak 缺一个
+            # 都只能猜。它不是调试专用的东西：排障时这就是证据。
+            self._fuse_dbg = {
+                "curr_raw_n": int(curr_raw_n),
+                "raw_labels": len(raw_labels),
+                "pick": bool(locals().get("is_pick_phase", False)),
+                "streak": int(getattr(self, "_empty_hand_streak", 0)),
+                "warmup": int(getattr(self, "_warmup_left", -1)),
+                "started": bool(getattr(self, "_match_started", False)),
+                "fuse": bool(self._empty_hand_fuse()),
+            }
 
             # 手牌行的逐张标签与稳定手牌对齐（避免"显示的牌"和"建议打的牌"对不上）
             if hand_idx is not None and hand_mpsz:
@@ -6500,6 +6523,9 @@ class Engine:
                     "river_error": getattr(self, "_river_error", None),
                     # 本帧事件源交出的条目数（0 且无扫描结果 = 牌河真的没读数）
                     "river_events": int(getattr(self, "_river_event_n", 0)),
+                    # 清屏熔丝本帧的输入（curr_raw_n / raw_labels / pick / streak / warmup）。
+                    # 「不打了还挂旧手牌」必须能一眼看出是数没攒够还是阶段拦住了它。
+                    "fuse": dict(getattr(self, "_fuse_dbg", {}) or {}),
                     # 提交/认领计数：把「没提交」「没认领」「认领了但确实为空」分开。
                     "river_submits": int(getattr(self, "_river_submits", 0)),
                     "river_consumes": int(getattr(self, "_river_consumes", 0)),

@@ -65,7 +65,8 @@ try:
               f"warmup={int(getattr(eng, '_warmup_left', -1)):2d} "
               f"started={int(bool(getattr(eng, '_match_started', False)))} "
               f"fuse={eng._empty_hand_fuse()} "
-              f"non_table={int(getattr(eng, '_non_table_frames', -1))}")
+              f"non_table={int(getattr(eng, '_non_table_frames', -1))} "
+              f"| 熔丝输入={json.dumps(dg.get('fuse') or {}, ensure_ascii=False)}")
 
     print("=== 牌局帧（建立状态）")
     for i in range(3):
