@@ -49,12 +49,16 @@ E.load_mode = lambda *a, **k: "sc_hz"
 try:
     eng = E.Engine()
     eng.get_hand_detector()
-    # 先喂两帧牌局帧建立"已在局中"的状态，再喂这帧：单帧新建引擎测不到串帧泄漏
-    warm = cv2.imread(os.path.join(HERE, "shots_multi", "zj_play_01.jpg"))
-    for _ in range(2):
-        if warm is not None:
-            with contextlib.redirect_stdout(io.StringIO()):
-                eng.process(warm)
+    # 预热帧**默认关掉**。上一版这里先喂 2 帧 zj_play_01 再喂目标帧，于是同一个引擎
+    # 里混进了另一张牌桌的弃牌账本，单帧本来没问题的图也被顶成「同型已见 5 张」——
+    # 我因此一度判定“当前引擎仍在误判脏帧”，那是探针造的，不是引擎做的。
+    # 要测串帧泄漏，预热帧必须与目标帧同平台同局；需要时传 --warm 再开。
+    if "--warm" in sys.argv:
+        warm = cv2.imread(os.path.join(HERE, "shots_multi", "zj_play_01.jpg"))
+        for _ in range(2):
+            if warm is not None:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    eng.process(warm)
     with contextlib.redirect_stdout(io.StringIO()):
         d = json.loads(eng.process(img).result)
 finally:

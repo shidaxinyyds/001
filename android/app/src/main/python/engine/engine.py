@@ -2550,6 +2550,8 @@ class Engine:
         except Exception:
             return []
         out: List[Tuple[str, str]] = []
+        # 已接受的框（牌面, 框心x, 框心y, 尺寸）：用于同牌重叠框去重
+        taken: List[Tuple[str, float, float, float]] = []
         cx_lo, cx_hi = RIVER_CONF["center_x"]
         cy_lo, cy_hi = RIVER_CONF["center_y"]
         for rect, lbl, conf in dets:
@@ -2564,9 +2566,25 @@ class Engine:
             if (cx_lo * iw <= cx <= cx_hi * iw) and (cy_lo * ih <= cy <= cy_hi * ih):
                 continue
             for zn, x1, y1, x2, y2 in zones:
-                if x1 <= cx <= x2 and y1 <= cy <= y2:
+                if not (x1 <= cx <= x2 and y1 <= cy <= y2):
+                    continue
+                # 同一张牌被框多次是目标检测的常态（重叠框 / 框套框 / 邻牌边缘）。
+                # 不去重就会把一张弃牌计成两张：实测手牌 3 张 + 牌河重复 2 次 = 「同型
+                # 已见 5 张」→ 守恒硬门误判脏帧、**整局不给建议**（腾讯/途游两张局中帧）。
+                # 轮廓法那边本来就有 NMS，事件源这边缺这一步——两条路同一件事必须同口径。
+                size = max(float(w), float(h))
+                dup = False
+                for olbl, ox, oy, osz in taken:
+                    if olbl != lbl:
+                        continue
+                    r = 0.6 * max(size, osz)
+                    if (cx - ox) ** 2 + (cy - oy) ** 2 < r * r:
+                        dup = True
+                        break
+                if not dup:
+                    taken.append((lbl, cx, cy, size))
                     out.append((lbl, zn))
-                    break
+                break
         # 物理上限剪枝：一整副麻将同型只有 4 张，所以**单帧**牌河里同一型出现超过 4 次
         # 必然不是弃牌（实测：途游一帧内 1p×15、2s×7、3p×6 —— 牌桌的圆形装饰与
         # 轮盘被当成弃牌读了）。

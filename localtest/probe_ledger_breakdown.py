@@ -33,6 +33,13 @@ if hasattr(sys.stdout, "reconfigure"):
 import engine.engine as E  # noqa: E402
 
 FRAME = os.path.join(HERE, "shots_multi", "tuyou_swap_01.jpg")
+if len(sys.argv) > 2:
+    _name, _plat = sys.argv[1], sys.argv[2]
+    for _d in ("shots_multi", "shots_batch3", "shots_report"):
+        if os.path.exists(os.path.join(HERE, _d, _name)):
+            FRAME = os.path.join(HERE, _d, _name)
+            break
+    E.load_platform = lambda *a, **k: _plat
 
 img = cv2.imread(FRAME)
 if img is None:
