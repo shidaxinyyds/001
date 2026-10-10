@@ -180,6 +180,29 @@ class TestSemanticCoherence(unittest.TestCase):
         self.assertIn("玩法", (ms or {}).get("text", ""))
 
 
+    def test_deep_shanten_still_labels_the_frame(self):
+        """C18：两向听以上与算不出向听都不得交回空标签。
+
+        旧行为在 `shanten >= 2` 那支直接 `return "", "", ""`，于是广东麻将那些离
+        听牌远的帧“战术标签全空”。空标签不是「没有战术」，是丢信息。
+        同时钉住：不许拿一个编出来的档位充数（那才是真的骗人）。
+        """
+        hand = "1m2m3m5p7p9s2s4m6m1p3s" 
+        for shan in (2, 3, 5):
+            for is_turn in (True, False):
+                label, badge, intent = E._build_tactical_perception(
+                    "ok", hand, len(hand) // 2, is_turn, shanten=shan)
+                self.assertTrue(label and badge and intent,
+                                f"shanten={shan} is_turn={is_turn} 交回了空标签："
+                                f"{(label, badge, intent)}")
+                self.assertIn(f"{shan}向听", label + badge,
+                              f"shanten={shan} 的标签没把真实向听说出来：{(label, badge)}")
+        # 算不出向听：必须明说“未取得结论”，不得编一个档位
+        label, badge, intent = E._build_tactical_perception("ok", hand, 8, True, shanten=None)
+        self.assertTrue(label and badge and intent, "shanten=None 交回了空标签")
+        self.assertNotIn("向听", badge, f"算不出向听却编了个档位：{badge!r}")
+
+
 class TestMutationControls(unittest.TestCase):
     """变异体：把定缺判据打成恒真，D23 的泄漏必须让上面的断言红。"""
 

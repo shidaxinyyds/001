@@ -997,7 +997,21 @@ def _build_tactical_perception(
             else:
                 tactical_intent = "全力冲刺听牌，保留核心好搭"
         else:
-            return "", "", ""
+            # C18：旧行为在这里直接 `return "", "", ""` —— 两向听以上（或算不出向听）
+            # 就什幺都不写。用户报的「广东麻将那几帧战术标签全空」就是它：那几副牌
+            # 离听牌远，全部落在这一支。空标签不等于「没有战术」：牌型还在推进就按
+            # 推进说；算不出向听就直说算不出。不编一个档位给人看，也不留一片空白。
+            if shanten is None:
+                phase_label = "牌型推演中"
+                tactical_badge = "推演中"
+                tactical_intent = "本帧未取得向听结论，不给档位判断"
+            else:
+                phase_label = f"牌型推进 · {shanten}向听"
+                tactical_badge = f"{shanten}向听"
+                if best_cn:
+                    tactical_intent = f"建议切【{best_cn}】，优先拆解孤张、保留可控搭子"
+                else:
+                    tactical_intent = "牌型尚在布局，优先保留可控搭子、拆去孤张"
     else:
         # 候牌轮 / 手牌 13 张等摸或等碰
         if shanten == 0:
@@ -1015,9 +1029,17 @@ def _build_tactical_perception(
         elif shanten == 1:
             phase_label = "一向听待命 · 候牌中"
             tactical_badge = "一向听"
-            tactical_intent = "等待下轮摸牌，一摸关键张即刻下叫冲刺"
+            tactical_intent = "等待摸牌，摸进关键张即可下叫"
         else:
-            return "", "", ""
+            # 同上 C18：深向听/未知也要说清现在在干什么，而不是留一片空白。
+            if shanten is None:
+                phase_label = "牌型推演中"
+                tactical_badge = "推演中"
+                tactical_intent = "本帧未取得向听结论，不给档位判断"
+            else:
+                phase_label = f"牌型推进 · {shanten}向听候牌"
+                tactical_badge = f"{shanten}向听"
+                tactical_intent = "牌型尚在布局，优先保留可控搭子、拆去孤张"
 
     return phase_label, tactical_badge, tactical_intent
 
@@ -5264,11 +5286,21 @@ class Engine:
                     if self._opdq_scan_tick % 4 == 1:
                         self._opdq_cache = detect_opponents_dingque(full_for_preview)
                     op_dq = list(self._opdq_cache)
-                    disc_safe, disc_danger = infer_opponents_from_discards(disc_counts)
+                    # A8：牌河一条都没有时不得从弃牌反推断门。`disc_counts` 全零时，
+                    # “某门没见过弃牌”会被当成“他家缺这一门”——恰好把「没有证据」说成
+                    # 「有证据」。用户报的「牌河空、无缺角标，却已有缺万/缺筒」就这条。
+                    _river_evidence = sum(max(0, int(c)) for c in disc_counts) > 0
+                    disc_safe, disc_danger = infer_opponents_from_discards(disc_counts) \
+                        if _river_evidence else ([], [])
+                    # A7「定缺徽章跳变」本轮**没修**：`detect_opponents_dingque` 交出的是
+                    # 缺门花色的列表，不带座位号；想按座位做“连续 N 次一致才锁存”，
+                    # 前提是这个列表能定位到谁家。先写一个按列表下标当座位的锁存，
+                    # 等于把“谁缺哪门”配错——那比跳变更糟。要做就得先把返回改成
+                    # {seat: suit}，那需要新的真机标注数据。
                     opponent_dingque_suits = list(dict.fromkeys(op_dq + disc_safe))
                     opponent_danger_suits = disc_danger
                 except Exception:
-                    pass
+                    traceback.print_exc()
 
             status = "waiting" if not getattr(self, "_match_started", False) else "no_tiles"
             # 空帧宽限期（稳定手牌仍在，仅本帧 0 牌）：降级 partial 呈现，杜绝"未检测到手牌"闪现
