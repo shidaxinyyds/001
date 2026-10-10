@@ -3624,6 +3624,14 @@ class Engine:
             data = json.loads(prev_payload)
         except Exception:
             return _error_result("py_error", "上一帧结果反序列化失败")
+        # A6 的另一半：出口闸门只管真识别帧，跳帧回放会绕过它。实测同一个广告页，
+        # 预热 1 帧时建议能在第 2 帧清掉，预热 4 帧后因为一直走回放而永远挂着旧建议。
+        # 同一不变量必须两边都成立：**本帧没看到牌，就不给具体建议**——不管答案是从
+        # 稳定器来的还是从缓存里复读的。
+        if data.get("hand_carried_over") and (data.get("advice") or data.get("best")):
+            data["advice"] = []
+            data["best"] = ""
+            data["advice_stale_cleared"] = True
         # 复用但标记一下"这一帧没真的识别"
         data["status"] = data.get("status") or "ok"
         data["frame_skipped"] = True
@@ -6787,7 +6795,21 @@ class Engine:
             if _extra:
                 _base = (result.get("message") or "").strip()
                 result["message"] = " · ".join(([ _base ] if _base else []) + _extra)
-            # D22「0 进张仍出建议」的诚实化：本帧所有候选进张都是 0 时必说出来。
+            # A6：本帧没读到手牌，就不得继续给「打 X」这种具体建议。
+            # 实测（`localtest/probe_ad_screen.py` / `probe_empty_frames.py`）：广告页
+            # 连喂时前几帧并不走跳帧回放（frame_skipped=False），而是稳定器的空帧
+            # 宽限期在继续下发旧手牌：`raw_hand=0`、`empty_frames` 按 1/2/3 累加，
+            # 可 `count` 仍是 10、`advice` 仍是 4、`status` 仍是 ok。
+            # 用户看到的就是“切到另一个游戏的广告页，面板还在给打牌建议”。
+            # 沿用旧牌面是有意的防闪烁设计，但具体建议不能凭空延续：建议是对
+            # “现在”的决定，不是对上一局的回忆。阈值 2 与空帧宽限同源，不另造参数。
+            _empty_frames = int((result.get("diag") or {}).get("empty_frames") or 0)
+            if _empty_frames >= 2 and (result.get("advice") or result.get("best")):
+                result["advice"] = []
+                result["best"] = ""
+                result["advice_stale_cleared"] = True
+            
+            # D22「0 进张仍出建议」的诚实化：本帧所有候选进张全为 0 时必说出来。
             # 旧行为默默给建议，与「若摸到 X 将改打」并列就自相矛盾。注意：只能在此
             # 处（出口收口）做，而且要读 `result` 而不是局部变量——上一版我把这段放在
             # `message` 赋值之前，直接 NameError。

@@ -213,5 +213,31 @@ class TestStream(unittest.TestCase):
                                  f"{name} 牌河一条没读到（{river}）却报高危听牌：{probs}")
 
 
+class TestStaleAdviceClearedOnEmptyFrames(unittest.TestCase):
+    """A6：本帧没读到手牌就不得继续给具体建议——两条路径都要成立。
+
+    实测机制（`localtest/probe_ad_screen.py`）：广告页连喂时前几帧并不走跳帧回放，
+    而是稳定器空帧宽限期在继续下发旧手牌（raw_hand=0、empty_frames 按 1/2/3 累加，
+    而 count=10、advice=4、status=ok）；预热帧数更多时则始终走跳帧复读。
+    两条路必须受同一不变量约束：只修一条时，另一条会默默把旧建议接着播。
+    """
+
+    def test_advice_dies_when_hand_stops_being_seen(self):
+        # 连喂两帧牌局帧：第一帧因读数不完整会被硬门拒答（本用例刚因为拿它当前提
+        # 而失败），第二帧才有建议。前提必须建在“真的有过建议”之后。
+        seq = ["zj_play_03.jpg", "zj_play_03.jpg", "ad_screen_01.jpg",
+               "ad_screen_01.jpg", "ad_screen_01.jpg"]
+        payloads = feed(seq)
+        self.assertTrue(payloads[1].get("advice"),
+                        "前提不成立：牌局帧本来就没建议，本用例无从判定")
+        # 第一个空帧仍在 1 帧宽限内（防闪烁，有意保留）；不变量从第 2 个空帧起生效。
+        for i, d in enumerate(payloads[3:], start=4):
+            self.assertEqual([], d.get("advice") or [],
+                              f"广告页第 {i} 帧仍在给具体建议（A6 复发）")
+            self.assertFalse(d.get("best"), f"广告页第 {i} 帧仍有「最优」")
+            self.assertTrue(d.get("hand_carried_over"),
+                            f"广告页第 {i} 帧沿用了旧读数却没标 carried_over")
+
+
 if __name__ == "__main__":
     unittest.main()
