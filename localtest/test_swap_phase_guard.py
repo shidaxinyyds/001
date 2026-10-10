@@ -53,12 +53,21 @@ KNOWN_SWAP_MISSES = {
     "shots_batch3/zj_swap_03.jpg",
 }
 
-# 真值=选牌/确定弹窗、现有判据却误报成换三张的帧。**任何时候都必须保持不误报**：
+# 真值=选牌弹窗/局中动作、现有判据却误报成换三张的帧。**任何时候都必须保持不误报**：
 # 为了补齐上面的漏判而把这里放宽，是典型的按下葫芦浮起瓢。
+#
+# 2026-10 真值纠正（重要）：这个集合原来填的是
+#   tencent_pick_01/02/03、tuyou_pick_01、tuyou_select/s1_select_cd17
+# 理由是它们被 `is_swap_phase` 判成换三张。直接看图发现**它们就是换三张画面**：
+# 中央写「排位 · 红中血战 · 换三张」，提示「选择3张同花色手牌 (10s)」，右下金色
+# 圆钮上写「换牌」；游戏自己显示的「选牌中」是换三张的选牌子状态。因此那些
+# True 是**判对了**，把它们当误报会让守卫把正确行为当 bug 去“修”。
+# 误报清单因此换成真・牌局中帧（它们必须不被判成换三张）。
 KNOWN_SWAP_FALSE_POSITIVES = {
-    "shots_multi/tencent_pick_01.jpg",
-    "shots_multi/tuyou_pick_01.jpg",
-    "shots_tuyou_select/s1_select_cd17.jpg",
+    "shots_multi/queshen_play_01.jpg": "gd_queshen",
+    "shots_batch3/jj_play_03.jpg": "jj",
+    "shots_batch3/zj_play_03.jpg": "zj_sichuan",
+    "shots_report/zj_play_02.jpg": "zj_sichuan",
 }
 
 # 已经命中的换三张帧：判据若退化到连它们都不认，必须立刻红。
@@ -111,22 +120,18 @@ class TestSwapPhaseLedger(unittest.TestCase):
                                 f"{sorted(fixed)}")
 
     def test_pick_popups_are_not_reported_as_swap(self):
-        """选牌/确定弹窗不得被说成换三张——这条与漏判清单同等重要。
+        """牌局中帧不得被说成换三张——这条与漏判清单同等重要。
 
-        现有判据恰恰是靠这类按钮命中 JJ 的，所以这三帧**今天就在误报**。把它们写成
-        必红断言会立刻挡住本文件；因此这里先如实登记为已知缺陷，并要求：**修复 C16
-        时误报集合不得扩大**（下面断言的是"不能新增"，不是"一个都没有"）。
+        真值已在 2026-10 重新核对（看图确认）：清单里现在是真正的牌局中帧。
+        断言很严格：任何一帧被误报成换三张就直接红——因为误报会让引擎在局中
+        清掉牌池、面板弹出“换三张”假阶段（用户报的那类“不在换牌却显示换牌”）。
         """
-        fp = set()
-        for rel in KNOWN_SWAP_FALSE_POSITIVES:
-            ys, gs = detect(rel, "tencent" if "tencent" in rel else "tuyou")
+        fp = []
+        for rel, platform in KNOWN_SWAP_FALSE_POSITIVES.items():
+            ys, gs = detect(rel, platform)
             if ys or gs:
-                fp.add(rel)
-        new = fp - KNOWN_SWAP_FALSE_POSITIVES
-        self.assertFalse(new, f"出现了新的选牌→换三张误报：{sorted(new)}")
-        # 如实记录：当前三帧全部误报，一条都不能声称已修好。
-        self.assertTrue(fp or not KNOWN_SWAP_FALSE_POSITIVES,
-                        "误报帧突然全部正确了：请把 KNOWN_SWAP_FALSE_POSITIVES 清空")
+                fp.append(rel)
+        self.assertFalse(fp, f"牌局中帧被误报成换三张（A4/D21 类现象的源头）：{fp}")
 
 
 if __name__ == "__main__":
