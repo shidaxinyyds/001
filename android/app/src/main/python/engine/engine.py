@@ -5299,6 +5299,13 @@ class Engine:
                     # {seat: suit}，那需要新的真机标注数据。
                     opponent_dingque_suits = list(dict.fromkeys(op_dq + disc_safe))
                     opponent_danger_suits = disc_danger
+                    # A8：缺门在「换三张」与「定缺」阶段本身就不可能已敲定，此时
+                    # 任何对手断门读数都是凭空的。上一轮只加了「牌河无证据不反推」
+                    # 这道门，但实测换三张帧的牌河已经有证据（12/26/9/7），证据门
+                    # 拦不住它——真正可靠的是阶段本身。牌河再满，也不能把“还在选”
+                    # 说成“已经定了”。
+                    if is_swap_phase or is_dq_phase:
+                        opponent_dingque_suits = []
                 except Exception:
                     traceback.print_exc()
 
@@ -6620,6 +6627,20 @@ class Engine:
             }) if _conf else None
             # D26 排序只供展示，原始屏上顺序仍以 `hand` 交出，不丢信息。
             result["hand_sorted"] = _sort_hand_mpsz(result.get("hand") or "")
+
+            # A1/A2：`hand_carried_over` 必须与“显示的手牌是不是本帧的”真一致。
+            # 上一版只在阻尼分支里置 True，于是「本帧读到 0 张、稳定器宽限期把上帧
+            # 的 10 张继续下发」这条路（实测：zj_popup_02 raw=0 而面板 10 张、
+            # status=ok）标记仍是假 —— 用户看到“手牌冻住、其他块照旧更新”时，
+            # 数据层根本没有记下这件事。现在按事实反推：只要本帧读到的张数少于
+            # 下发的张数，就是沿用，不管走的哪一条路。
+            _raw_n = int((result.get("diag") or {}).get("raw_hand") or 0)
+            _shown_n = int(result.get("count") or 0)
+            if _shown_n > _raw_n:
+                result["hand_carried_over"] = True
+                if not (result.get("message") or "").startswith("沿用"):
+                    result["message"] = (f"沿用上一帧手牌（本帧读到 {_raw_n} 张，"
+                                         f"仍展示 {_shown_n} 张）")
 
             # 牌河 YOLO 影子对比（默认关；只写 diag/日志，不影响任何显示与建议；
             # 必须在 json.dumps 之前，diag 结果才能随帧送到接料/日志）

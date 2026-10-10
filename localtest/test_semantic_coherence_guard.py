@@ -203,6 +203,27 @@ class TestSemanticCoherence(unittest.TestCase):
         self.assertNotIn("向听", badge, f"算不出向听却编了个档位：{badge!r}")
 
 
+    def test_carried_over_flag_matches_reality(self):
+        """A1/A2：面板手牌多于本帧读到时，`hand_carried_over` 必须为真。
+
+        旧实现只在阻尼那一条分支置 True，于是「本帧读到 0 张、稳定器宽限期把
+        上帧的 10 张继续下发」这条路（实测 zj_popup_02：raw=0、面板 10 张、
+        status=ok）标记仍是假——用户看到“手牌冻住、其他块照旧更新”时，数据层
+        根本没记下这件事。本条把不变量直接钉在 payload 上，不分走哪条路。
+        """
+        d = payload_for(_find("zj_popup_02.jpg"), "zj_sichuan", "sc_hz")
+        raw = int((d.get("diag") or {}).get("raw_hand") or 0)
+        shown = int(d.get("count") or 0)
+        if shown > raw:
+            self.assertTrue(d.get("hand_carried_over"),
+                            f"本帧读到 {raw} 张却下发 {shown} 张，沿用标记为假")
+            self.assertTrue(str(d.get("message") or "").startswith("沿用"),
+                            f"沿用旧读数时 message 不再明说沿用：{d.get('message')!r}")
+        else:
+            self.assertFalse(d.get("hand_carried_over"),
+                             "本帧读数已足够，却报成沿用（标记不能反向说谎）")
+
+
 class TestMutationControls(unittest.TestCase):
     """变异体：把定缺判据打成恒真，D23 的泄漏必须让上面的断言红。"""
 
