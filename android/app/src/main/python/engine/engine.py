@@ -4562,16 +4562,7 @@ class Engine:
             image = self._apply_hand_roi(image)
 
             start_time = time.time()
-
-            # ===== 冷启动递减（必须在帧的最开头）=====
-            # 本来的递减在函数尾部，而 swap/pick 这些分支会在它之前就 return ——
-            # 实测（`localtest/diag_fuse_state.py`）：静止的非牌局画面被误锁进 pick
-            # 阶段后，`_warmup_left` 永远停在 1；而清屏熔丝的前置条件之一是
-            # `warmup <= 0`，于是「不打了还挂着旧手牌」（A6）结构性地永远不会被清。
-            # 它的本义就是「每处理一帧扣一次」，与这一帧最终走哪条出口无关，
-            # 所以放到帧首：任何提前 return 都再也错不过它。
-            if self._warmup_left > 0:
-                self._warmup_left -= 1
+            # 冷启动递减不放在这里：跳过帧不得消耗 warmup（见跳帧判定后的那段）。
 
             # ===== 帧差去重 =====
             # 工作区域（与识别器同一份降采样逻辑）作为帧差基线。
@@ -4664,6 +4655,23 @@ class Engine:
                 self._consecutive_skips += 1
                 return self._build_skip_result(image, self._frame_skipper.cached)
             self._consecutive_skips = 0
+
+            # ===== 冷启动递减：只能在「确定本帧会真识别」之后扣，但必须在任何阶段
+            # 分支之前扣 =====
+            # 两个位置要求互相冲突，旧代码只满足了第一个：
+            #   · 跳过帧不得消耗 warmup（warmup 的本义是「真的跑过 _detect_once 的
+            #     那 N 帧」）——这条由 test_skip_frame_guard 钉住，把递减搬到帧首
+            #     会直接把它跑红（本轮试过，确实红）；
+            #   · 但 swap/pick 这些阶段分支会在函数尾部之前 just return，放在尾部的
+            #     递减根本轮不到——实测（`localtest/diag_fuse_state.py`）静止非牌局
+            #     画面下 `_warmup_left` 永远停在 1，而清屏熔丝要求 `warmup<=0`，
+            #     于是「不打了还挂着旧手牌」（A6）永远不会被清。
+            # 所以正确的落点是跳帧判定之后、阶段分支之前：跳过的帧不扣，真识别的帧
+            # 无论最终从哪个出口 return 都一定已经扣过。
+            if self._warmup_left > 0:
+                self._warmup_left -= 1
+            # 本帧计数器清零：诊断「熔丝这段在一帧里跑了几遍」得按帧算。
+            self._fuse_block_hits = 0
 
             # ===== 补做方向验证（只有确定不跳帧的帧才走到这里）=====
             # 几何已在帧首归一、帧差已判定本帧需要真识别，此时才付那一次完整的手牌
@@ -4907,6 +4915,12 @@ class Engine:
             # 为什么不能干脆去掉：「结算弹窗仍被判为牌桌」这类帧只能靠这条 fuse，
             # 它是「不打了还显示旧手牌」的唯一兜底（`_is_mahjong_table` 管的是画面
             # 已经不是牌桌那一路）。所以只改长度和触发条件，不拆机制。
+            # 入口值与本帧执行次数：这两项是专为「计数器为何永远停在 1」设的探针。
+            # 只看到出口值分不出两件事：「进帧时就已是 0」（有人在帧内清零），
+            # 与「这段本帧跑了不止一次」（后一次把前一次抹平）。次数>1 还会直接
+            # 说明 process 在递归/重入，那是比阈值严隶得多的结构问题。
+            _streak_in = int(getattr(self, "_empty_hand_streak", 0))
+            self._fuse_block_hits = getattr(self, "_fuse_block_hits", 0) + 1
             if curr_raw_n == 0:
                 self._empty_hand_streak = getattr(self, "_empty_hand_streak", 0) + 1
                 if self._empty_hand_fuse():
@@ -4914,15 +4928,17 @@ class Engine:
                     self._empty_hand_streak = 0
             else:
                 self._empty_hand_streak = 0
-            # 把熔丝的输入当成可见事实交出去。理由与牌河那三个计数器同一个：
-            # 「不打了还挂着旧手牌」这种现象，只靠最终 payload 看不出是谁拦住了
-            # 清屏——`curr_raw_n`、`len(raw_labels)`、阶段、复位前后的 streak 缺一个
-            # 都只能猜。它不是调试专用的东西：排障时这就是证据。
             self._fuse_dbg = {
                 "curr_raw_n": int(curr_raw_n),
                 "raw_labels": len(raw_labels),
                 "pick": bool(locals().get("is_pick_phase", False)),
+                "streak_prev": int(_streak_in),      # 进这段之前的值
+                # 曾在这里而应当留在日志里的一个字段：`id(self)`。它回答完了问题
+                # （帧间确实是同一个实例），就不该继续待在 payload：同一个进程里两个
+                # Engine 的地址必然不同，test_skip_frame_guard 的「两侧逐帧 payload
+                # 全等」比对因此红——诊断字段也不能污染可比较的输出。
                 "streak": int(getattr(self, "_empty_hand_streak", 0)),
+                "block_hits": int(self._fuse_block_hits),   # 本帧跑了几遍
                 "warmup": int(getattr(self, "_warmup_left", -1)),
                 "started": bool(getattr(self, "_match_started", False)),
                 "fuse": bool(self._empty_hand_fuse()),
