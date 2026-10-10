@@ -244,6 +244,38 @@ class TestSemanticCoherence(unittest.TestCase):
             self.assertNotIn("玩法可能选错", msg, "没有证据却报了“玩法可能选错”")
 
 
+    def test_frame_with_a_hand_is_never_reported_as_not_connected(self):
+        """A5：本帧有手牌就不可能处于「等待对局接入」。
+
+        旧写法把 status 完全交给 `_match_started`，而它靠“张数落在合法集合里”才置真；
+        杠一组后本家 9 张不在那个集合里，于是“读了 9 张牌却报未接入”。这条不变量
+        不依赖具体张数，对任何一帧都必须成立。
+        """
+        d = payload_for(_find("zj_play_03.jpg"), "zj_sichuan", "sc_hz")
+        if int(d.get("count") or 0) > 0:
+            self.assertNotEqual(d.get("status"), "waiting",
+                                f"有 {d.get('count')} 张手牌却报 waiting（A5）")
+        # 常量本身也钉住：沿用窗口不得回到 3（一帧 1.2~2.5s，3 帧 = 最长 7.5s 冻结）
+        self.assertLessEqual(E.TRANSIENT_CARRY_FRAMES, 1,
+                             "A1：沿用窗口又变长了，手牌冻结会复发")
+
+    def test_zero_ukeire_advice_is_declared(self):
+        """D22：本帧所有候选进张全为 0 时，message 必说出来。
+
+        钉两个方向：有 0 进张不声明 = 默默骗人说“有建议”；有进张却报“无进张”
+        = 反向骗人。两者都算红。
+        """
+        d = payload_for(_find("zj_play_03.jpg"), "zj_sichuan", "sc_hz")
+        adv = [x for x in (d.get("advice") or []) if isinstance(x, dict) and "ukeire" in x]
+        msg = str(d.get("message") or "")
+        if adv and all(int(x.get("ukeire") or 0) <= 0 for x in adv):
+            self.assertIn("无有效进张", msg,
+                          f"全是 0 进张却没声明：{msg!r}")
+        elif adv:
+            self.assertNotIn("无有效进张", msg,
+                             f"有进张却报“无进张”（反向谎报）：{msg!r}")
+
+
 class TestMutationControls(unittest.TestCase):
     """变异体：把定缺判据打成恒真，D23 的泄漏必须让上面的断言红。"""
 

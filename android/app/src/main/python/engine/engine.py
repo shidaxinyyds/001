@@ -1427,6 +1427,13 @@ HAND_GATE_RESCORE_MARGIN = 0.15
 # 所以暗层只拿来**说清为什么读不到**，不拿来改识别判据。
 HAND_BAND_DIM_V = 130.0
 
+# 本帧没读到手牌时，允许沿用上一稳定读数的帧数（A1）。
+# 定为 1 的理由是实测而非手感：一帧完整识别 1.2~2.5s，旧值 3 就是最长 7.5s
+# 的手牌冻结（用户原话：“弹窗都消失了两帧还是那 4 张”）。沿用机制本身保留，
+# 因为它防的是真闪烁；但不得超过一帧，且出口处会按“下发张数 > 本帧读到张数”
+# 把它如实标成 hand_carried_over，不再隐蒔。
+TRANSIENT_CARRY_FRAMES = 1
+
 
 def _hand_band_is_dim(image: CVImage, roi) -> bool:
     """手牌取区这一条带是不是整体被压暗（弹窗遮罩/回大厅动画）。
@@ -3543,7 +3550,7 @@ class Engine:
         2026-10 量过两件事，记在这里免得下一个人在这里走弯路：
 
         1. 曾先假设“静止的非牌局画面被这里永远回放”，加了牌桌复核后却**逐字未变**，
-           当时因此判定假设不成立并撑回。那个判定只对一半：当时 `warmup` 被
+           当时因此判定假设不成立并撤回。那个判定只对一半：当时 `warmup` 被
            阶段分支绕着不走、永远停在 1，而跳帧要求 `warmup <= 0`，所以这些帧
            **根本没机会走跳过路径**，复核自然看不出效果。
         2. warmup 递减位置修好后，`build/watch_streak.py` 重新拦到：非牌局帧 1-2 真识别
@@ -3551,7 +3558,7 @@ class Engine:
            画面 + 旧稳定手牌正好满足跳帧的全部前提。这就是 A6 的后半段。
 
         所以理论上正确的修复是两处一起：warmup 在阶段分支之前递减（已修）+ 回放前
-        复核牌桌。但**复核本轮已撑回，不在这条路径上**，两个原因：
+        复核牌桌。但**复核本轮已撤回，不在这条路径上**，两个原因：
           · 实测（`build/check_table_probe.py`）`_is_mahjong_table(素材页) = True`，
             加了也拦不住 A6——真正的阻塞在场景探针判错，不在状态机；
           · 它同时打破了 `test_non_table_honesty_guard` 的变异检验（新复核使原变异体
@@ -5374,6 +5381,14 @@ class Engine:
                     traceback.print_exc()
 
             status = "waiting" if not getattr(self, "_match_started", False) else "no_tiles"
+            # A5：本帧确实读到了手牌，就**不可能**是「还没接入对局」。
+            # 旧写法把 status 完全交给 `_match_started`，而后者靠“张数落在合法集合
+            # 里”才置真。杠会把基数从 13n+1/13n+2 推走（杠一组后本家 9 张），
+            # 于是出现“牌读了 9 张、面板却说等待对局接入”——用户报的 A5。
+            # 保留原来的启动判定作为主路径，只补上这条“已有读数 = 已接入”的兼顾。
+            if status == "waiting" and hand_mpsz:
+                self._match_started = True
+                status = "partial"
             # 空帧宽限期（稳定手牌仍在，仅本帧 0 牌）：降级 partial 呈现，杜绝"未检测到手牌"闪现
             if (status == "no_tiles" and hand_empty_frames >= 1
                     and (self._stable_hand_mpsz or self._hand_stab.stable_mpsz)):
@@ -5596,7 +5611,12 @@ class Engine:
                     # 超过窗口仍读不出 partial（本帧 raw_labels 为空）就照旧降级 no_tiles，
                     # 不伪造牌、不把旧手牌永远挂屏。
                     self._transient_drop_streak = getattr(self, "_transient_drop_streak", 0) + 1
-                    if self._transient_drop_streak <= 3:
+                    # 窗口从 3 帧收到 1 帧（A1：弹窗消失后手牌还挂着旧 4 张）。
+                    # 依据不是“手感”而是实测数字：一帧完整识别 1.2~2.5s，3 帧就是
+                    # 最长 7.5s 的冻结；而用户报的“两帧前弹窗都没了还显那 4 张”正好
+                    # 落在这个窗口里。沿用本身保留（它防的是真的闪烁），但不得超过
+                    # 一帧，且必须被 `hand_carried_over` 如实标出（出口处按事实兼平）。
+                    if self._transient_drop_streak <= TRANSIENT_CARRY_FRAMES:
                         status = "ok"
                         hand_mpsz = self._stable_hand_mpsz
                         tile_count = self._stable_hand_count
@@ -6702,6 +6722,17 @@ class Engine:
             if _extra:
                 _base = (result.get("message") or "").strip()
                 result["message"] = " · ".join(([ _base ] if _base else []) + _extra)
+            # D22「0 进张仍出建议」的诚实化：本帧所有候选进张都是 0 时必说出来。
+            # 旧行为默默给建议，与「若摸到 X 将改打」并列就自相矛盾。注意：只能在此
+            # 处（出口收口）做，而且要读 `result` 而不是局部变量——上一版我把这段放在
+            # `message` 赋值之前，直接 NameError。
+            _uks = [int(_it.get("ukeire") or 0) for _it in (result.get("advice") or [])
+                    if isinstance(_it, dict) and "ukeire" in _it]
+            if _uks and max(_uks) <= 0:
+                _base = (result.get("message") or "").strip()
+                result["message"] = (_base + " · " if _base else "") + \
+                    "本帧各候选均无有效进张（只能自摸），建议仅为少损选张"
+
             # D26 排序只供展示，原始屏上顺序仍以 `hand` 交出，不丢信息。
             result["hand_sorted"] = _sort_hand_mpsz(result.get("hand") or "")
 
