@@ -52,6 +52,7 @@ import sys
 import textwrap
 import types
 import unittest
+from collections import Counter
 
 import cv2
 import numpy as np
@@ -529,8 +530,23 @@ class TestRealDeviceFrames(unittest.TestCase):
                              f"{name} status：{d.get('status')} ≠ {want_status}")
             self.assertEqual(want_count, d.get("count"),
                              f"{name} count={d.get('count')} 应 {want_count}")
-            self.assertEqual(want_hand, d.get("hand"),
-                             f"{name} 手牌逐张必须一致")
+            # 手牌真值是“人眼读出哪些牌”，不是“屏上从左到右的顺序”——D26 之后下发
+            # 顺序改为按牌面排序。这里不是放宽断言，而是把它改得更准：
+            #   1) 与真值的多重集完全相同（不丢牌、不造牌、不改牌面）；
+            #   2) 并且确实处于按牌面排好序的状态（防“只改期望值不真排序”）。
+            def _pairs(s):
+                s = s or ""
+                return Counter(s[i:i + 2] for i in range(0, len(s) - 1, 2))
+
+            # 排序口径直接复用引擎自己那个函数，不在守卫里另抄一份：另抄一份
+            # 就会与实现各自演化，“测了但测的不是真口径”。
+            from engine.engine import _sort_hand_mpsz
+
+            got_hand = d.get("hand") or ""
+            self.assertEqual(_pairs(want_hand), _pairs(got_hand),
+                             f"{name} 手牌多重集与真值不符")
+            self.assertEqual(got_hand, _sort_hand_mpsz(got_hand),
+                             f"{name} 手牌未按牌面排序：{got_hand}")
             self.assertEqual(want_phase, mp.get("phase"),
                              f"{name} 局况阶段={mp.get('phase')} 应 {want_phase}")
             # 阶段标志与 status 只能有一套说法

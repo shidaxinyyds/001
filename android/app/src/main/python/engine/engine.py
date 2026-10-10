@@ -1636,6 +1636,28 @@ def _classify_tile_fast(detector, tile_crop, avail, pref_rots, cache):
     return result
 
 
+def _sort_hand_row(hand_row):
+    """把手牌行按牌面排序（万→筒→条→字、同门按数字）；读不出的排到末尾。
+
+    为什么排框而不是只排 `hand` 串：面板上牌块、角标、「第几张读不清」全部按框序
+    取用。只排串不排框，三者就与牌面对不上；只排框不排串，下游取首张建议又会错。
+    排框是唯一能让三者保持同一顺序的位置。
+
+    稳定排序：同型多张保留屏上左右序（它们本来就一模一样，不应因排序而跳位）。
+    """
+    suit_rank = {"m": 0, "p": 1, "s": 2, "z": 3}
+
+    def key(item):
+        idx, (rect, lbl, _conf) = item
+        if not lbl or len(lbl) != 2 or lbl[1] not in suit_rank:
+            # (9, 9) = 读不出/未知牌一律排末尾，内部按原屏上序（idx）
+            return (9, 9, idx)
+        num = int(lbl[0]) if lbl[0].isdigit() else 9
+        return (suit_rank[lbl[1]], num, idx)
+
+    return [pair for _i, pair in sorted(enumerate(hand_row), key=key)]
+
+
 def _sort_hand_mpsz(mpsz: str) -> str:
     """把平铺手牌串按「万→筒→条→字、同门按数字」排好。
 
@@ -4931,6 +4953,14 @@ class Engine:
                 # 挂川麻玩法时屏上的 東/北/北，全 34 下 0.98/0.59）。
                 hand_row, self._hand_gate_conflict = _rescue_out_of_gate(
                     hand_detector, full_for_preview, hand_row)
+                # D26 手牌排序：按牌面（万→筒→条→字、同门按数字）重排，而不是按屏上位置。
+                # 位置很关键：必须在「闸门外救援」之后、在 `raw_labels` 与
+                # `hand_uncertain`（它记的是「第几张」）之前做。这样下游所有按位置
+                # 取用的索引（牌块顺序、不可信标记、角标）天然就是排好序的那一套，
+                # 不需要事后重映射——先按屏上序算完再打乱重排，会让「第 3 张读不清」
+                # 指到别的牌上去，那是把展示问题换成错位问题。
+                # 读不出的框（label=None）排到末尾并保留屏上左右序：不假装它是一张牌。
+                hand_row = _sort_hand_row(hand_row)
                 raw_labels = [d[1] for d in hand_row if d[1] is not None]
                 # 框在、牌读不出：这就是用户看到的「明明 13 张只显几张」。静默少报
                 # 比报错更坑（面板看起来只是“牌少了”），所以必须数出来、说出口。

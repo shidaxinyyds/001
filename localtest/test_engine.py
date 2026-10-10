@@ -21,7 +21,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_SHOT = os.path.join(HERE, "screenshot.jpg")
 
 # 期望手牌（与 run_structural 的 GT 一致，去掉花色分隔）
-EXPECTED = "3m9m1s6s7s9s9s1p3p3p4p4p5p"
+EXPECTED = "3m9m1p3p3p4p4p5p1s6s7s9s9s"   # D26：按牌面排序后的下发顺序（屏上序见 SCREEN_ORDER）
 
 
 def main():
@@ -45,13 +45,24 @@ def main():
     print("top_score:", data["top_score"])
     print("screen  :", data["screen"])
 
+    # D26 手牌排序：面板上的牌现在按牌面（万→筒→条→字、同门按数字）下发，不再
+    # 是屏上左右序。这里不把旧串改成新串就完事——那样只能证明“顺序变了”，
+    # 证明不了“排序没有增删改任何一张牌”。所以同时钉两件事：
+    #   1) 结果确实是排好序的那一串；
+    #   2) 与屏上序的**多重集完全相同**（只换序，不丢牌、不造牌、不改牌面）。
+    from collections import Counter
+    SCREEN_ORDER = "3m9m1s6s7s9s9s1p3p3p4p4p5p"
     ok_hand = data["hand"] == EXPECTED
+    ok_same_tiles = (Counter(data["hand"][i:i + 2] for i in range(0, len(data["hand"]), 2))
+                     == Counter(SCREEN_ORDER[i:i + 2] for i in range(0, len(SCREEN_ORDER), 2)))
+    ok_sorted = data["hand"] == EXPECTED
     ok_count = data["count"] == 13
     ok_status = data["status"] == "ok"
     ok_tiles = len(data["tiles"]) == 13
 
     print("\n=== 校验 ===")
     print(f"hand=={EXPECTED}: {ok_hand}")
+    print(f"多重集与屏上序一致: {ok_same_tiles}")
     print(f"count==13     : {ok_count}")
     print(f"status==ok    : {ok_status}")
     print(f"tiles==13     : {ok_tiles}")
@@ -60,7 +71,8 @@ def main():
     labelled = sum(1 for t in data["tiles"] if t[4] != "")
     print(f"labelled tiles: {labelled}/13")
 
-    assert ok_hand and ok_count and ok_status and ok_tiles, "ENGINE INTEGRATION FAILED"
+    assert (ok_hand and ok_same_tiles and ok_sorted
+            and ok_count and ok_status and ok_tiles), "ENGINE INTEGRATION FAILED"
     print("\nENGINE INTEGRATION OK")
     _test_phase2_state_machine()
     _test_phase3_perf()
