@@ -12,6 +12,23 @@
 True（已实测），而修场景探针需要新的判据；本条不变量不需要判据，只用一条物理必要
 条件，覆盖面更广（任何读不到牌的屏都不许声称在有牌的阶段）。
 
+⚠ 本轮量到、但**尚未修也修不了**的另一条：阶段滞后（A4 实体）。
+
+  真机序列 `zj_swap_03`（牌河空）→ `zj_play_03`（牌河已有 9 张弃牌）：第二帧仍判为
+  swap，而下游「换牌阶段不给建议」会拿这个标志把建议清空 —— 用户在牌局中段看到
+  换牌 UI 且没有任何建议。
+
+  试过两种落点，都不成立（均已回退）：
+    · 出口闸门改标志：标志改了、建议仍是空（建议在上游 swap 分支里就没算）；
+      而且面板判的是 `swap_phase || status=='swap'`，只清标志等于清了个寂寞。
+    · 阶段判定处按牌河证据剥掉滞后：`_river_zone_counts` 在牌河扫描块（约 5419 行）
+      才更新，**晚于阶段判定（约 5154 行）**，所以判定时本帧的 9 张弃牌还不存在，
+      门永不触发（实测：第二帧仍 swap_phase=True）。
+
+  要修必须先破这个**顺序死结**：要么把牌河证据的采集提到阶段判定之前，要么给
+  swap 的迟滞保持（约 5150 行「迟滞保持：本帧虽漏检，仍视为换牌延续」）加一个不
+  依赖牌河的上界。后者更小：滞后只赖 1 帧，而真换三张会持续多帧。
+
 用法: py -3.10 -X utf8 localtest/test_nongame_phase_guard.py [--mutate]
 """
 from __future__ import annotations
@@ -85,6 +102,60 @@ class TestNongamePhase(unittest.TestCase):
                                 f"{note} 被判成换三张阶段（A4 复发）")
             self.assertEqual(0, int(d.get("count") or 0),
                              f"{note} 读到了牌，本用例的前提已不成立")
+
+    def test_live_play_frame_keeps_advice_despite_swap_hysteresis(self):
+        """A4 实体：阶段滞后不得把局中建议一起误杀。
+
+        真机序列 `zj_swap_03`（牌河空）→ `zj_play_03`（牌河已有 9 张弃牌）。第二帧
+        的 swap 标志会被迟滞保持续一帧（UI 不闪是对的），但本帧真实线索已消失 ——
+        建议不得再被它清空。牌河证据在阶段判定之后才有，无法在判定时拦住滞后
+        （顺序死结），所以把「不给建议」改成只看本帧真实检测。
+
+        钉两头：① 真换三张帧（牌河空）仍不得给建议，否则只是把错改到另一边；
+        ② 牌河非空的帧必须给建议。
+        """
+        seq = [("shots_batch3/zj_swap_03.jpg", "zj_sichuan"),
+               ("shots_batch3/zj_play_03.jpg", "zj_sichuan"),
+               ("shots_batch3/zj_play_03.jpg", "zj_sichuan")]
+        outs = []
+        orig_lp, orig_lm = E.load_platform, E.load_mode
+        try:
+            eng = E.Engine()
+            eng.get_hand_detector()
+            for rel, platform in seq:
+                img = cv2.imread(os.path.join(HERE, rel))
+                if img is None:
+                    self.skipTest(f"缺素材 {rel}")
+                E.load_platform = lambda *a, _p=platform, **k: _p
+                E.load_mode = lambda *a, **k: "sc_hz"
+                with contextlib.redirect_stdout(io.StringIO()):
+                    outs.append(json.loads(eng.process(img).result))
+        finally:
+            E.load_platform, E.load_mode = orig_lp, orig_lm
+
+        def river_total(d):
+            rz = (d.get("diag") or {}).get("river_zones") or {}
+            return sum(int(v or 0) for v in rz.values()
+                       if isinstance(v, (int, float)))
+
+        first = outs[0]
+        self.assertEqual(0, river_total(first),
+                         "前提不成立：首帧应是牌河为空的真换三张帧")
+        self.assertTrue(first.get("swap_phase") or first.get("status") == "swap",
+                        "前提不成立：真换三张帧没被判成 swap，本用例无从判定")
+        self.assertFalse(first.get("advice") or first.get("best"),
+                         "真换三张帧（牌河空）给了打牌建议：D24 被改坏了")
+
+        checked = 0
+        for i, d in enumerate(outs[1:], start=2):
+            if river_total(d) <= 0 or int(d.get("count") or 0) <= 0:
+                continue
+            checked += 1
+            self.assertTrue(d.get("advice") or d.get("best"),
+                            f"第 {i} 帧牌河已有 {river_total(d)} 张弃牌、读到 "
+                            f"{d.get('count')} 张手牌，却不给任何建议"
+                            f"（阶段滞后把局中建议误杀，A4 复发）")
+        self.assertGreater(checked, 0, "没有任一帧带弃牌证据：本用例已空转")
 
     def test_mutant_without_the_gate_is_caught(self):
         """变异对照：证明「拿掉闸门后这条确实会坏」，而不是它本来就不会发生。

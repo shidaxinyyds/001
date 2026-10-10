@@ -6819,7 +6819,12 @@ class Engine:
                 result["drawing_tile"] = None
             # D24 换牌/选牌阶段不给「点炮高危/改打安全牌」类建议：那时手上的牌不是
             # 打出去的牌，拿防守口径讲进攻选择就是把用户往错方向推。
-            if result.get("swap_phase") or result.get("pick_phase"):
+            # A4 阶段滞后的代价最小破法：这里只看**本帧真实检测**（_swap_raw），不看
+            # 迟滞保持后的标志。实测：`zj_play_03` 牌河已有 9 张弃牌，本帧真实线索
+            # 早已消失，只是被迟滞保持续了一帧 —— 而牌河证据在阶段判定之后才有，无法
+            # 在判定时拦住它（顺序死结，详见 `test_nongame_phase_guard` 模块文档）。
+            # 解耦后：换牌 UI 仍按迟滞保持不闪烁，但“没建议”不再被滞后误杀。
+            if getattr(self, "_swap_raw", False) or result.get("pick_phase"):
                 result["advice"] = []
                 result["best"] = ""
             # D22 0 进张不得同时给「若摸到 X 将改打」：那张牌不会让牌型前进一步，
