@@ -68,6 +68,20 @@ def feed(frames):
     try:
         eng = E.Engine()
         eng.get_hand_detector()
+        # 把后台牌河扫描换成「同步已完成的空结果」。原因不是方便，是**确定性**：
+        # 真实 executor 下，后台任务何时 done 取决于线程调度，同一串输入两次跑
+        # 会得出不同的账本内容（实测：本守卫在全量套件里偶发红、单独跑绿）。
+        # 一个会闪的守卫会间歇性给出错误信心，比没有守卫更坏。
+        # 牌河读数仍由确定性的事件源（`_river_from_events`）提供，本守卫要钉的
+        # 帧间不变量与后台异步无关。
+        import concurrent.futures
+
+        def _sync_submit(_fn, *_a, **_k):
+            f = concurrent.futures.Future()
+            f.set_result(([], []))
+            return f
+
+        eng._river_executor.submit = _sync_submit
         for name in frames:
             img = cv2.imread(os.path.join(SHOT_DIR, name))
             if img is None:
