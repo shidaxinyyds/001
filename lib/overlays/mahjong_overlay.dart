@@ -3732,6 +3732,14 @@ class _MahjongOverlayState extends State<MahjongOverlay> {
                 Expanded(
                   child: Text(
                     hint,
+                    // D29：提示条与记牌器行重叠的机制不是“绝对定位压上去”（本块在
+                    // Column 正常流里），而是**长文案无上限地把这一行长高**：悬浮窗
+                    // 高度小于内容时，多出来的一段就会压到下方记牌器行上。
+                    // 给死两行 + 省略号：正常长度的提示完全不变，只有超长时不再长高。
+                    // 诚实边界：本机无 Flutter SDK 无法目视验证，这是消除已知机制的
+                    // 加固，不等于确认修好了你看到的那一处重叠。
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
                     style: const TextStyle(color: Colors.white70, fontSize: 9.5),
                   ),
                 ),

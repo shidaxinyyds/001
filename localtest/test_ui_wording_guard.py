@@ -116,6 +116,24 @@ class TestUiWording(unittest.TestCase):
         self.assertIn("final modes = GameMode.allModes;", self.overlay,
                       "悬浮窗菜单的列表来源变了")
 
+    def test_hint_row_cannot_grow_unbounded(self):
+        """D29：提示条的文案必须有限行高，否则长提示会把下方记牌器行压住。
+
+        本机没有 Flutter SDK，看不了渲染，所以从 Python 侧钉源码级约束：提示条那个
+        `Text(hint, …)` 必须带 `maxLines` 与 `overflow: TextOverflow.ellipsis`。
+        没这两样时，一行写不下的提示会自己长高；悬浮窗高度小于内容时，多出的部分
+        就叠到记牌器行上（用户报的“提示条压在记牌器行上”）。
+        """
+        with open(OVERLAY, encoding="utf-8") as fh:
+            src = fh.read()
+        i = src.find("Text(\n                    hint,")
+        self.assertGreater(i, 0, "提示条的 Text(hint…) 找不到了：布局被重写过，需重测")
+        block = src[i:i + 900]
+        self.assertIn("maxLines:", block,
+                      "提示条没有行数上限：长提示会把记牌器行压住（D29 复发）")
+        self.assertIn("TextOverflow.ellipsis", block,
+                      "提示条没有省略号：超长按默认行为会裁切或换行长高")
+
     def test_hand_row_survives_every_phase_ui(self):
         """D25：三个阶段专用 UI 都不得把手牌块挤掉。
 
