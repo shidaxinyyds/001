@@ -289,6 +289,11 @@ _PHASE_DISC_MIN_AREA = 300          # 2000x899 基准像素，跨分辨率按面
 _PHASE_DISC_ROW_Y = (0.50, 0.80)
 _PHASE_DISC_TRIPLE_GAP = (0.055, 0.18)   # 相邻两盘中心距 / 屏宽
 _PHASE_DISC_ROW_SPAN = 0.45              # 三盘首尾总跨幅 / 屏宽
+# 三盘行的**中心**允许范围（归一化 x）。选门三盘是居中 modal UI，不靠屏幕右边；
+# 不加这条时，「右侧一排圆形UI」（对手头像 + 金豆徽章）同高/等大/异色就能凑过判据
+# （实测途游局中帧 r26 行中心 0.751 被误判为定缺页；真定缺页最大偏移 0.115）。
+# 双盘分支早有同类型的 `_PHASE_DISC_PAIR_MID`，三盘分支是漏了。
+_PHASE_DISC_ROW_MID = (0.28, 0.72)
 # 只找到两盘时的加严条件：必须是「居中那一排被挡住一个」，不是「桌面上随便
 # 两个圆形色块」。实测腾讯 s_d0bf 帧（万盘被悬浮窗挡住）两盘中点 0.555、
 # 节距 0.102、纵向差 0.002；而雀神/蜀山局中帧的误配两盘中点 0.725/0.738。
@@ -441,8 +446,20 @@ def _phase_disc_row_in_band(row: List[Dict[str, float]]) -> bool:
     if len(row) >= 3:
         ys = [d["y"] for d in row]
         span = row[-1]["x"] - row[0]["x"]
+        # 行中心必须靠近屏幕横轴中线：三个选门盘是方位盘正下方那排 **居中 modal UI**。
+        # 双盘分支早就有 `_PHASE_DISC_PAIR_MID` 这条居中约束，三盘分支始终没加，于是
+        # 「右侧一排圆形UI」（对手头像 + 金豆徽章）只要同高、等大、异色就能凑过判据。
+        # 实测（正例 6 张真定缺页 + 反例局中误报帧）：
+        #   真定缺页行中心  jj 0.498 / 腾讯 0.505 / 途游 0.385
+        #   局中误报 r26   行中心 0.751（三盘 x=0.633/0.756/0.869，整排偏右）
+        # 取 (0.28, 0.72)：真页最大偏离 0.115（途游），误报帧超出 0.031，两边都有余量。
+        # 诚实边界：另一张误报帧 r57 的行中心≈0.50、盘宽与真页同量级，**这条挡不住**；
+        # 它需要定缺提示文字或可靠的新一局信号（实测结论见
+        # `localtest/probe_disc_row_detail.py` 尾部）。
+        mid = (row[0]["x"] + row[-1]["x"]) / 2.0
         return (_PHASE_DISC_ROW_Y[0] <= sum(ys) / len(ys) <= _PHASE_DISC_ROW_Y[1]
-                and span <= _PHASE_DISC_ROW_SPAN)
+                and span <= _PHASE_DISC_ROW_SPAN
+                and _PHASE_DISC_ROW_MID[0] <= mid <= _PHASE_DISC_ROW_MID[1])
     if len(row) == 2:
         dy = abs(row[1]["y"] - row[0]["y"])
         mid = (row[0]["x"] + row[1]["x"]) / 2.0

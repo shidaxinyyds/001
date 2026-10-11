@@ -157,6 +157,47 @@ class TestNongamePhase(unittest.TestCase):
                             f"（阶段滞后把局中建议误杀，A4 复发）")
         self.assertGreater(checked, 0, "没有任一帧带弃牌证据：本用例已空转")
 
+    def test_offcenter_disc_row_is_not_a_dingque_page(self):
+        """A7（修了一半）：偏右的一排圆形UI 不得被当成定缺选门三盘。
+
+        途游局中帧 r26 的三盘 x=0.633/0.756/0.869（行中心 0.751）其实是**对手头像
+        + 金豆徽章**那一排，同高、等大、异色，就凑过了旧判据 —— 而误判定缺页会触发
+        「命中阶段即清池」，把整局牌河/断门/本家缺门一起抹掉。
+
+        钉两头：偏右的误报帧必须被拒；三张真定缺页（行中心 0.385~0.505）必须仍通过
+        —— 只钉前一头就是拿一个错换一个对。
+        """
+        from recognition.tencent_grid_detector import (
+            _find_phase_discs, _phase_disc_row, _phase_disc_row_in_band,
+            _PHASE_DISC_TRIPLE_GAP, _PHASE_DISC_ROW_MID)
+
+        self.assertEqual(_PHASE_DISC_ROW_MID, (0.28, 0.72),
+                         "居中约束的窗口被改了：下面的正/反例判定需要重测")
+
+        def row_of(rel):
+            img = cv2.imread(os.path.join(HERE, rel))
+            if img is None:
+                self.skipTest(f"缺素材 {rel}")
+            row = _phase_disc_row(_find_phase_discs(img), _PHASE_DISC_TRIPLE_GAP, 0.035)
+            return row, (row[0]["x"] + row[-1]["x"]) / 2.0 if len(row) >= 3 else None
+
+        # 反例：偏右的头像那排
+        row, mid = row_of("shots_tuyou/r26_4cda06de.jpg")
+        self.assertIsNotNone(mid, "r26 不再配成三盘行：本用例前提已变，需重测")
+        self.assertGreater(mid, _PHASE_DISC_ROW_MID[1],
+                           f"r26 行中心 {mid:.3f} 不再偏右，本用例已测不到东西")
+        self.assertFalse(_phase_disc_row_in_band(row),
+                         f"偏右的圆形UI排（中心 {mid:.3f}）仍被当成定缺三盘（A7 复发）")
+
+        # 正例：三张真定缺页不得因此退化为漏判
+        for rel in ("shots_phase_fix/dq_jj_01.jpg",
+                    "shots_phase_fix/dq_tencent_01.jpg",
+                    "shots_phase_fix/dq_tuyou_01.jpg"):
+            row, mid = row_of(rel)
+            self.assertIsNotNone(mid, f"{rel} 配不出三盘行：前提已变")
+            self.assertTrue(_phase_disc_row_in_band(row),
+                            f"真定缺页 {rel}（行中心 {mid:.3f}）被居中约束误杀")
+
     def test_mutant_without_the_gate_is_caught(self):
         """变异对照：证明「拿掉闸门后这条确实会坏」，而不是它本来就不会发生。
 
